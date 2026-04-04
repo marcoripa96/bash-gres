@@ -12,26 +12,42 @@ export const tailCommand: Command = {
     const nStr = parsed.n !== undefined ? String(parsed.n) : "10";
     const paths = parsed._.map(String);
 
-    const text =
+    const sources =
       paths.length > 0
-        ? await ctx.fs.readFile(ctx.resolve(paths[0]))
-        : pipedInput;
+        ? await Promise.all(
+            paths.map(async (path) => ({
+              label: path === "-" ? "standard input" : path,
+              text: path === "-" ? pipedInput : await ctx.fs.readFile(ctx.resolve(path)),
+            })),
+          )
+        : [{ label: "standard input", text: pipedInput }];
 
-    const allLines = text.split("\n");
-    // Remove trailing empty element from trailing newline
-    if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
-      allLines.pop();
-    }
+    const sections = sources.map(({ label, text }) => {
+      const result = selectTail(text, nStr);
+      if (sources.length === 1) {
+        return result;
+      }
+      return `==> ${label} <==\n${result}`;
+    });
 
-    let result: string[];
-    if (nStr.startsWith("+")) {
-      // tail -n +N: starting from line N (1-based)
-      const lineNum = parseInt(nStr.slice(1), 10);
-      result = allLines.slice(Math.max(0, lineNum - 1));
-    } else {
-      const n = parseInt(nStr, 10);
-      result = allLines.slice(-n);
-    }
-    return ok(result.join("\n") + (result.length ? "\n" : ""));
+    return ok(sections.join(sources.length > 1 ? "\n" : ""));
   },
 };
+
+function selectTail(text: string, nStr: string): string {
+  const lines = splitLines(text);
+  if (nStr.startsWith("+")) {
+    const lineNum = parseInt(nStr.slice(1), 10);
+    return lines.slice(Math.max(0, lineNum - 1)).join("");
+  }
+
+  const n = parseInt(nStr, 10);
+  if (n <= 0) {
+    return "";
+  }
+  return lines.slice(-n).join("");
+}
+
+function splitLines(text: string): string[] {
+  return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}

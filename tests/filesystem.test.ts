@@ -273,6 +273,61 @@ describe("PgFileSystem", () => {
       const s = await fs.lstat("/link.txt");
       expect(s.isSymbolicLink).toBe(true);
     });
+
+    it("preserves relative symlink targets", async () => {
+      await fs.mkdir("/dir", { recursive: true });
+      await fs.mkdir("/links", { recursive: true });
+      await fs.writeFile("/dir/target.txt", "real content");
+      await fs.symlink("../dir/target.txt", "/links/link.txt");
+
+      expect(await fs.readlink("/links/link.txt")).toBe("../dir/target.txt");
+      expect(await fs.readFile("/links/link.txt")).toBe("real content");
+    });
+
+    it("readdir follows symlinks to directories", async () => {
+      await fs.mkdir("/real", { recursive: true });
+      await fs.writeFile("/real/file.txt", "data");
+      await fs.symlink("/real", "/alias");
+
+      expect(await fs.readdir("/alias")).toEqual(["file.txt"]);
+    });
+
+    it("realpath resolves relative symlinks", async () => {
+      await fs.mkdir("/dir", { recursive: true });
+      await fs.mkdir("/links", { recursive: true });
+      await fs.writeFile("/dir/target.txt", "real content");
+      await fs.symlink("../dir/target.txt", "/links/link.txt");
+
+      expect(await fs.realpath("/links/link.txt")).toBe("/dir/target.txt");
+    });
+  });
+
+  describe("chmod + utimes", () => {
+    it("chmod follows symlinks and updates the target", async () => {
+      await fs.writeFile("/target.txt", "real content");
+      await fs.symlink("/target.txt", "/link.txt");
+
+      await fs.chmod("/link.txt", 0o600);
+
+      expect((await fs.stat("/target.txt")).mode).toBe(0o600);
+      expect((await fs.lstat("/link.txt")).mode).toBe(0o777);
+    });
+
+    it("utimes follows symlinks and leaves the link metadata unchanged", async () => {
+      await fs.writeFile("/target.txt", "real content");
+      await fs.symlink("/target.txt", "/link.txt");
+      const linkBefore = await fs.lstat("/link.txt");
+      const targetTime = new Date("2024-01-01T00:00:00.000Z");
+
+      await fs.utimes("/link.txt", targetTime, targetTime);
+
+      expect((await fs.stat("/target.txt")).mtime.getTime()).toBe(
+        targetTime.getTime(),
+      );
+      expect((await fs.lstat("/link.txt")).mtime.getTime()).toBe(
+        linkBefore.mtime.getTime(),
+      );
+    });
   });
 
   describe("workspace isolation", () => {

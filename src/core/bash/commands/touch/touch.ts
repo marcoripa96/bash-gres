@@ -11,7 +11,7 @@ export const touchCommand: Command = {
       if (exists) {
         await ctx.fs.utimes(path, new Date(), new Date());
       } else {
-        await ctx.fs.writeFile(path, "", { recursive: true });
+        await ctx.fs.writeFile(path, "");
       }
     }
     return ok("");

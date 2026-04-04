@@ -6,14 +6,17 @@ export const statCommand: Command = {
   async execute(args, ctx) {
     if (args.length === 0) return err("stat: missing operand");
     const path = ctx.resolve(args[0]);
-    const s = await ctx.fs.stat(path);
+    const s = await ctx.fs.lstat(path);
     const type = s.isDirectory
       ? "directory"
       : s.isSymbolicLink
         ? "symbolic link"
         : "regular file";
+    const fileLabel = s.isSymbolicLink
+      ? `  File: ${args[0]} -> ${await ctx.fs.readlink(path)}`
+      : `  File: ${args[0]}`;
     const lines = [
-      `  File: ${args[0]}`,
+      fileLabel,
       `  Size: ${s.size}\tType: ${type}`,
       `  Mode: ${s.mode.toString(8).padStart(4, "0")}`,
       `Modify: ${s.mtime.toISOString()}`,

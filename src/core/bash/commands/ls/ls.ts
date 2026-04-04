@@ -12,41 +12,75 @@ export const lsCommand: Command = {
     });
     const longFormat = !!parsed.l;
     const showAll = !!parsed.a;
-    const paths = parsed._.map(String);
+    const targets = parsed._.map(String);
+    const requested = targets.length > 0 ? targets : [ctx.cwd];
+    const multipleTargets = requested.length > 1;
 
-    const targets = paths.length > 0 ? paths : [ctx.cwd];
-
-    // When multiple targets are given and some are files, list them individually
-    if (targets.length > 1) {
-      const allLines: string[] = [];
-      for (const t of targets) {
-        const resolved = ctx.resolve(t);
-        const s = await ctx.fs.stat(resolved);
-        if (s.isDirectory) {
-          allLines.push(...(await lsDir(ctx, resolved, longFormat, showAll)));
-        } else {
-          const name = resolved.split("/").pop() || resolved;
-          allLines.push(longFormat ? formatLong(name, s) : name);
-        }
-      }
-      return ok(allLines.join("\n") + (allLines.length ? "\n" : ""));
+    const sections: string[] = [];
+    for (const targetArg of requested) {
+      sections.push(
+        await renderTarget(ctx, targetArg, {
+          longFormat,
+          showAll,
+          multipleTargets,
+        }),
+      );
     }
 
-    const target = ctx.resolve(targets[0]);
-
-    const stat = await ctx.fs.stat(target);
-    if (!stat.isDirectory) {
-      const name = target.split("/").pop() || target;
-      if (longFormat) {
-        return ok(formatLong(name, stat) + "\n");
-      }
-      return ok(name + "\n");
-    }
-
-    const lines = await lsDir(ctx, target, longFormat, showAll);
-    return ok(lines.join("\n") + (lines.length ? "\n" : ""));
+    return ok(sections.join(multipleTargets ? "\n\n" : "") + "\n");
   },
 };
+
+async function renderTarget(
+  ctx: CommandContext,
+  targetArg: string,
+  options: {
+    longFormat: boolean;
+    showAll: boolean;
+    multipleTargets: boolean;
+  },
+): Promise<string> {
+  const resolved = ctx.resolve(targetArg);
+  const lstat = await ctx.fs.lstat(resolved);
+  const stat = lstat.isSymbolicLink ? await ctx.fs.stat(resolved) : lstat;
+
+  const listDirectory = options.longFormat ? lstat.isDirectory : stat.isDirectory;
+  if (!listDirectory) {
+    return await formatSingleEntry(ctx, targetArg, resolved, lstat, options.longFormat);
+  }
+
+  const lines = await lsDir(ctx, resolved, options.longFormat, options.showAll);
+  if (!options.multipleTargets) {
+    return lines.join("\n");
+  }
+
+  return lines.length > 0 ? `${targetArg}:\n${lines.join("\n")}` : `${targetArg}:`;
+}
+
+async function formatSingleEntry(
+  ctx: CommandContext,
+  displayName: string,
+  resolved: string,
+  lstat: {
+    isDirectory: boolean;
+    isSymbolicLink: boolean;
+    mode: number;
+    size: number;
+    mtime: Date;
+  },
+  longFormat: boolean,
+): Promise<string> {
+  if (!longFormat) {
+    return displayName;
+  }
+
+  if (lstat.isSymbolicLink) {
+    const target = await ctx.fs.readlink(resolved);
+    return formatLong(`${displayName} -> ${target}`, lstat);
+  }
+
+  return formatLong(displayName, lstat);
+}
 
 async function lsDir(
   ctx: CommandContext,
@@ -57,12 +91,12 @@ async function lsDir(
   const entries = await ctx.fs.readdirWithTypes(target);
   const filtered = showAll
     ? entries
-    : entries.filter((e) => !e.name.startsWith("."));
+    : entries.filter((entry) => !entry.name.startsWith("."));
 
   if (!longFormat) {
     const names: string[] = [];
     if (showAll) names.push(".", "..");
-    names.push(...filtered.map((e) => e.name));
+    names.push(...filtered.map((entry) => entry.name));
     return names;
   }
 
@@ -74,19 +108,18 @@ async function lsDir(
       target === "/"
         ? "/"
         : target.split("/").slice(0, -1).join("/") || "/";
-    try {
-      const parentStat = await ctx.fs.stat(parentDir);
-      lines.push(formatLong("..", parentStat));
-    } catch {
-      lines.push(formatLong("..", dirStat));
-    }
+    const parentStat = await ctx.fs.stat(parentDir);
+    lines.push(formatLong("..", parentStat));
   }
 
   for (const entry of filtered) {
-    const entryPath =
-      target === "/" ? `/${entry.name}` : `${target}/${entry.name}`;
-    const s = await ctx.fs.lstat(entryPath);
-    lines.push(formatLong(entry.name, s));
+    const entryPath = target === "/" ? `/${entry.name}` : `${target}/${entry.name}`;
+    const entryStat = await ctx.fs.lstat(entryPath);
+    const displayName = entry.isSymbolicLink
+      ? `${entry.name} -> ${await ctx.fs.readlink(entryPath)}`
+      : entry.name;
+    lines.push(formatLong(displayName, entryStat));
   }
+
   return lines;
 }

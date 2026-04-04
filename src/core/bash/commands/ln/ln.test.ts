@@ -41,6 +41,18 @@ describe("bash: ln & readlink", () => {
       const r = await ctx.bash.execute("ln -s /realdir /linkdir");
       expect(r.exitCode).toBe(0);
     });
+
+    it("preserves and resolves relative symlink targets", async () => {
+      await ctx.fs.mkdir("/dir");
+      await ctx.fs.mkdir("/links");
+      await ctx.fs.writeFile("/dir/target.txt", "content");
+
+      const r = await ctx.bash.execute("ln -s ../dir/target.txt /links/link.txt");
+
+      expect(r.exitCode).toBe(0);
+      expect(await ctx.fs.readlink("/links/link.txt")).toBe("../dir/target.txt");
+      expect(await ctx.fs.readFile("/links/link.txt")).toBe("content");
+    });
   });
 
   describe("ln (hard link)", () => {

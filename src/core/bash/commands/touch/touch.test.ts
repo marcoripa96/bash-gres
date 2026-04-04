@@ -35,10 +35,11 @@ describe("bash: touch", () => {
     expect(after.getTime()).toBeGreaterThanOrEqual(before.getTime());
   });
 
-  it("creates file in nested path (auto-creates parents)", async () => {
+  it("fails when parent directories do not exist", async () => {
     const r = await ctx.bash.execute("touch /deep/nested/file.txt");
-    expect(r.exitCode).toBe(0);
-    expect(await ctx.fs.exists("/deep/nested/file.txt")).toBe(true);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("no such file or directory");
+    expect(await ctx.fs.exists("/deep/nested/file.txt")).toBe(false);
   });
 
   it("fails on missing operand", async () => {

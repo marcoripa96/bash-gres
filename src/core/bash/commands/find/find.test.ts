@@ -23,6 +23,13 @@ describe("bash: find", () => {
     expect(r.stdout).toContain(".");
   });
 
+  it("accepts a file path as the search root", async () => {
+    await ctx.fs.writeFile("/file.txt", "x");
+    const r = await ctx.bash.execute("find /file.txt");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("/file.txt\n");
+  });
+
   describe("-name pattern", () => {
     it("filters by glob pattern", async () => {
       await ctx.fs.mkdir("/project/src", { recursive: true });
@@ -43,6 +50,12 @@ describe("bash: find", () => {
       const r = await ctx.bash.execute("find /dir -name target.txt");
       expect(r.stdout).toContain("target.txt");
       expect(r.stdout).not.toContain("other.txt");
+    });
+
+    it("matches the search root when its name matches", async () => {
+      const r = await ctx.bash.execute("find . -name .");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe(".\n");
     });
 
     it("uses ? for single character wildcard", async () => {
@@ -94,6 +107,13 @@ describe("bash: find", () => {
       expect(r.stdout).toContain("link.txt");
       expect(r.stdout).not.toContain("real.txt");
     });
+
+    it("applies type filters to a file search root", async () => {
+      await ctx.fs.writeFile("/file.txt", "x");
+      const r = await ctx.bash.execute("find /file.txt -type f");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("/file.txt\n");
+    });
   });
 
   describe("combined -name and -type", () => {
@@ -122,6 +142,20 @@ describe("bash: find", () => {
       await ctx.fs.writeFile("/dir/file.txt", "x");
       const r = await ctx.bash.execute("find /dir -name file.txt");
       expect(r.stdout).toContain("/dir/file.txt");
+    });
+  });
+
+  describe("invalid arguments", () => {
+    it("fails when -name is missing a pattern", async () => {
+      const r = await ctx.bash.execute("find / -name");
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("missing argument to `-name'");
+    });
+
+    it("fails when -type has an invalid value", async () => {
+      const r = await ctx.bash.execute("find / -type z");
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("Unknown argument to -type: z");
     });
   });
 });

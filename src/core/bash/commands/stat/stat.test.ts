@@ -39,6 +39,17 @@ describe("bash: stat", () => {
     expect(r.stdout).toMatch(/Modify: \d{4}-\d{2}-\d{2}T/);
   });
 
+  it("shows symlink info without dereferencing the link", async () => {
+    await ctx.fs.writeFile("/target.txt", "data");
+    await ctx.fs.symlink("/target.txt", "/link.txt");
+
+    const r = await ctx.bash.execute("stat /link.txt");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("File: /link.txt -> /target.txt");
+    expect(r.stdout).toContain("symbolic link");
+  });
+
   it("fails on missing operand", async () => {
     const r = await ctx.bash.execute("stat");
     expect(r.exitCode).toBe(1);

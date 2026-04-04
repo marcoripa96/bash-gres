@@ -50,6 +50,31 @@ describe("bash: mv", () => {
     expect(await ctx.fs.readFile("/app/package.json")).toBe("{}");
   });
 
+  it("moves multiple sources into an existing directory", async () => {
+    await ctx.fs.writeFile("/a.txt", "a");
+    await ctx.fs.writeFile("/b.txt", "b");
+    await ctx.fs.mkdir("/dest");
+
+    const r = await ctx.bash.execute("mv /a.txt /b.txt /dest");
+
+    expect(r.exitCode).toBe(0);
+    expect(await ctx.fs.exists("/a.txt")).toBe(false);
+    expect(await ctx.fs.exists("/b.txt")).toBe(false);
+    expect(await ctx.fs.readFile("/dest/a.txt")).toBe("a");
+    expect(await ctx.fs.readFile("/dest/b.txt")).toBe("b");
+  });
+
+  it("fails when multiple sources target a non-directory", async () => {
+    await ctx.fs.writeFile("/a.txt", "a");
+    await ctx.fs.writeFile("/b.txt", "b");
+    await ctx.fs.writeFile("/target.txt", "c");
+
+    const r = await ctx.bash.execute("mv /a.txt /b.txt /target.txt");
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("Not a directory");
+  });
+
   it("fails on missing operand", async () => {
     const r = await ctx.bash.execute("mv /only-one");
     expect(r.exitCode).toBe(1);

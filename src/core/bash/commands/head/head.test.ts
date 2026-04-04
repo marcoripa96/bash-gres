@@ -49,6 +49,16 @@ describe("bash: head", () => {
     expect(r.stdout).toBe("a\nb\n");
   });
 
+  it("formats multiple files like native head", async () => {
+    await ctx.fs.writeFile("/a.txt", "1\n2\n3\n");
+    await ctx.fs.writeFile("/b.txt", "x\ny\n");
+
+    const r = await ctx.bash.execute("head /a.txt /b.txt");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("==> /a.txt <==\n1\n2\n3\n\n==> /b.txt <==\nx\ny\n");
+  });
+
   it("handles file with fewer lines than default", async () => {
     await ctx.fs.writeFile("/short.txt", "one\ntwo\n");
     const r = await ctx.bash.execute("head /short.txt");

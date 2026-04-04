@@ -39,7 +39,7 @@ describe("bash: ls", () => {
     await ctx.fs.writeFile("/single.txt", "data");
     const r = await ctx.bash.execute("ls /single.txt");
     expect(r.exitCode).toBe(0);
-    expect(r.stdout.trim()).toBe("single.txt");
+    expect(r.stdout.trim()).toBe("/single.txt");
   });
 
   it("lists multiple paths", async () => {
@@ -49,6 +49,41 @@ describe("bash: ls", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("x.txt");
     expect(r.stdout).toContain("y.txt");
+  });
+
+  it("formats multiple directory targets like native ls", async () => {
+    await ctx.fs.writeFile("/a.txt", "a");
+    await ctx.fs.mkdir("/dir1");
+    await ctx.fs.mkdir("/dir2");
+    await ctx.fs.writeFile("/dir1/x.txt", "x");
+    await ctx.fs.writeFile("/dir2/y.txt", "y");
+
+    const r = await ctx.bash.execute("ls /a.txt /dir1 /dir2");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("/a.txt\n\n/dir1:\nx.txt\n\n/dir2:\ny.txt\n");
+  });
+
+  it("lists contents when target is a symlink to a directory", async () => {
+    await ctx.fs.mkdir("/real");
+    await ctx.fs.writeFile("/real/inside.txt", "data");
+    await ctx.fs.symlink("/real", "/linkdir");
+
+    const r = await ctx.bash.execute("ls /linkdir");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("inside.txt\n");
+  });
+
+  it("shows symlink metadata in long format for directory symlinks", async () => {
+    await ctx.fs.mkdir("/real");
+    await ctx.fs.symlink("/real", "/linkdir");
+
+    const r = await ctx.bash.execute("ls -l /linkdir");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("/linkdir -> /real");
+    expect(r.stdout.startsWith("l")).toBe(true);
   });
 
   it("fails on non-existent path", async () => {

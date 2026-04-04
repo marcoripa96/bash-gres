@@ -151,7 +151,7 @@ export class PgFileSystem {
         throw new FsError("ELOOP", "too many levels of symbolic links", path);
       return this.resolveSymlink(
         tx,
-        normalizePath(node.symlink_target),
+        this.resolveLinkTargetPath(path, node.symlink_target),
         maxDepth - 1,
       );
     }
@@ -170,11 +170,18 @@ export class PgFileSystem {
         throw new FsError("ELOOP", "too many levels of symbolic links", path);
       return this.resolveSymlinkMeta(
         tx,
-        normalizePath(node.symlink_target),
+        this.resolveLinkTargetPath(path, node.symlink_target),
         maxDepth - 1,
       );
     }
     return node;
+  }
+
+  private resolveLinkTargetPath(linkPath: string, target: string): string {
+    if (target.startsWith("/")) {
+      return normalizePath(target);
+    }
+    return this.resolvePath(parentPath(linkPath), target);
   }
 
   private validateFileSize(content: string | Uint8Array): void {
@@ -634,7 +641,7 @@ export class PgFileSystem {
         );
       return this.internalRealpath(
         tx,
-        normalizePath(node.symlink_target),
+        this.resolveLinkTargetPath(path, node.symlink_target),
         maxDepth - 1,
       );
     }
@@ -651,14 +658,19 @@ export class PgFileSystem {
 
   async readdir(path: string): Promise<string[]> {
     return this.withWorkspace(async (tx) => {
-      return this.internalReaddir(tx, normalizePath(path));
+      const p = normalizePath(path);
+      const node = await this.resolveSymlinkMeta(tx, p);
+      if (node.node_type !== "directory") {
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
+      }
+      return this.internalReaddir(tx, ltreeToPath(node.path));
     });
   }
 
   async readdirWithTypes(path: string): Promise<DirentEntry[]> {
     return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
-      const node = await this.getNodeMeta(tx, p);
+      const node = await this.resolveSymlinkMeta(tx, p);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -881,13 +893,7 @@ export class PgFileSystem {
     }
     return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
-      const node = await this.getNodeMeta(tx, p);
-      if (!node)
-        throw new FsError(
-          "ENOENT",
-          "no such file or directory, chmod",
-          path,
-        );
+      const node = await this.resolveSymlinkMeta(tx, p);
       await tx.query(
         `UPDATE fs_nodes SET mode = $1 WHERE workspace_id = $2 AND id = $3`,
         [mode, this.workspaceId, node.id],
@@ -898,13 +904,7 @@ export class PgFileSystem {
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
     return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
-      const node = await this.getNodeMeta(tx, p);
-      if (!node)
-        throw new FsError(
-          "ENOENT",
-          "no such file or directory, utimes",
-          path,
-        );
+      const node = await this.resolveSymlinkMeta(tx, p);
       await tx.query(
         `UPDATE fs_nodes SET mtime = $1 WHERE workspace_id = $2 AND id = $3`,
         [mtime, this.workspaceId, node.id],
@@ -916,15 +916,17 @@ export class PgFileSystem {
 
   async symlink(target: string, linkPath: string): Promise<void> {
     return this.withWorkspace(async (tx) => {
-      const normalizedTarget = normalizePath(target);
       const p = normalizePath(linkPath);
 
-      if (normalizedTarget.length > 4096) {
+      if (target.includes("\0")) {
+        throw new Error("Paths cannot contain null bytes");
+      }
+
+      if (target.length > 4096) {
         throw new Error(
           "Symlink target exceeds maximum length of 4096 characters",
         );
       }
-      this.validatePathDepth(normalizedTarget);
 
       const parentPosix = parentPath(p);
       const parent = await this.getNodeMeta(tx, parentPosix);
@@ -935,13 +937,16 @@ export class PgFileSystem {
           linkPath,
         );
 
+      this.validatePathDepth(this.resolveLinkTargetPath(p, target));
+
       const name = fileName(p);
       const lt = pathToLtree(p, this.workspaceId);
+      const sizeBytes = new TextEncoder().encode(target).byteLength;
 
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, symlink_target, mode)
-         VALUES ($1, $2, $3, 'symlink', $4::ltree, $5, $6)`,
-        [this.workspaceId, parent.id, name, lt, normalizedTarget, 0o777],
+        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, symlink_target, mode, size_bytes)
+         VALUES ($1, $2, $3, 'symlink', $4::ltree, $5, $6, $7)`,
+        [this.workspaceId, parent.id, name, lt, target, 0o777, sizeBytes],
       );
     });
   }

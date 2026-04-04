@@ -4,6 +4,7 @@ import { setupBash } from "../../../../../tests/bash/_setup.js";
 describe("bash: tail", () => {
   const ctx = setupBash("bash-tail");
 
+  const tenLines = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
   const twentyLines = Array.from({ length: 20 }, (_, i) => String(i + 1)).join("\n") + "\n";
 
   it("shows last 10 lines by default", async () => {
@@ -48,6 +49,23 @@ describe("bash: tail", () => {
     expect(r.stdout).toBe("d\ne\n");
   });
 
+  it("-n 0 returns no lines", async () => {
+    await ctx.fs.writeFile("/data.txt", tenLines);
+    const r = await ctx.bash.execute("tail -n 0 /data.txt");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("formats multiple files like native tail", async () => {
+    await ctx.fs.writeFile("/a.txt", "1\n2\n3\n");
+    await ctx.fs.writeFile("/b.txt", "x\ny\n");
+
+    const r = await ctx.bash.execute("tail /a.txt /b.txt");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("==> /a.txt <==\n1\n2\n3\n\n==> /b.txt <==\nx\ny\n");
+  });
+
   it("handles file with fewer lines than default", async () => {
     await ctx.fs.writeFile("/short.txt", "one\ntwo\n");
     const r = await ctx.bash.execute("tail /short.txt");
@@ -63,6 +81,6 @@ describe("bash: tail", () => {
   it("handles file without trailing newline", async () => {
     await ctx.fs.writeFile("/noeol.txt", "line1\nline2");
     const r = await ctx.bash.execute("tail -n 1 /noeol.txt");
-    expect(r.stdout).toBe("line2\n");
+    expect(r.stdout).toBe("line2");
   });
 });

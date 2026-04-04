@@ -13,24 +13,36 @@ export const headCommand: Command = {
     const n = parseInt(nStr, 10);
     const paths = parsed._.map(String);
 
-    const text =
+    const sources =
       paths.length > 0
-        ? await ctx.fs.readFile(ctx.resolve(paths[0]))
-        : pipedInput;
+        ? await Promise.all(
+            paths.map(async (path) => ({
+              label: path === "-" ? "standard input" : path,
+              text: path === "-" ? pipedInput : await ctx.fs.readFile(ctx.resolve(path)),
+            })),
+          )
+        : [{ label: "standard input", text: pipedInput }];
 
-    const allLines = text.split("\n");
-    // Remove trailing empty element from trailing newline
-    if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
-      allLines.pop();
-    }
+    const sections = sources.map(({ label, text }) => {
+      const result = selectHead(text, n);
+      if (sources.length === 1) {
+        return result;
+      }
+      return `==> ${label} <==\n${result}`;
+    });
 
-    let result: string[];
-    if (n < 0) {
-      // head -n -N: all lines except the last N
-      result = allLines.slice(0, Math.max(0, allLines.length + n));
-    } else {
-      result = allLines.slice(0, n);
-    }
-    return ok(result.join("\n") + (result.length ? "\n" : ""));
+    return ok(sections.join(sources.length > 1 ? "\n" : ""));
   },
 };
+
+function selectHead(text: string, n: number): string {
+  const lines = splitLines(text);
+  if (n < 0) {
+    return lines.slice(0, Math.max(0, lines.length + n)).join("");
+  }
+  return lines.slice(0, Math.max(0, n)).join("");
+}
+
+function splitLines(text: string): string[] {
+  return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
