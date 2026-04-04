@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TEST_ADAPTERS } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
-import { PgFileSystem } from "../src/core/filesystem.js";
+import { PgFileSystem } from "../lib/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
 
 describe.each(TEST_ADAPTERS)("PgFileSystem: native parity [%s]", (_name, factory) => {

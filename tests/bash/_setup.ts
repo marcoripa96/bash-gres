@@ -1,7 +1,7 @@
 import { beforeAll, afterAll, beforeEach } from "vitest";
 import { ensureSetup } from "../global-setup.js";
-import { PgFileSystem } from "../../src/core/filesystem.js";
-import { BashInterpreter } from "../../src/core/bash/interpreter.js";
+import { PgFileSystem } from "../../lib/core/filesystem.js";
+import { BashInterpreter } from "../../lib/core/bash/interpreter.js";
 import type { SqlClient } from "../helpers.js";
 import type { AdapterFactory } from "../helpers.js";
 

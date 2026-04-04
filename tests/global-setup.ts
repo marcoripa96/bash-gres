@@ -1,5 +1,5 @@
 import { createTestClient } from "./helpers.js";
-import { setup } from "../src/core/setup.js";
+import { setup } from "../lib/core/setup.js";
 
 let initialized = false;
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { TEST_ADAPTERS } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
-import { PgFileSystem } from "../src/core/filesystem.js";
+import { PgFileSystem } from "../lib/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
 
 describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {

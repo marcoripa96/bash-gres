@@ -5,7 +5,7 @@ import {
   normalizePath,
   pathToLtree,
   ltreeToPath,
-} from "../src/core/path-encoding.js";
+} from "../lib/core/path-encoding.js";
 
 describe("encodeLabel", () => {
   it("passes through alphanumeric and hyphens", () => {

@@ -1,8 +1,8 @@
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { createPostgresClient } from "../src/adapters/postgres/index.js";
-import { createDrizzleClient } from "../src/adapters/drizzle/adapter.js";
-import type { SqlClient } from "../src/core/types.js";
+import { createPostgresClient } from "../lib/adapters/postgres/index.js";
+import { createDrizzleClient } from "../lib/adapters/drizzle/adapter.js";
+import type { SqlClient } from "../lib/core/types.js";
 
 // Re-export for convenience
 export type { SqlClient };

@@ -20,24 +20,24 @@ The core operates on a `SqlClient` interface (`query(text, params)` + `transacti
 
 Then pass the resulting `SqlClient` to `PgFileSystem({ db: client })` and `setup(client)`. Core has zero knowledge of any specific driver.
 
-The Drizzle adapter (`src/adapters/drizzle/adapter.ts`) converts `$1, $2` positional params into Drizzle's `sql` tagged template.
+The Drizzle adapter (`lib/adapters/drizzle/adapter.ts`) converts `$1, $2` positional params into Drizzle's `sql` tagged template.
 
 ### Key modules
 
-- `src/core/types.ts` — `SqlClient`, `FsError`, `SqlError`, all option/result interfaces
-- `src/core/filesystem.ts` — `PgFileSystem` class with all fs operations
-- `src/core/setup.ts` — idempotent DDL: extensions, table, indexes, RLS, optional pgvector
-- `src/core/path-encoding.ts` — path <-> ltree conversion using `_xHEX_` delimited encoding
-- `src/core/search.ts` — BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
-- `src/core/bash/interpreter.ts` — `BashInterpreter` class, orchestration (pipes, redirects, globs)
-- `src/core/bash/types.ts` — `Command` interface, `CommandContext`, `ok`/`err` helpers
-- `src/core/bash/parsing.ts` — tokenizer, command parser, pipe/operator splitting
-- `src/core/bash/helpers.ts` — `matchGlob`, `formatLong` shared utilities
-- `src/core/bash/commands/<name>/<name>.ts` — one file per command, each exports a `Command`
-- `src/core/bash/commands/<name>/<name>.test.ts` — co-located tests for each command
-- `src/adapters/drizzle/adapter.ts` — converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
-- `src/adapters/drizzle/schema.ts` — Drizzle `pgTable` with all indexes (GiST, BM25, partial)
-- `src/adapters/postgres/index.ts` — wraps `postgres.Sql` into `SqlClient`
+- `lib/core/types.ts` — `SqlClient`, `FsError`, `SqlError`, all option/result interfaces
+- `lib/core/filesystem.ts` — `PgFileSystem` class with all fs operations
+- `lib/core/setup.ts` — idempotent DDL: extensions, table, indexes, RLS, optional pgvector
+- `lib/core/path-encoding.ts` — path <-> ltree conversion using `_xHEX_` delimited encoding
+- `lib/core/search.ts` — BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
+- `lib/core/bash/interpreter.ts` — `BashInterpreter` class, orchestration (pipes, redirects, globs)
+- `lib/core/bash/types.ts` — `Command` interface, `CommandContext`, `ok`/`err` helpers
+- `lib/core/bash/parsing.ts` — tokenizer, command parser, pipe/operator splitting
+- `lib/core/bash/helpers.ts` — `matchGlob`, `formatLong` shared utilities
+- `lib/core/bash/commands/<name>/<name>.ts` — one file per command, each exports a `Command`
+- `lib/core/bash/commands/<name>/<name>.test.ts` — co-located tests for each command
+- `lib/adapters/drizzle/adapter.ts` — converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
+- `lib/adapters/drizzle/schema.ts` — Drizzle `pgTable` with all indexes (GiST, BM25, partial)
+- `lib/adapters/postgres/index.ts` — wraps `postgres.Sql` into `SqlClient`
 
 ## Database
 

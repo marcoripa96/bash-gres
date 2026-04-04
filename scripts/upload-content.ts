@@ -1,6 +1,6 @@
-import { PgFileSystem } from "../src/core/filesystem.js";
-import { setup } from "../src/core/setup.js";
-import { createPostgresClient } from "../src/adapters/postgres/index.js";
+import { PgFileSystem } from "../lib/core/filesystem.js";
+import { setup } from "../lib/core/setup.js";
+import { createPostgresClient } from "../lib/adapters/postgres/index.js";
 import postgres from "postgres";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
