@@ -93,9 +93,15 @@ export interface SetupOptions {
   skipExtensions?: boolean;
 }
 
+export interface FsPermissions {
+  read?: boolean;
+  write?: boolean;
+}
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
+  permissions?: FsPermissions;
   maxFileSize?: number;
   maxReadSize?: number;
   maxFiles?: number;

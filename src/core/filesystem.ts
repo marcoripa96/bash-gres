@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import type {
   SqlClient,
   PgFileSystemOptions,
+  FsPermissions,
   FsStat,
   DirentEntry,
   MkdirOptions,
@@ -10,7 +11,8 @@ import type {
   ReadFileOptions,
   SearchResult,
 } from "./types.js";
-import { FsError } from "./types.js";
+import { FsError, SqlError } from "./types.js";
+import { readonlySqlClient } from "./readonly.js";
 import {
   pathToLtree,
   ltreeToPath,
@@ -48,6 +50,7 @@ const MAX_CP_NODES = 10_000;
 export class PgFileSystem {
   private client: SqlClient;
   readonly workspaceId: string;
+  readonly permissions: { read: boolean; write: boolean };
   private maxFileSize: number;
   private maxReadSize: number | undefined;
   private maxFiles: number;
@@ -57,7 +60,12 @@ export class PgFileSystem {
   private embeddingDimensions?: number;
 
   constructor(options: PgFileSystemOptions) {
-    this.client = options.db;
+    const perms = {
+      read: options.permissions?.read ?? true,
+      write: options.permissions?.write ?? true,
+    };
+    this.permissions = perms;
+    this.client = perms.write ? options.db : readonlySqlClient(options.db);
     this.workspaceId = options.workspaceId ?? randomUUID();
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
     this.maxReadSize = options.maxReadSize;
@@ -92,6 +100,11 @@ export class PgFileSystem {
         String(this.statementTimeoutMs),
       ]);
       return fn(tx);
+    }).catch((e) => {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
     });
   }
 
