@@ -64,5 +64,9 @@
     "testcontainers": "^10.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@types/yargs-parser": "^21.0.3",
+    "yargs-parser": "^22.0.0"
   }
 }

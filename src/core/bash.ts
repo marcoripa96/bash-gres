@@ -1,3 +1,4 @@
+import yargsParser from "yargs-parser";
 import type { PgFileSystem } from "./filesystem.js";
 import type { BashResult } from "./types.js";
 
@@ -10,19 +11,61 @@ export class BashInterpreter {
   }
 
   async execute(input: string): Promise<BashResult> {
-    const commands = splitPipe(input);
-    let lastResult: BashResult = { exitCode: 0, stdout: "", stderr: "" };
+    const segments = splitOperators(input);
+    let lastExitCode = 0;
+    let fullStdout = "";
+    let fullStderr = "";
 
-    for (const cmd of commands) {
-      lastResult = await this.executeOne(cmd.trim(), lastResult.stdout);
-      if (lastResult.exitCode !== 0) break;
+    for (const { op, cmd } of segments) {
+      if (!cmd) continue;
+
+      if (op === "&&" && lastExitCode !== 0) continue;
+      if (op === "||" && lastExitCode === 0) continue;
+
+      const pipeCommands = splitPipe(cmd);
+      let pipeResult: BashResult = { exitCode: 0, stdout: "", stderr: "" };
+
+      for (const pipeCmd of pipeCommands) {
+        pipeResult = await this.executeOne(pipeCmd.trim(), pipeResult.stdout);
+        if (pipeResult.exitCode !== 0) break;
+      }
+
+      fullStdout += pipeResult.stdout;
+      fullStderr += pipeResult.stderr;
+      lastExitCode = pipeResult.exitCode;
     }
 
-    return lastResult;
+    return { exitCode: lastExitCode, stdout: fullStdout, stderr: fullStderr };
   }
 
   private resolve(path: string): string {
     return this.fs.resolvePath(this.cwd, path);
+  }
+
+  private async expandGlobs(args: string[]): Promise<string[]> {
+    const result: string[] = [];
+    for (const arg of args) {
+      if (/[*?]/.test(arg) && !arg.startsWith("-")) {
+        const dir = this.resolve(arg.includes("/") ? arg.slice(0, arg.lastIndexOf("/")) || "/" : ".");
+        const pattern = arg.includes("/") ? arg.slice(arg.lastIndexOf("/") + 1) : arg;
+        try {
+          const entries = await this.fs.readdirWithTypes(dir);
+          const matched = entries
+            .filter((e) => matchGlob(e.name, pattern))
+            .map((e) => (dir === "/" ? `/${e.name}` : `${dir}/${e.name}`));
+          if (matched.length > 0) {
+            result.push(...matched.sort());
+          } else {
+            result.push(arg);
+          }
+        } catch {
+          result.push(arg);
+        }
+      } else {
+        result.push(arg);
+      }
+    }
+    return result;
   }
 
   private async executeOne(
@@ -32,9 +75,10 @@ export class BashInterpreter {
     const parsed = parseCommand(input);
     if (!parsed) return ok("");
 
-    const { command, args, redirect } = parsed;
+    const { command, args: rawArgs, redirect } = parsed;
 
     try {
+      const args = await this.expandGlobs(rawArgs);
       let result: BashResult;
 
       switch (command) {
@@ -45,7 +89,7 @@ export class BashInterpreter {
           result = await this.cmdCat(args, pipedInput);
           break;
         case "echo":
-          result = ok(args.join(" ") + "\n");
+          result = this.cmdEcho(args);
           break;
         case "mkdir":
           result = await this.cmdMkdir(args);
@@ -103,24 +147,14 @@ export class BashInterpreter {
       }
 
       if (redirect && result.exitCode === 0) {
+        const target = this.resolve(redirect.target);
         if (redirect.type === ">") {
-          await this.fs.writeFile(
-            this.resolve(redirect.target),
-            result.stdout,
-            { recursive: true },
-          );
-        } else if (redirect.type === ">>") {
+          await this.fs.writeFile(target, result.stdout, { recursive: true });
+        } else {
           try {
-            await this.fs.appendFile(
-              this.resolve(redirect.target),
-              result.stdout,
-            );
+            await this.fs.appendFile(target, result.stdout);
           } catch {
-            await this.fs.writeFile(
-              this.resolve(redirect.target),
-              result.stdout,
-              { recursive: true },
-            );
+            await this.fs.writeFile(target, result.stdout, { recursive: true });
           }
         }
         return ok("");
@@ -136,20 +170,33 @@ export class BashInterpreter {
   // -- Commands ---------------------------------------------------------------
 
   private async cmdLs(args: string[]): Promise<BashResult> {
-    let longFormat = false;
-    let showAll = false;
-    const paths: string[] = [];
+    const parsed = yargsParser(args, {
+      boolean: ["l", "a"],
+      configuration: { "short-option-groups": true },
+    });
+    const longFormat = !!parsed.l;
+    const showAll = !!parsed.a;
+    const paths = parsed._.map(String);
 
-    for (const arg of args) {
-      if (arg.startsWith("-")) {
-        if (arg.includes("l")) longFormat = true;
-        if (arg.includes("a")) showAll = true;
-      } else {
-        paths.push(arg);
+    const targets = paths.length > 0 ? paths : [this.cwd];
+
+    // When multiple targets are given and some are files, list them individually
+    if (targets.length > 1) {
+      const allLines: string[] = [];
+      for (const t of targets) {
+        const resolved = this.resolve(t);
+        const s = await this.fs.stat(resolved);
+        if (s.isDirectory) {
+          allLines.push(...(await this.lsDir(resolved, longFormat, showAll)));
+        } else {
+          const name = resolved.split("/").pop() || resolved;
+          allLines.push(longFormat ? formatLong(name, s) : name);
+        }
       }
+      return ok(allLines.join("\n") + (allLines.length ? "\n" : ""));
     }
 
-    const target = paths[0] ? this.resolve(paths[0]) : this.cwd;
+    const target = this.resolve(targets[0]);
 
     const stat = await this.fs.stat(target);
     if (!stat.isDirectory) {
@@ -160,23 +207,50 @@ export class BashInterpreter {
       return ok(name + "\n");
     }
 
+    const lines = await this.lsDir(target, longFormat, showAll);
+    return ok(lines.join("\n") + (lines.length ? "\n" : ""));
+  }
+
+  private async lsDir(
+    target: string,
+    longFormat: boolean,
+    showAll: boolean,
+  ): Promise<string[]> {
     const entries = await this.fs.readdirWithTypes(target);
     const filtered = showAll
       ? entries
       : entries.filter((e) => !e.name.startsWith("."));
 
     if (!longFormat) {
-      return ok(filtered.map((e) => e.name).join("\n") + (filtered.length ? "\n" : ""));
+      const names: string[] = [];
+      if (showAll) names.push(".", "..");
+      names.push(...filtered.map((e) => e.name));
+      return names;
     }
 
     const lines: string[] = [];
+    if (showAll) {
+      const dirStat = await this.fs.stat(target);
+      lines.push(formatLong(".", dirStat));
+      const parentDir =
+        target === "/"
+          ? "/"
+          : target.split("/").slice(0, -1).join("/") || "/";
+      try {
+        const parentStat = await this.fs.stat(parentDir);
+        lines.push(formatLong("..", parentStat));
+      } catch {
+        lines.push(formatLong("..", dirStat));
+      }
+    }
+
     for (const entry of filtered) {
       const entryPath =
         target === "/" ? `/${entry.name}` : `${target}/${entry.name}`;
       const s = await this.fs.lstat(entryPath);
       lines.push(formatLong(entry.name, s));
     }
-    return ok(lines.join("\n") + (lines.length ? "\n" : ""));
+    return lines;
   }
 
   private async cmdCat(
@@ -187,24 +261,65 @@ export class BashInterpreter {
     if (args.length === 0) return err("cat: missing operand");
 
     const parts: string[] = [];
+    const errors: string[] = [];
+
     for (const arg of args) {
       if (arg === "-") {
         parts.push(pipedInput);
       } else {
-        const content = await this.fs.readFile(this.resolve(arg));
-        parts.push(content);
+        try {
+          const content = await this.fs.readFile(this.resolve(arg));
+          parts.push(content);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push(msg);
+        }
       }
     }
-    return ok(parts.join(""));
+
+    if (parts.length === 0 && errors.length > 0) {
+      return err(errors[0]);
+    }
+
+    const result: BashResult = {
+      exitCode: errors.length > 0 ? 1 : 0,
+      stdout: parts.join(""),
+      stderr: errors.length > 0 ? errors.map((e) => e + "\n").join("") : "",
+    };
+    return result;
+  }
+
+  private cmdEcho(args: string[]): BashResult {
+    const parsed = yargsParser(args, {
+      boolean: ["n", "e"],
+      configuration: {
+        "short-option-groups": true,
+        "unknown-options-as-args": true,
+      },
+    });
+    const noNewline = !!parsed.n;
+    const interpretEscapes = !!parsed.e;
+    let text = parsed._.map(String).join(" ");
+
+    if (interpretEscapes) {
+      text = text
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\r/g, "\r")
+        .replace(/\\\\/g, "\\");
+    }
+
+    return ok(text + (noNewline ? "" : "\n"));
   }
 
   private async cmdMkdir(args: string[]): Promise<BashResult> {
-    let recursive = false;
-    const paths: string[] = [];
-    for (const arg of args) {
-      if (arg === "-p") recursive = true;
-      else paths.push(arg);
-    }
+    const parsed = yargsParser(args, {
+      boolean: ["p"],
+      configuration: { "short-option-groups": true },
+    });
+    const recursive = !!parsed.p;
+    const paths = parsed._.map(String);
+
     if (paths.length === 0) return err("mkdir: missing operand");
     for (const p of paths) {
       await this.fs.mkdir(this.resolve(p), { recursive });
@@ -213,42 +328,73 @@ export class BashInterpreter {
   }
 
   private async cmdRm(args: string[]): Promise<BashResult> {
-    let recursive = false;
-    let force = false;
-    const paths: string[] = [];
-    for (const arg of args) {
-      if (arg.startsWith("-")) {
-        if (arg.includes("r") || arg.includes("R")) recursive = true;
-        if (arg.includes("f")) force = true;
-      } else {
-        paths.push(arg);
-      }
-    }
+    const parsed = yargsParser(args, {
+      boolean: ["r", "R", "f"],
+      configuration: { "short-option-groups": true },
+    });
+    const recursive = !!(parsed.r || parsed.R);
+    const force = !!parsed.f;
+    const paths = parsed._.map(String);
+
     if (paths.length === 0) return err("rm: missing operand");
+
     for (const p of paths) {
-      await this.fs.rm(this.resolve(p), { recursive, force });
+      const resolved = this.resolve(p);
+      if (resolved === "/") {
+        return err("rm: it is dangerous to operate recursively on '/'");
+      }
+      await this.fs.rm(resolved, { recursive, force });
     }
     return ok("");
   }
 
   private async cmdCp(args: string[]): Promise<BashResult> {
-    let recursive = false;
-    const paths: string[] = [];
-    for (const arg of args) {
-      if (arg === "-r" || arg === "-R") recursive = true;
-      else paths.push(arg);
-    }
-    if (paths.length < 2) return err("cp: missing operand");
-    await this.fs.cp(this.resolve(paths[0]), this.resolve(paths[1]), {
-      recursive,
+    const parsed = yargsParser(args, {
+      boolean: ["r", "R"],
+      configuration: { "short-option-groups": true },
     });
+    const recursive = !!(parsed.r || parsed.R);
+    const paths = parsed._.map(String);
+
+    if (paths.length < 2) return err("cp: missing operand");
+
+    const src = this.resolve(paths[0]);
+    let dest = this.resolve(paths[1]);
+
+    // If dest is an existing directory, copy INTO it
+    try {
+      const destStat = await this.fs.stat(dest);
+      if (destStat.isDirectory) {
+        const srcName = src.split("/").pop()!;
+        dest = dest === "/" ? `/${srcName}` : `${dest}/${srcName}`;
+      }
+    } catch {
+      // dest doesn't exist, that's fine — cp creates it
+    }
+
+    await this.fs.cp(src, dest, { recursive });
     return ok("");
   }
 
   private async cmdMv(args: string[]): Promise<BashResult> {
     const paths = args.filter((a) => !a.startsWith("-"));
     if (paths.length < 2) return err("mv: missing operand");
-    await this.fs.mv(this.resolve(paths[0]), this.resolve(paths[1]));
+
+    const src = this.resolve(paths[0]);
+    let dest = this.resolve(paths[1]);
+
+    // If dest is an existing directory, move INTO it
+    try {
+      const destStat = await this.fs.stat(dest);
+      if (destStat.isDirectory) {
+        const srcName = src.split("/").pop()!;
+        dest = dest === "/" ? `/${srcName}` : `${dest}/${srcName}`;
+      }
+    } catch {
+      // dest doesn't exist — mv will rename src to dest
+    }
+
+    await this.fs.mv(src, dest);
     return ok("");
   }
 
@@ -281,7 +427,11 @@ export class BashInterpreter {
     if (args.length === 0) return err("stat: missing operand");
     const path = this.resolve(args[0]);
     const s = await this.fs.stat(path);
-    const type = s.isDirectory ? "directory" : s.isSymbolicLink ? "symbolic link" : "regular file";
+    const type = s.isDirectory
+      ? "directory"
+      : s.isSymbolicLink
+        ? "symbolic link"
+        : "regular file";
     const lines = [
       `  File: ${args[0]}`,
       `  Size: ${s.size}\tType: ${type}`,
@@ -293,9 +443,43 @@ export class BashInterpreter {
 
   private async cmdChmod(args: string[]): Promise<BashResult> {
     if (args.length < 2) return err("chmod: missing operand");
-    const mode = parseInt(args[0], 8);
-    if (isNaN(mode)) return err(`chmod: invalid mode: '${args[0]}'`);
-    await this.fs.chmod(this.resolve(args[1]), mode);
+    const modeStr = args[0];
+    const path = this.resolve(args[1]);
+
+    // Try octal first
+    if (/^[0-7]+$/.test(modeStr)) {
+      const mode = parseInt(modeStr, 8);
+      await this.fs.chmod(path, mode);
+      return ok("");
+    }
+
+    // Try symbolic mode (e.g. u+x, go-r, a+rw)
+    const symMatch = modeStr.match(/^([ugoa]*)([-+=])([rwx]+)$/);
+    if (!symMatch) return err(`chmod: invalid mode: '${modeStr}'`);
+
+    const [, who, op, perms] = symMatch;
+    const currentStat = await this.fs.stat(path);
+    let mode = currentStat.mode;
+
+    let permBits = 0;
+    if (perms.includes("r")) permBits |= 4;
+    if (perms.includes("w")) permBits |= 2;
+    if (perms.includes("x")) permBits |= 1;
+
+    const targets = who === "" || who === "a" ? ["u", "g", "o"] : who.split("");
+
+    for (const t of targets) {
+      const shift = t === "u" ? 6 : t === "g" ? 3 : 0;
+      const shifted = permBits << shift;
+      if (op === "+") mode |= shifted;
+      else if (op === "-") mode &= ~shifted;
+      else if (op === "=") {
+        mode &= ~(7 << shift);
+        mode |= shifted;
+      }
+    }
+
+    await this.fs.chmod(path, mode);
     return ok("");
   }
 
@@ -303,40 +487,13 @@ export class BashInterpreter {
     args: string[],
     pipedInput: string,
   ): Promise<BashResult> {
-    let n = 10;
-    const paths: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "-n" && args[i + 1]) {
-        n = parseInt(args[i + 1], 10);
-        i++;
-      } else if (!args[i].startsWith("-")) {
-        paths.push(args[i]);
-      }
-    }
-
-    const text =
-      paths.length > 0
-        ? await this.fs.readFile(this.resolve(paths[0]))
-        : pipedInput;
-
-    const lines = text.split("\n").slice(0, n);
-    return ok(lines.join("\n") + (lines.length ? "\n" : ""));
-  }
-
-  private async cmdTail(
-    args: string[],
-    pipedInput: string,
-  ): Promise<BashResult> {
-    let n = 10;
-    const paths: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "-n" && args[i + 1]) {
-        n = parseInt(args[i + 1], 10);
-        i++;
-      } else if (!args[i].startsWith("-")) {
-        paths.push(args[i]);
-      }
-    }
+    const parsed = yargsParser(args, {
+      string: ["n"],
+      configuration: { "short-option-groups": true },
+    });
+    const nStr = parsed.n !== undefined ? String(parsed.n) : "10";
+    const n = parseInt(nStr, 10);
+    const paths = parsed._.map(String);
 
     const text =
       paths.length > 0
@@ -348,7 +505,48 @@ export class BashInterpreter {
     if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
       allLines.pop();
     }
-    const result = allLines.slice(-n);
+
+    let result: string[];
+    if (n < 0) {
+      // head -n -N: all lines except the last N
+      result = allLines.slice(0, Math.max(0, allLines.length + n));
+    } else {
+      result = allLines.slice(0, n);
+    }
+    return ok(result.join("\n") + (result.length ? "\n" : ""));
+  }
+
+  private async cmdTail(
+    args: string[],
+    pipedInput: string,
+  ): Promise<BashResult> {
+    const parsed = yargsParser(args, {
+      string: ["n"],
+      configuration: { "short-option-groups": true },
+    });
+    const nStr = parsed.n !== undefined ? String(parsed.n) : "10";
+    const paths = parsed._.map(String);
+
+    const text =
+      paths.length > 0
+        ? await this.fs.readFile(this.resolve(paths[0]))
+        : pipedInput;
+
+    const allLines = text.split("\n");
+    // Remove trailing empty element from trailing newline
+    if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
+      allLines.pop();
+    }
+
+    let result: string[];
+    if (nStr.startsWith("+")) {
+      // tail -n +N: starting from line N (1-based)
+      const lineNum = parseInt(nStr.slice(1), 10);
+      result = allLines.slice(Math.max(0, lineNum - 1));
+    } else {
+      const n = parseInt(nStr, 10);
+      result = allLines.slice(-n);
+    }
     return ok(result.join("\n") + (result.length ? "\n" : ""));
   }
 
@@ -356,53 +554,68 @@ export class BashInterpreter {
     args: string[],
     pipedInput: string,
   ): Promise<BashResult> {
-    let countLines = false;
-    let countWords = false;
-    let countChars = false;
-    const paths: string[] = [];
-
-    for (const arg of args) {
-      if (arg.startsWith("-")) {
-        if (arg.includes("l")) countLines = true;
-        if (arg.includes("w")) countWords = true;
-        if (arg.includes("c")) countChars = true;
-      } else {
-        paths.push(arg);
-      }
-    }
+    const parsed = yargsParser(args, {
+      boolean: ["l", "w", "c"],
+      configuration: { "short-option-groups": true },
+    });
+    let countLines = !!parsed.l;
+    let countWords = !!parsed.w;
+    let countChars = !!parsed.c;
+    const paths = parsed._.map(String);
 
     if (!countLines && !countWords && !countChars) {
       countLines = countWords = countChars = true;
     }
 
-    const text =
-      paths.length > 0
-        ? await this.fs.readFile(this.resolve(paths[0]))
-        : pipedInput;
+    const formatWcLine = (text: string, name: string): string => {
+      const lines =
+        text.length === 0
+          ? 0
+          : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+      const words = text.split(/\s+/).filter(Boolean).length;
+      const chars = new TextEncoder().encode(text).byteLength;
 
-    const lines = text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
-    const words = text.split(/\s+/).filter(Boolean).length;
-    const chars = new TextEncoder().encode(text).byteLength;
+      const parts: string[] = [];
+      if (countLines) parts.push(String(lines));
+      if (countWords) parts.push(String(words));
+      if (countChars) parts.push(String(chars));
+      return parts.join("\t") + (name ? `\t${name}` : "");
+    };
 
-    const parts: string[] = [];
-    if (countLines) parts.push(String(lines));
-    if (countWords) parts.push(String(words));
-    if (countChars) parts.push(String(chars));
+    if (paths.length === 0) {
+      return ok(formatWcLine(pipedInput, "") + "\n");
+    }
 
-    const name = paths[0] || "";
-    return ok(parts.join("\t") + (name ? `\t${name}` : "") + "\n");
+    const outputLines: string[] = [];
+    for (const p of paths) {
+      const text = await this.fs.readFile(this.resolve(p));
+      outputLines.push(formatWcLine(text, p));
+    }
+
+    if (paths.length > 1) {
+      // Add total line
+      let totalText = "";
+      for (const p of paths) {
+        totalText += await this.fs.readFile(this.resolve(p));
+      }
+      outputLines.push(formatWcLine(totalText, "total"));
+    }
+
+    return ok(outputLines.join("\n") + "\n");
   }
 
   private async cmdFind(args: string[]): Promise<BashResult> {
+    // find uses -name and -type which are single-dash long options.
+    // Parse manually to avoid yargs-parser splitting them.
     let searchPath = ".";
     let namePattern: string | null = null;
     let typeFilter: string | null = null;
 
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === "-name" && args[i + 1]) {
+      if (args[i] === "-name" && args[i + 1] !== undefined) {
         namePattern = args[i + 1];
         i++;
-      } else if (args[i] === "-type" && args[i + 1]) {
+      } else if (args[i] === "-type" && args[i + 1] !== undefined) {
         typeFilter = args[i + 1];
         i++;
       } else if (!args[i].startsWith("-")) {
@@ -411,7 +624,27 @@ export class BashInterpreter {
     }
 
     const resolved = this.resolve(searchPath);
-    const found = await this.findRecursive(resolved, namePattern, typeFilter);
+    const useRelative = searchPath === "." || searchPath.startsWith("./");
+
+    // Check if root matches type filter
+    const rootMatches =
+      typeFilter === null || typeFilter === "d"; // root is always a directory
+
+    const found: string[] = [];
+
+    // Include the search root itself if it matches
+    if (rootMatches && namePattern === null) {
+      found.push(useRelative ? "." : resolved);
+    }
+
+    await this.findRecursive(
+      resolved,
+      namePattern,
+      typeFilter,
+      resolved,
+      useRelative,
+      found,
+    );
     return ok(found.join("\n") + (found.length ? "\n" : ""));
   }
 
@@ -419,12 +652,15 @@ export class BashInterpreter {
     dir: string,
     namePattern: string | null,
     typeFilter: string | null,
-  ): Promise<string[]> {
-    const results: string[] = [];
+    searchRoot: string,
+    useRelative: boolean,
+    results: string[],
+  ): Promise<void> {
     const entries = await this.fs.readdirWithTypes(dir);
 
     for (const entry of entries) {
-      const fullPath = dir === "/" ? `/${entry.name}` : `${dir}/${entry.name}`;
+      const fullPath =
+        dir === "/" ? `/${entry.name}` : `${dir}/${entry.name}`;
 
       const typeMatch =
         typeFilter === null ||
@@ -436,35 +672,42 @@ export class BashInterpreter {
         namePattern === null || matchGlob(entry.name, namePattern);
 
       if (typeMatch && nameMatch) {
-        results.push(fullPath);
+        if (useRelative) {
+          const rel = fullPath.slice(searchRoot.length);
+          results.push("." + rel);
+        } else {
+          results.push(fullPath);
+        }
       }
 
       if (entry.isDirectory) {
-        results.push(...(await this.findRecursive(fullPath, namePattern, typeFilter)));
+        await this.findRecursive(
+          fullPath,
+          namePattern,
+          typeFilter,
+          searchRoot,
+          useRelative,
+          results,
+        );
       }
     }
-
-    return results;
   }
 
   private async cmdGrep(
     args: string[],
     pipedInput: string,
   ): Promise<BashResult> {
-    let recursive = false;
-    let ignoreCase = false;
-    let lineNumbers = false;
-    const positional: string[] = [];
-
-    for (const arg of args) {
-      if (arg.startsWith("-")) {
-        if (arg.includes("r") || arg.includes("R")) recursive = true;
-        if (arg.includes("i")) ignoreCase = true;
-        if (arg.includes("n")) lineNumbers = true;
-      } else {
-        positional.push(arg);
-      }
-    }
+    const parsed = yargsParser(args, {
+      boolean: ["r", "R", "i", "n"],
+      configuration: {
+        "short-option-groups": true,
+        "halt-at-non-option": true,
+      },
+    });
+    const recursive = !!(parsed.r || parsed.R);
+    const ignoreCase = !!parsed.i;
+    const lineNumbers = !!parsed.n;
+    const positional = parsed._.map(String);
 
     if (positional.length === 0) return err("grep: missing pattern");
 
@@ -477,24 +720,30 @@ export class BashInterpreter {
         .map((line, i) => ({ line, num: i + 1 }))
         .filter(({ line }) => regex.test(line))
         .map(({ line, num }) => (lineNumbers ? `${num}:${line}` : line));
-      if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
+      if (matches.length === 0)
+        return { exitCode: 1, stdout: "", stderr: "" };
       return ok(matches.join("\n") + "\n");
     }
 
     const filePaths = positional.slice(1);
     const allMatches: string[] = [];
+    const showPrefix = filePaths.length > 1 || recursive;
 
     for (const filePath of filePaths) {
       const resolved = this.resolve(filePath);
       if (recursive) {
-        await this.grepRecursive(resolved, regex, lineNumbers, allMatches);
+        await this.grepRecursive(
+          resolved,
+          regex,
+          lineNumbers,
+          allMatches,
+        );
       } else {
         const content = await this.fs.readFile(resolved);
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {
           if (regex.test(lines[i])) {
-            const prefix =
-              filePaths.length > 1 ? `${filePath}:` : "";
+            const prefix = showPrefix ? `${filePath}:` : "";
             const numPrefix = lineNumbers ? `${i + 1}:` : "";
             allMatches.push(`${prefix}${numPrefix}${lines[i]}`);
           }
@@ -527,7 +776,8 @@ export class BashInterpreter {
     }
     const entries = await this.fs.readdirWithTypes(path);
     for (const entry of entries) {
-      const fullPath = path === "/" ? `/${entry.name}` : `${path}/${entry.name}`;
+      const fullPath =
+        path === "/" ? `/${entry.name}` : `${path}/${entry.name}`;
       if (entry.isDirectory) {
         await this.grepRecursive(fullPath, regex, lineNumbers, results);
       } else if (entry.isFile) {
@@ -560,25 +810,38 @@ export class BashInterpreter {
       const entry = entries[i];
       const isLast = i === entries.length - 1;
       const connector = isLast ? "└── " : "├── ";
-      const suffix = entry.isDirectory ? "/" : "";
+      const fullPath =
+        dir === "/" ? `/${entry.name}` : `${dir}/${entry.name}`;
+
+      let suffix = "";
+      if (entry.isDirectory) {
+        suffix = "/";
+      } else if (entry.isSymbolicLink) {
+        try {
+          const target = await this.fs.readlink(fullPath);
+          suffix = ` -> ${target}`;
+        } catch {
+          suffix = " -> ?";
+        }
+      }
+
       lines.push(`${prefix}${connector}${entry.name}${suffix}`);
 
       if (entry.isDirectory) {
         const childPrefix = prefix + (isLast ? "    " : "│   ");
-        const fullPath =
-          dir === "/" ? `/${entry.name}` : `${dir}/${entry.name}`;
         await this.treeRecursive(fullPath, childPrefix, lines);
       }
     }
   }
 
   private async cmdLn(args: string[]): Promise<BashResult> {
-    let symbolic = false;
-    const paths: string[] = [];
-    for (const arg of args) {
-      if (arg === "-s") symbolic = true;
-      else paths.push(arg);
-    }
+    const parsed = yargsParser(args, {
+      boolean: ["s"],
+      configuration: { "short-option-groups": true },
+    });
+    const symbolic = !!parsed.s;
+    const paths = parsed._.map(String);
+
     if (paths.length < 2) return err("ln: missing operand");
     if (symbolic) {
       await this.fs.symlink(paths[0], this.resolve(paths[1]));
@@ -607,7 +870,13 @@ function err(stderr: string): BashResult {
 
 function formatLong(
   name: string,
-  s: { isDirectory: boolean; isSymbolicLink: boolean; mode: number; size: number; mtime: Date },
+  s: {
+    isDirectory: boolean;
+    isSymbolicLink: boolean;
+    mode: number;
+    size: number;
+    mtime: Date;
+  },
 ): string {
   const type = s.isDirectory ? "d" : s.isSymbolicLink ? "l" : "-";
   const mode = s.mode.toString(8).padStart(4, "0");
@@ -627,6 +896,8 @@ function matchGlob(name: string, pattern: string): boolean {
   return new RegExp(regex).test(name);
 }
 
+// -- Parsing ------------------------------------------------------------------
+
 interface Redirect {
   type: ">" | ">>";
   target: string;
@@ -638,25 +909,80 @@ interface ParsedCommand {
   redirect: Redirect | null;
 }
 
+/**
+ * Extracts redirect operators from the raw input string, respecting quotes.
+ * Returns the main command string (without redirect) and the redirect info.
+ */
+function extractRedirect(input: string): {
+  main: string;
+  redirect: Redirect | null;
+} {
+  let inSingle = false;
+  let inDouble = false;
+  let escape = false;
+  let lastRedirectPos = -1;
+  let isAppend = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escape = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+
+    if (!inSingle && !inDouble && ch === ">") {
+      if (input[i + 1] === ">") {
+        lastRedirectPos = i;
+        isAppend = true;
+        i++; // skip second >
+      } else {
+        lastRedirectPos = i;
+        isAppend = false;
+      }
+    }
+  }
+
+  if (lastRedirectPos === -1) {
+    return { main: input, redirect: null };
+  }
+
+  const opLen = isAppend ? 2 : 1;
+  const targetRaw = input.slice(lastRedirectPos + opLen).trim();
+  const main = input.slice(0, lastRedirectPos).trimEnd();
+
+  // Tokenize the target to handle quoted paths
+  const targetTokens = tokenize(targetRaw);
+  if (targetTokens.length === 0) {
+    return { main: input, redirect: null };
+  }
+
+  return {
+    main,
+    redirect: {
+      type: isAppend ? ">>" : ">",
+      target: targetTokens[0],
+    },
+  };
+}
+
 function parseCommand(input: string): ParsedCommand | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
 
-  let redirect: Redirect | null = null;
-  let main = trimmed;
-
-  // Extract redirect (>> must be checked before >)
-  const appendMatch = main.match(/\s*>>\s*(\S+)\s*$/);
-  if (appendMatch) {
-    redirect = { type: ">>", target: appendMatch[1] };
-    main = main.slice(0, main.length - appendMatch[0].length);
-  } else {
-    const writeMatch = main.match(/\s*>\s*(\S+)\s*$/);
-    if (writeMatch) {
-      redirect = { type: ">", target: writeMatch[1] };
-      main = main.slice(0, main.length - writeMatch[0].length);
-    }
-  }
+  const { main, redirect } = extractRedirect(trimmed);
 
   const tokens = tokenize(main);
   if (tokens.length === 0) return null;
@@ -668,36 +994,69 @@ function parseCommand(input: string): ParsedCommand | null {
   };
 }
 
+/**
+ * Tokenize input into tokens, handling single quotes, double quotes,
+ * and backslash escaping. In double quotes, only \", \\, \$, \` are
+ * special escapes; other \X sequences are kept literally.
+ */
 function tokenize(input: string): string[] {
   const tokens: string[] = [];
   let current = "";
   let inSingle = false;
   let inDouble = false;
-  let escape = false;
 
-  for (const char of input) {
-    if (escape) {
-      current += char;
-      escape = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+
+    if (inSingle) {
+      if (ch === "'") {
+        inSingle = false;
+      } else {
+        current += ch;
+      }
       continue;
     }
 
-    if (char === "\\" && !inSingle) {
-      escape = true;
+    if (inDouble) {
+      if (ch === '"') {
+        inDouble = false;
+      } else if (ch === "\\") {
+        const next = input[i + 1];
+        // In double quotes, only these are special escapes
+        if (next === '"' || next === "\\" || next === "$" || next === "`") {
+          current += next;
+          i++;
+        } else {
+          // Keep the backslash literally
+          current += ch;
+        }
+      } else {
+        current += ch;
+      }
       continue;
     }
 
-    if (char === "'" && !inDouble) {
-      inSingle = !inSingle;
+    // Outside quotes
+    if (ch === "\\") {
+      const next = input[i + 1];
+      if (next !== undefined) {
+        current += next;
+        i++;
+      }
       continue;
     }
 
-    if (char === '"' && !inSingle) {
-      inDouble = !inDouble;
+    if (ch === "'") {
+      inSingle = true;
       continue;
     }
 
-    if (char === " " && !inSingle && !inDouble) {
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+
+    if (ch === " " || ch === "\t") {
       if (current) {
         tokens.push(current);
         current = "";
@@ -705,7 +1064,7 @@ function tokenize(input: string): string[] {
       continue;
     }
 
-    current += char;
+    current += ch;
   }
 
   if (current) tokens.push(current);
@@ -719,34 +1078,107 @@ function splitPipe(input: string): string[] {
   let inDouble = false;
   let escape = false;
 
-  for (const char of input) {
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+
     if (escape) {
-      current += char;
+      current += ch;
       escape = false;
       continue;
     }
-    if (char === "\\" && !inSingle) {
+    if (ch === "\\" && !inSingle) {
       escape = true;
-      current += char;
+      current += ch;
       continue;
     }
-    if (char === "'" && !inDouble) {
+    if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
-      current += char;
+      current += ch;
       continue;
     }
-    if (char === '"' && !inSingle) {
+    if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
-      current += char;
+      current += ch;
       continue;
     }
-    if (char === "|" && !inSingle && !inDouble) {
+    // Single | is pipe, but || is a logical operator (handled by splitOperators)
+    if (ch === "|" && !inSingle && !inDouble && input[i + 1] !== "|") {
       parts.push(current);
       current = "";
       continue;
     }
-    current += char;
+    current += ch;
   }
   if (current) parts.push(current);
   return parts;
+}
+
+interface OperatorSegment {
+  op: string | null;
+  cmd: string;
+}
+
+function splitOperators(input: string): OperatorSegment[] {
+  const result: OperatorSegment[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escape = false;
+  let currentOp: string | null = null;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escape = true;
+      current += ch;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      current += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      current += ch;
+      continue;
+    }
+
+    if (!inSingle && !inDouble) {
+      if (ch === ";") {
+        result.push({ op: currentOp, cmd: current.trim() });
+        current = "";
+        currentOp = ";";
+        continue;
+      }
+      if (ch === "&" && input[i + 1] === "&") {
+        result.push({ op: currentOp, cmd: current.trim() });
+        current = "";
+        currentOp = "&&";
+        i++;
+        continue;
+      }
+      if (ch === "|" && input[i + 1] === "|") {
+        result.push({ op: currentOp, cmd: current.trim() });
+        current = "";
+        currentOp = "||";
+        i++;
+        continue;
+      }
+    }
+
+    current += ch;
+  }
+
+  if (current.trim()) {
+    result.push({ op: currentOp, cmd: current.trim() });
+  }
+
+  return result;
 }
