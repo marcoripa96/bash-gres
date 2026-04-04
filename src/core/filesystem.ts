@@ -212,8 +212,9 @@ export class PgFileSystem {
   private resolveLinkTargetPath(linkPath: string, target: string): string {
     let resolved: string;
     if (target.startsWith("/")) {
-      // Absolute symlink targets are in user space — convert to internal
-      resolved = this.toInternalPath(normalizePath(target));
+      // Absolute symlink targets: resolve relative to rootDir to detect escapes
+      // (e.g. /../../secret with rootDir=/jail → /jail/../../secret → /secret → outside)
+      resolved = normalizePath(this.rootDir + "/" + target);
     } else {
       // Relative targets resolve from the link's parent (already internal)
       resolved = normalizePath(parentPath(linkPath) + "/" + target);
@@ -283,7 +284,7 @@ export class PgFileSystem {
     const p = normalizePath(userPath);
     if (this.accessRead !== null) {
       const allowed = this.accessRead.some(
-        (dir) => p === dir || p.startsWith(dir + "/"),
+        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
       );
       if (!allowed && !this.isAncestorOfAllowed(p, this.accessRead)) {
         throw new FsError("EACCES", "permission denied", userPath);
@@ -296,7 +297,7 @@ export class PgFileSystem {
     const p = normalizePath(userPath);
     if (this.accessWrite !== null) {
       const allowed = this.accessWrite.some(
-        (dir) => p === dir || p.startsWith(dir + "/"),
+        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
       );
       if (!allowed) {
         throw new FsError("EACCES", "permission denied", userPath);
@@ -350,7 +351,7 @@ export class PgFileSystem {
   private isPathReadable(userPath: string): boolean {
     if (this.accessRead === null) return true;
     return this.accessRead.some(
-      (dir) => userPath === dir || userPath.startsWith(dir + "/"),
+      (dir) => dir === "/" || userPath === dir || userPath.startsWith(dir + "/"),
     );
   }
 
@@ -802,10 +803,10 @@ export class PgFileSystem {
 
     if (this.accessRead !== null) {
       const directlyAllowed = this.accessRead.some(
-        (dir) => p === dir || p.startsWith(dir + "/"),
+        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
       );
       if (!directlyAllowed) {
-        if (this.isAncestorOfAllowed(p, this.accessRead)) {
+        if (this.isAncestorOfAllowed(p, this.accessRead) || p === "/") {
           return this.syntheticReaddir(p, this.accessRead);
         }
         throw new FsError("EACCES", "permission denied", path);
@@ -827,10 +828,10 @@ export class PgFileSystem {
 
     if (this.accessRead !== null) {
       const directlyAllowed = this.accessRead.some(
-        (dir) => p === dir || p.startsWith(dir + "/"),
+        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
       );
       if (!directlyAllowed) {
-        if (this.isAncestorOfAllowed(p, this.accessRead)) {
+        if (this.isAncestorOfAllowed(p, this.accessRead) || p === "/") {
           return this.syntheticReaddirWithTypes(p, this.accessRead);
         }
         throw new FsError("EACCES", "permission denied", path);
