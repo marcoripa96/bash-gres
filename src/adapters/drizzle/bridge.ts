@@ -1,42 +1,45 @@
-import type { SqlClient, QueryResult, SqlParam, DrizzleDb } from "./types.js";
-import { SqlError } from "./types.js";
+import { sql } from "drizzle-orm";
+import type { SqlClient, QueryResult, SqlParam } from "../../core/types.js";
+import { SqlError } from "../../core/types.js";
 
-// Cached reference — resolved on first query, avoids loading drizzle-orm for postgres.js users
-let cachedSqlBuilder:
-  | ((text: string, params: SqlParam[]) => { getSQL(): unknown })
-  | undefined;
+/**
+ * Structural interface for any Drizzle PG database or transaction.
+ * Matches PgDatabase / PgTransaction without importing their
+ * higher-kinded type parameters.
+ */
+export interface DrizzleDb {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  execute(query: any): PromiseLike<unknown>;
+  transaction<T>(
+    transaction: (tx: DrizzleDb) => Promise<T>,
+    config?: { isolationLevel?: string },
+  ): Promise<T>;
+  query?: unknown;
+}
 
-async function getSqlBuilder(): Promise<
-  (text: string, params: SqlParam[]) => { getSQL(): unknown }
-> {
-  if (cachedSqlBuilder) return cachedSqlBuilder;
+// -- SQL builder --------------------------------------------------------------
 
-  const { sql } = await import("drizzle-orm");
+function buildQuery(text: string, params: SqlParam[]) {
+  if (params.length === 0) return sql.raw(text);
 
-  cachedSqlBuilder = (text: string, params: SqlParam[]) => {
-    if (params.length === 0) return sql.raw(text);
+  const parts = text.split(/(\$\d+)/);
+  const chunks: ReturnType<typeof sql.raw>[] = [];
 
-    const parts = text.split(/(\$\d+)/);
-    const chunks: ReturnType<typeof sql.raw>[] = [];
-
-    for (const part of parts) {
-      const match = part.match(/^\$(\d+)$/);
-      if (match) {
-        const idx = parseInt(match[1], 10) - 1;
-        if (idx >= 0 && idx < params.length) {
-          chunks.push(sql`${params[idx]}`);
-        } else {
-          chunks.push(sql.raw(part));
-        }
-      } else if (part) {
+  for (const part of parts) {
+    const match = part.match(/^\$(\d+)$/);
+    if (match) {
+      const idx = parseInt(match[1], 10) - 1;
+      if (idx >= 0 && idx < params.length) {
+        chunks.push(sql`${params[idx]}`);
+      } else {
         chunks.push(sql.raw(part));
       }
+    } else if (part) {
+      chunks.push(sql.raw(part));
     }
+  }
 
-    return sql.join(chunks, sql.raw(""));
-  };
-
-  return cachedSqlBuilder;
+  return sql.join(chunks, sql.raw(""));
 }
 
 // -- Result normalization -----------------------------------------------------
@@ -91,18 +94,24 @@ function wrapError(e: unknown): Error {
 
 /**
  * Wraps a Drizzle PG database into the SqlClient interface.
- * Lazily loads `drizzle-orm` on first query so postgres.js-only
- * users never pay the import cost.
+ *
+ * @example
+ * ```ts
+ * import { drizzle } from "drizzle-orm/postgres-js";
+ * import { createDrizzleClient } from "bash-gres/drizzle";
+ *
+ * const db = drizzle(sql);
+ * const client = createDrizzleClient(db);
+ * ```
  */
-export function toDrizzleSqlClient(db: DrizzleDb): SqlClient {
+export function createDrizzleClient(db: DrizzleDb): SqlClient {
   return {
     async query<T = Record<string, unknown>>(
       text: string,
       params: SqlParam[] = [],
     ): Promise<QueryResult<T>> {
-      const build = await getSqlBuilder();
       try {
-        const query = build(text, params);
+        const query = buildQuery(text, params);
         const result: unknown = await db.execute(query);
         return normalizeResult<T>(result);
       } catch (e: unknown) {
@@ -111,7 +120,7 @@ export function toDrizzleSqlClient(db: DrizzleDb): SqlClient {
     },
 
     async transaction<U>(fn: (client: SqlClient) => Promise<U>): Promise<U> {
-      return db.transaction((tx) => fn(toDrizzleSqlClient(tx)));
+      return db.transaction((tx) => fn(createDrizzleClient(tx)));
     },
   };
 }

@@ -93,21 +93,8 @@ export interface SetupOptions {
   skipExtensions?: boolean;
 }
 
-/**
- * Structural interface for any Drizzle PG database or transaction.
- * Matches PgDatabase / PgTransaction without importing their
- * higher-kinded type parameters.
- */
-export interface DrizzleDb {
-  execute(query: { getSQL(): unknown }): PromiseLike<unknown>;
-  transaction<T>(
-    transaction: (tx: DrizzleDb) => Promise<T>,
-    config?: { isolationLevel?: string },
-  ): Promise<T>;
-}
-
 export interface PgFileSystemOptions {
-  db: SqlClient | DrizzleDb;
+  db: SqlClient;
   sessionId?: string;
   maxFileSize?: number;
   maxReadSize?: number;

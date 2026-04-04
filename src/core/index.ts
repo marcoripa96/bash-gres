@@ -16,7 +16,6 @@ export {
   type ReadFileOptions,
   type SetupOptions,
   type PgFileSystemOptions,
-  type DrizzleDb,
 } from "./types.js";
 export {
   pathToLtree,

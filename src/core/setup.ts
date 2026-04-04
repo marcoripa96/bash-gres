@@ -1,13 +1,4 @@
-import type { SqlClient, DrizzleDb, SetupOptions } from "./types.js";
-import { toDrizzleSqlClient } from "./drizzle-bridge.js";
-
-function isSqlClient(db: SqlClient | DrizzleDb): db is SqlClient {
-  return "query" in db && typeof db.query === "function";
-}
-
-function resolveClient(db: SqlClient | DrizzleDb): SqlClient {
-  return isSqlClient(db) ? db : toDrizzleSqlClient(db);
-}
+import type { SqlClient, SetupOptions } from "./types.js";
 
 const TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS fs_nodes (
@@ -82,10 +73,10 @@ function vectorDDL(dimensions: number): string {
 }
 
 export async function setup(
-  db: SqlClient | DrizzleDb,
+  db: SqlClient,
   options: SetupOptions = {},
 ): Promise<void> {
-  const client = resolveClient(db);
+  const client = db;
   const {
     enableRLS = true,
     enableFullTextSearch = true,

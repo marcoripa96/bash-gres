@@ -7,22 +7,24 @@ PostgreSQL-backed virtual filesystem with bash command interface for AI agents.
 ```
 bash-gres (core)          — PgFileSystem, setup(), search, types
 bash-gres/bash            — BashInterpreter (ls, cat, echo, mkdir, rm, etc.)
-bash-gres/drizzle         — Drizzle schema (fsNodes) + auto-detection bridge
+bash-gres/drizzle         — Drizzle adapter (createDrizzleClient) + schema
 bash-gres/postgres        — postgres.js adapter (createPostgresClient)
 ```
 
 ### Core + Adapter pattern
 
-The core operates on a `SqlClient` interface (`query(text, params)` + `transaction(fn)`). Two ways to provide it:
+The core operates on a `SqlClient` interface (`query(text, params)` + `transaction(fn)`). Adapters wrap driver-specific connections into `SqlClient`:
 
-- **Drizzle**: pass `db` directly to `PgFileSystem({ db })` — auto-detected and wrapped via lazy `import("drizzle-orm")`
-- **postgres.js**: wrap with `createPostgresClient(sql)` then pass as `db`
+- **postgres.js**: `createPostgresClient(sql)` from `bash-gres/postgres`
+- **Drizzle**: `createDrizzleClient(db)` from `bash-gres/drizzle`
 
-The Drizzle bridge lives in `src/core/drizzle-bridge.ts`. It converts `$1, $2` positional params into Drizzle's `sql` tagged template via `_x$N_` splitting. The `drizzle-orm` import is lazy-cached so postgres.js-only users never load it.
+Then pass the resulting `SqlClient` to `PgFileSystem({ db: client })` and `setup(client)`. Core has zero knowledge of any specific driver.
+
+The Drizzle adapter bridge (`src/adapters/drizzle/bridge.ts`) converts `$1, $2` positional params into Drizzle's `sql` tagged template.
 
 ### Key modules
 
-- `src/core/types.ts` — `SqlClient`, `DrizzleDb`, `FsError`, `SqlError`, all option/result interfaces
+- `src/core/types.ts` — `SqlClient`, `FsError`, `SqlError`, all option/result interfaces
 - `src/core/filesystem.ts` — `PgFileSystem` class with all fs operations
 - `src/core/setup.ts` — idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `src/core/path-encoding.ts` — path <-> ltree conversion using `_xHEX_` delimited encoding
@@ -33,6 +35,7 @@ The Drizzle bridge lives in `src/core/drizzle-bridge.ts`. It converts `$1, $2` p
 - `src/core/bash/helpers.ts` — `matchGlob`, `formatLong` shared utilities
 - `src/core/bash/commands/<name>/<name>.ts` — one file per command, each exports a `Command`
 - `src/core/bash/commands/<name>/<name>.test.ts` — co-located tests for each command
+- `src/adapters/drizzle/bridge.ts` — converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `src/adapters/drizzle/schema.ts` — Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `src/adapters/postgres/index.ts` — wraps `postgres.Sql` into `SqlClient`
 

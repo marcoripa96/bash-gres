@@ -1,7 +1,6 @@
 import { randomUUID } from "crypto";
 import type {
   SqlClient,
-  DrizzleDb,
   PgFileSystemOptions,
   FsStat,
   DirentEntry,
@@ -12,7 +11,6 @@ import type {
   SearchResult,
 } from "./types.js";
 import { FsError } from "./types.js";
-import { toDrizzleSqlClient } from "./drizzle-bridge.js";
 import {
   pathToLtree,
   ltreeToPath,
@@ -59,7 +57,7 @@ export class PgFileSystem {
   private embeddingDimensions?: number;
 
   constructor(options: PgFileSystemOptions) {
-    this.client = isSqlClient(options.db) ? options.db : toDrizzleSqlClient(options.db);
+    this.client = options.db;
     this.sessionId = options.sessionId ?? randomUUID();
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
     this.maxReadSize = options.maxReadSize;
@@ -1079,10 +1077,6 @@ export class PgFileSystem {
       );
     });
   }
-}
-
-function isSqlClient(db: SqlClient | DrizzleDb): db is SqlClient {
-  return "query" in db && typeof db.query === "function";
 }
 
 function globToRegex(pattern: string): RegExp {
