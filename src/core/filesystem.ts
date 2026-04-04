@@ -6,6 +6,8 @@ import type {
   FsAccess,
   FsStat,
   DirentEntry,
+  DirentStatEntry,
+  WalkEntry,
   MkdirOptions,
   RmOptions,
   CpOptions,
@@ -40,6 +42,28 @@ interface FsRow {
 }
 
 type FsRowMeta = Omit<FsRow, "content" | "binary_data">;
+
+interface DirentStatRow {
+  name: string;
+  node_type: string;
+  mode: number;
+  size_bytes: number;
+  mtime: Date;
+  symlink_target: string | null;
+}
+
+interface WalkRow extends DirentStatRow {
+  path: string;
+  depth: number;
+}
+
+interface FsStatRow {
+  node_type: string;
+  symlink_target: string | null;
+  mode: number;
+  size_bytes: number;
+  mtime: Date;
+}
 
 const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_MAX_FILES = 10_000;
@@ -112,12 +136,12 @@ export class PgFileSystem {
 
   private withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
     return this.client.transaction(async (tx) => {
-      await tx.query("SELECT set_config('app.workspace_id', $1, true)", [
-        this.workspaceId,
-      ]);
-      await tx.query("SELECT set_config('statement_timeout', $1, true)", [
-        String(this.statementTimeoutMs),
-      ]);
+      await tx.query(
+        `SELECT
+           set_config('app.workspace_id', $1, true),
+           set_config('statement_timeout', $2, true)`,
+        [this.workspaceId, String(this.statementTimeoutMs)],
+      );
       return fn(tx);
     }).catch((e) => {
       if (e instanceof SqlError && e.code === "25006") {
@@ -148,6 +172,21 @@ export class PgFileSystem {
     const result = await tx.query<FsRowMeta>(
       `SELECT id, workspace_id, parent_id, name, node_type, path,
               symlink_target, mode, size_bytes, mtime, created_at
+       FROM fs_nodes
+       WHERE workspace_id = $1 AND path = $2::ltree
+       LIMIT 1`,
+      [this.workspaceId, lt],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  private async getNodeStat(
+    tx: SqlClient,
+    posixPath: string,
+  ): Promise<FsStatRow | null> {
+    const lt = pathToLtree(posixPath, this.workspaceId);
+    const result = await tx.query<FsStatRow>(
+      `SELECT node_type, symlink_target, mode, size_bytes, mtime
        FROM fs_nodes
        WHERE workspace_id = $1 AND path = $2::ltree
        LIMIT 1`,
@@ -201,6 +240,25 @@ export class PgFileSystem {
       if (maxDepth <= 0)
         throw new FsError("ELOOP", "too many levels of symbolic links", path);
       return this.resolveSymlinkMeta(
+        tx,
+        this.resolveLinkTargetPath(path, node.symlink_target),
+        maxDepth - 1,
+      );
+    }
+    return node;
+  }
+
+  private async resolveSymlinkStat(
+    tx: SqlClient,
+    path: string,
+    maxDepth = MAX_SYMLINK_DEPTH,
+  ): Promise<FsStatRow> {
+    const node = await this.getNodeStat(tx, path);
+    if (!node) throw new FsError("ENOENT", "no such file or directory", path);
+    if (node.node_type === "symlink" && node.symlink_target) {
+      if (maxDepth <= 0)
+        throw new FsError("ELOOP", "too many levels of symbolic links", path);
+      return this.resolveSymlinkStat(
         tx,
         this.resolveLinkTargetPath(path, node.symlink_target),
         maxDepth - 1,
@@ -332,6 +390,78 @@ export class PgFileSystem {
       isDirectory: true,
       isSymbolicLink: false,
     }));
+  }
+
+  private async syntheticReaddirWithStats(
+    path: string,
+    allowedPaths: string[],
+  ): Promise<DirentStatEntry[]> {
+    const names = this.syntheticReaddir(path, allowedPaths);
+    if (names.length === 0) return [];
+
+    const internal = this.toInternalPath(path);
+    return this.withWorkspace(async (tx) => {
+      const node = await this.getNodeMeta(tx, internal);
+      if (!node) {
+        return names.map((name) => ({
+          name,
+          isFile: false,
+          isDirectory: true,
+          isSymbolicLink: false,
+          mode: 0o755,
+          size: 0,
+          mtime: new Date(0),
+          symlinkTarget: null,
+        }));
+      }
+
+      const result = await tx.query<DirentStatRow>(
+        `SELECT name, node_type, mode, size_bytes, mtime, symlink_target
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND parent_id = $2 AND name = ANY($3::text[])
+         ORDER BY name`,
+        [this.workspaceId, node.id, names],
+      );
+      const rowMap = new Map(result.rows.map((row) => [row.name, row]));
+
+      return names.map((name) => {
+        const row = rowMap.get(name);
+        if (!row) {
+          return {
+            name,
+            isFile: false,
+            isDirectory: true,
+            isSymbolicLink: false,
+            mode: 0o755,
+            size: 0,
+            mtime: new Date(0),
+            symlinkTarget: null,
+          };
+        }
+        return this.mapDirentStatRow(row);
+      });
+    });
+  }
+
+  private mapDirentStatRow(row: DirentStatRow): DirentStatEntry {
+    return {
+      name: row.name,
+      isFile: row.node_type === "file",
+      isDirectory: row.node_type === "directory",
+      isSymbolicLink: row.node_type === "symlink",
+      mode: row.mode,
+      size: Number(row.size_bytes),
+      mtime: new Date(row.mtime),
+      symlinkTarget: row.symlink_target,
+    };
+  }
+
+  private mapWalkRow(row: WalkRow): WalkEntry {
+    return {
+      path: this.toUserPath(ltreeToPath(row.path)),
+      depth: Number(row.depth),
+      ...this.mapDirentStatRow(row),
+    };
   }
 
   private guardRootBoundary(internalPath: string): void {
@@ -588,20 +718,35 @@ export class PgFileSystem {
         const sqlOffset = (options?.offset ?? 0) + 1; // SQL SUBSTRING is 1-based
         const sqlLimit = options?.limit;
 
-        const substringExpr = sqlLimit !== undefined
-          ? `substr(COALESCE(content, ''), $3, $4)`
-          : `substr(COALESCE(content, ''), $3)`;
+        const textExpr = sqlLimit !== undefined
+          ? `substr(content, $3, $4)`
+          : `substr(content, $3)`;
+        const binaryExpr = sqlLimit !== undefined
+          ? `substring(binary_data FROM $3 FOR $4)`
+          : `substring(binary_data FROM $3)`;
 
-        const params: (string | number)[] = [this.workspaceId, pathToLtree(internal, this.workspaceId), sqlOffset];
+        const params: (string | number)[] = [this.workspaceId, node.id, sqlOffset];
         if (sqlLimit !== undefined) params.push(sqlLimit);
 
-        const result = await tx.query<{ chunk: string }>(
-          `SELECT ${substringExpr} AS chunk FROM fs_nodes
-           WHERE workspace_id = $1 AND path = $2::ltree
+        const result = await tx.query<{
+          chunk_text: string | null;
+          chunk_binary: Uint8Array | null;
+        }>(
+          `SELECT ${textExpr} AS chunk_text,
+                  ${binaryExpr} AS chunk_binary
+           FROM fs_nodes
+           WHERE workspace_id = $1 AND id = $2
            LIMIT 1`,
           params,
         );
-        return result.rows[0]?.chunk ?? "";
+
+        const chunk = result.rows[0];
+        if (!chunk) return "";
+        if (chunk.chunk_text !== null) return chunk.chunk_text;
+        if (chunk.chunk_binary !== null) {
+          return new TextDecoder().decode(chunk.chunk_binary);
+        }
+        return "";
       }
 
       const node = await this.resolveSymlink(tx, internal);
@@ -712,15 +857,22 @@ export class PgFileSystem {
   async exists(path: string): Promise<boolean> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeMeta(tx, internal);
-      return node !== null;
+      const lt = pathToLtree(internal, this.workspaceId);
+      const result = await tx.query<{ exists: number }>(
+        `SELECT 1 AS exists
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND path = $2::ltree
+         LIMIT 1`,
+        [this.workspaceId, lt],
+      );
+      return result.rows.length > 0;
     });
   }
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
+      const node = await this.resolveSymlinkStat(tx, internal);
       return {
         isFile: node.node_type === "file",
         isDirectory: node.node_type === "directory",
@@ -735,7 +887,7 @@ export class PgFileSystem {
   async lstat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeMeta(tx, internal);
+      const node = await this.getNodeStat(tx, internal);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -819,7 +971,14 @@ export class PgFileSystem {
       if (node.node_type !== "directory") {
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
       }
-      return this.internalReaddir(tx, ltreeToPath(node.path));
+
+      const result = await tx.query<{ name: string }>(
+        `SELECT name FROM fs_nodes
+         WHERE workspace_id = $1 AND parent_id = $2
+         ORDER BY name`,
+        [this.workspaceId, node.id],
+      );
+      return result.rows.map((row) => row.name);
     });
   }
 
@@ -851,7 +1010,8 @@ export class PgFileSystem {
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
 
       const result = await tx.query<{ name: string; node_type: string }>(
-        `SELECT name, node_type FROM fs_nodes
+        `SELECT name, node_type
+         FROM fs_nodes
          WHERE workspace_id = $1 AND parent_id = $2
          ORDER BY name`,
         [this.workspaceId, node.id],
@@ -862,6 +1022,66 @@ export class PgFileSystem {
         isDirectory: r.node_type === "directory",
         isSymbolicLink: r.node_type === "symlink",
       }));
+    });
+  }
+
+  async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
+    const p = normalizePath(path);
+
+    if (this.accessRead !== null) {
+      const directlyAllowed = this.accessRead.some(
+        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
+      );
+      if (!directlyAllowed) {
+        if (this.isAncestorOfAllowed(p, this.accessRead) || p === "/") {
+          return this.syntheticReaddirWithStats(p, this.accessRead);
+        }
+        throw new FsError("EACCES", "permission denied", path);
+      }
+    }
+
+    const internal = this.toInternalPath(p);
+    return this.withWorkspace(async (tx) => {
+      const node = await this.resolveSymlinkMeta(tx, internal);
+      if (node.node_type !== "directory") {
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
+      }
+
+      const result = await tx.query<DirentStatRow>(
+        `SELECT name, node_type, mode, size_bytes, mtime, symlink_target
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND parent_id = $2
+         ORDER BY name`,
+        [this.workspaceId, node.id],
+      );
+      return result.rows.map((row) => this.mapDirentStatRow(row));
+    });
+  }
+
+  async walk(path: string): Promise<WalkEntry[]> {
+    const internal = this.guardRead(path);
+    return this.withWorkspace(async (tx) => {
+      const node = await this.resolveSymlinkMeta(tx, internal);
+      if (node.node_type !== "directory") {
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
+      }
+
+      const rootPath = ltreeToPath(node.path);
+      const rootLtree = pathToLtree(rootPath, this.workspaceId);
+      const result = await tx.query<WalkRow>(
+        `SELECT path::text, name, node_type, mode, size_bytes, mtime, symlink_target,
+                nlevel(path) - nlevel($2::ltree) AS depth
+         FROM fs_nodes
+         WHERE workspace_id = $1
+           AND path <@ $2::ltree
+           AND path != $2::ltree
+         ORDER BY path`,
+        [this.workspaceId, rootLtree],
+      );
+
+      return result.rows
+        .map((row) => this.mapWalkRow(row))
+        .filter((entry) => this.isPathReadable(entry.path));
     });
   }
 
@@ -897,35 +1117,40 @@ export class PgFileSystem {
 
       if (options?.recursive && node.node_type === "directory") {
         const lt = pathToLtree(internal, this.workspaceId);
-        // Delete leaves first to satisfy ON DELETE RESTRICT
-        await tx.query(
-          `WITH RECURSIVE subtree AS (
-             SELECT id, path, 0 AS depth FROM fs_nodes
-             WHERE workspace_id = $1 AND path <@ $2::ltree
-           )
-           DELETE FROM fs_nodes
-           WHERE workspace_id = $1
-             AND id IN (SELECT id FROM subtree)
-             AND id NOT IN (
-               SELECT DISTINCT parent_id FROM fs_nodes
-               WHERE workspace_id = $1 AND parent_id IS NOT NULL
-                 AND id IN (SELECT id FROM subtree)
-             )`,
+        const subtree = await tx.query<{ id: number; depth: number }>(
+          `SELECT id, nlevel(path) AS depth
+           FROM fs_nodes
+           WHERE workspace_id = $1 AND path <@ $2::ltree
+           ORDER BY depth DESC, path DESC`,
           [this.workspaceId, lt],
         );
-        // Repeatedly delete now-childless nodes until all are gone
-        let remaining = true;
-        while (remaining) {
-          const result = await tx.query(
+
+        let currentDepth: number | null = null;
+        let idsAtDepth: number[] = [];
+        for (const row of subtree.rows) {
+          if (currentDepth === null) {
+            currentDepth = row.depth;
+          }
+
+          if (row.depth !== currentDepth) {
+            await tx.query(
+              `DELETE FROM fs_nodes
+               WHERE workspace_id = $1 AND id = ANY($2::int[])`,
+              [this.workspaceId, idsAtDepth],
+            );
+            idsAtDepth = [];
+            currentDepth = row.depth;
+          }
+
+          idsAtDepth.push(row.id);
+        }
+
+        if (idsAtDepth.length > 0) {
+          await tx.query(
             `DELETE FROM fs_nodes
-             WHERE workspace_id = $1 AND path <@ $2::ltree
-             AND id NOT IN (
-               SELECT DISTINCT parent_id FROM fs_nodes
-               WHERE workspace_id = $1 AND parent_id IS NOT NULL
-             )`,
-            [this.workspaceId, lt],
+             WHERE workspace_id = $1 AND id = ANY($2::int[])`,
+            [this.workspaceId, idsAtDepth],
           );
-          remaining = (result.rowCount ?? 0) > 0;
         }
       } else {
         await tx.query(
@@ -1151,7 +1376,7 @@ export class PgFileSystem {
   async readlink(path: string): Promise<string> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeMeta(tx, internal);
+      const node = await this.getNodeStat(tx, internal);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -1252,16 +1477,35 @@ export class PgFileSystem {
   ): Promise<string[]> {
     const userCwd = opts?.cwd ? normalizePath(opts.cwd) : "/";
     this.guardRead(userCwd);
-    const internalCwd = this.toInternalPath(userCwd);
+    const literalPrefix = globLiteralPrefix(pattern);
+    const queryScope = literalPrefix
+      ? normalizePath(userCwd === "/" ? `/${literalPrefix}` : `${userCwd}/${literalPrefix}`)
+      : userCwd;
+    const internalScope = this.toInternalPath(queryScope);
+    const queryPlan = analyzeGlobPattern(pattern, literalPrefix);
     return this.withWorkspace(async (tx) => {
-      const scopeLtree = pathToLtree(internalCwd, this.workspaceId);
-      const result = await tx.query<{ path: string; name: string }>(
-        `SELECT path::text, name FROM fs_nodes
-         WHERE workspace_id = $1
-           AND path <@ $2::ltree
-           AND node_type = 'file'
+      const scopeLtree = pathToLtree(internalScope, this.workspaceId);
+      const where = [
+        `workspace_id = $1`,
+        queryPlan.exact ? `path = $2::ltree` : `path <@ $2::ltree`,
+        `node_type = 'file'`,
+      ];
+      const params: (string | number)[] = [this.workspaceId, scopeLtree];
+
+      if (!queryPlan.exact && queryPlan.fixedDepth !== null) {
+        where.push(`nlevel(path) = nlevel($2::ltree) + ${queryPlan.fixedDepth}`);
+      }
+
+      if (queryPlan.basename !== null) {
+        where.push(`name = $${params.length + 1}`);
+        params.push(queryPlan.basename);
+      }
+
+      const result = await tx.query<{ path: string }>(
+        `SELECT path::text FROM fs_nodes
+         WHERE ${where.join("\n           AND ")}
          ORDER BY path`,
-        [this.workspaceId, scopeLtree],
+        params,
       );
 
       const regex = globToRegex(pattern);
@@ -1270,7 +1514,7 @@ export class PgFileSystem {
         .map((p) => this.toUserPath(p))
         .filter((p) => {
           if (!this.isPathReadable(p)) return false;
-          const relative = userCwd === "/" ? p : p.slice(userCwd.length);
+          const relative = userCwd === "/" ? p.slice(1) : p.slice(userCwd.length + 1);
           return regex.test(relative);
         });
     });
@@ -1318,6 +1562,71 @@ function globToRegex(pattern: string): RegExp {
   }
   regex += "$";
   return new RegExp(regex);
+}
+
+function injectWorkspaceSettings(text: string): string {
+  const trimmed = text.trimStart();
+  const leading = text.slice(0, text.length - trimmed.length);
+  const shifted = shiftSqlParams(trimmed, 2);
+  const settingsCte =
+    "_bash_gres_settings AS (SELECT set_config('app.workspace_id', $1, true), set_config('statement_timeout', $2, true))";
+
+  if (/^WITH\b/i.test(trimmed)) {
+    return `${leading}WITH ${settingsCte}, ${shifted.slice(5)}`;
+  }
+
+  return `${leading}WITH ${settingsCte} ${shifted}`;
+}
+
+function shiftSqlParams(text: string, offset: number): string {
+  return text.replace(/\$(\d+)/g, (_match, index) => `$${Number(index) + offset}`);
+}
+
+function globLiteralPrefix(pattern: string): string | null {
+  const segments = pattern.split("/");
+  const prefix: string[] = [];
+
+  for (const segment of segments) {
+    if (segment === "" || segment === "." || segment === "..") break;
+    if (/[?*{]/.test(segment)) break;
+    prefix.push(segment);
+  }
+
+  return prefix.length > 0 ? prefix.join("/") : null;
+}
+
+function analyzeGlobPattern(
+  pattern: string,
+  literalPrefix: string | null,
+): {
+  exact: boolean;
+  fixedDepth: number | null;
+  basename: string | null;
+} {
+  const relative = stripGlobLiteralPrefix(pattern, literalPrefix);
+  if (relative === "") {
+    return { exact: true, fixedDepth: 0, basename: null };
+  }
+
+  const segments = relative.split("/").filter(Boolean);
+  const basename = segments.at(-1) ?? null;
+  return {
+    exact: false,
+    fixedDepth: segments.includes("**") ? null : segments.length,
+    basename:
+      basename !== null && !/[?*{]/.test(basename)
+        ? basename
+        : null,
+  };
+}
+
+function stripGlobLiteralPrefix(
+  pattern: string,
+  literalPrefix: string | null,
+): string {
+  if (!literalPrefix) return pattern;
+  const prefixSegments = literalPrefix.split("/").filter(Boolean).length;
+  return pattern.split("/").slice(prefixSegments).join("/");
 }
 
 function escapeRegex(s: string): string {

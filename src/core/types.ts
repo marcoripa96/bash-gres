@@ -1,4 +1,12 @@
-export type SqlParam = string | number | boolean | null | Uint8Array | Date | string[];
+export type SqlParam =
+  | string
+  | number
+  | boolean
+  | null
+  | Uint8Array
+  | Date
+  | string[]
+  | number[];
 
 export interface QueryResult<T> {
   rows: T[];
@@ -52,6 +60,18 @@ export interface DirentEntry {
   isFile: boolean;
   isDirectory: boolean;
   isSymbolicLink: boolean;
+}
+
+export interface DirentStatEntry extends DirentEntry {
+  mode: number;
+  size: number;
+  mtime: Date;
+  symlinkTarget: string | null;
+}
+
+export interface WalkEntry extends DirentStatEntry {
+  path: string;
+  depth: number;
 }
 
 export interface SearchResult {

@@ -8,6 +8,8 @@ export {
   type QueryResult,
   type FsStat,
   type DirentEntry,
+  type DirentStatEntry,
+  type WalkEntry,
   type SearchResult,
   type BashResult,
   type MkdirOptions,

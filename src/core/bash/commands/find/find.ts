@@ -51,61 +51,25 @@ export const findCommand: Command = {
       }
 
       if (rootInfo.isDirectory) {
-        await findRecursive(
-          ctx,
-          resolved,
-          namePattern,
-          typeFilter,
-          resolved,
-          useRelative,
-          displayRoot,
-          found,
-        );
+        const descendants = await ctx.fs.walk(resolved);
+        for (const entry of descendants) {
+          if (!matchesEntry(entry.name, entry, namePattern, typeFilter)) {
+            continue;
+          }
+
+          if (useRelative) {
+            const suffix = entry.path.slice(resolved.length);
+            found.push(`${displayRoot}${suffix}`);
+          } else {
+            found.push(entry.path);
+          }
+        }
       }
     }
 
     return ok(found.join("\n") + (found.length ? "\n" : ""));
   },
 };
-
-async function findRecursive(
-  ctx: CommandContext,
-  dir: string,
-  namePattern: string | null,
-  typeFilter: "f" | "d" | "l" | null,
-  searchRoot: string,
-  useRelative: boolean,
-  displayRoot: string,
-  results: string[],
-): Promise<void> {
-  const entries = await ctx.fs.readdirWithTypes(dir);
-
-  for (const entry of entries) {
-    const fullPath = dir === "/" ? `/${entry.name}` : `${dir}/${entry.name}`;
-
-    if (matchesEntry(entry.name, entry, namePattern, typeFilter)) {
-      if (useRelative) {
-        const suffix = fullPath.slice(searchRoot.length);
-        results.push(`${displayRoot}${suffix}`);
-      } else {
-        results.push(fullPath);
-      }
-    }
-
-    if (entry.isDirectory) {
-      await findRecursive(
-        ctx,
-        fullPath,
-        namePattern,
-        typeFilter,
-        searchRoot,
-        useRelative,
-        displayRoot,
-        results,
-      );
-    }
-  }
-}
 
 function matchesEntry(
   name: string,

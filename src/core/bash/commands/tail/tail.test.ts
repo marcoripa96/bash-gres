@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
 
 describe("bash: tail", () => {
@@ -82,5 +82,20 @@ describe("bash: tail", () => {
     await ctx.fs.writeFile("/noeol.txt", "line1\nline2");
     const r = await ctx.bash.execute("tail -n 1 /noeol.txt");
     expect(r.stdout).toBe("line2");
+  });
+
+  it("uses ranged reads for positive line counts", async () => {
+    await ctx.fs.writeFile("/data.txt", twentyLines);
+    const statSpy = vi.spyOn(ctx.fs, "stat");
+    const readFileSpy = vi.spyOn(ctx.fs, "readFile");
+
+    const r = await ctx.bash.execute("tail -n 2 /data.txt");
+
+    expect(r.exitCode).toBe(0);
+    expect(statSpy).toHaveBeenCalledWith("/data.txt");
+    expect(readFileSpy).toHaveBeenCalledWith(
+      "/data.txt",
+      expect.objectContaining({ offset: expect.any(Number), limit: expect.any(Number) }),
+    );
   });
 });

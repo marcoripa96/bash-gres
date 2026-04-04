@@ -2,6 +2,8 @@ import yargsParser from "yargs-parser";
 import type { Command } from "../../types.js";
 import { ok } from "../../types.js";
 
+const WHITESPACE_RE = /\s/;
+
 export const wcCommand: Command = {
   name: "wc",
   async execute(args, ctx, pipedInput) {
@@ -18,40 +20,67 @@ export const wcCommand: Command = {
       countLines = countWords = countChars = true;
     }
 
-    const formatWcLine = (text: string, name: string): string => {
-      const lines =
-        text.length === 0
-          ? 0
-          : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
-      const words = text.split(/\s+/).filter(Boolean).length;
-      const chars = new TextEncoder().encode(text).byteLength;
-
+    const formatWcLine = (counts: WcCounts, name: string): string => {
       const parts: string[] = [];
-      if (countLines) parts.push(String(lines));
-      if (countWords) parts.push(String(words));
-      if (countChars) parts.push(String(chars));
+      if (countLines) parts.push(String(counts.lines));
+      if (countWords) parts.push(String(counts.words));
+      if (countChars) parts.push(String(counts.chars));
       return parts.join("\t") + (name ? `\t${name}` : "");
     };
 
     if (paths.length === 0) {
-      return ok(formatWcLine(pipedInput, "") + "\n");
+      return ok(formatWcLine(countText(pipedInput), "") + "\n");
     }
 
     const outputLines: string[] = [];
+    const totalCounts: WcCounts = { lines: 0, words: 0, chars: 0 };
     for (const p of paths) {
       const text = await ctx.fs.readFile(ctx.resolve(p));
-      outputLines.push(formatWcLine(text, p));
+      const counts = countText(text);
+      totalCounts.lines += counts.lines;
+      totalCounts.words += counts.words;
+      totalCounts.chars += counts.chars;
+      outputLines.push(formatWcLine(counts, p));
     }
 
     if (paths.length > 1) {
-      // Add total line
-      let totalText = "";
-      for (const p of paths) {
-        totalText += await ctx.fs.readFile(ctx.resolve(p));
-      }
-      outputLines.push(formatWcLine(totalText, "total"));
+      outputLines.push(formatWcLine(totalCounts, "total"));
     }
 
     return ok(outputLines.join("\n") + "\n");
   },
 };
+
+interface WcCounts {
+  lines: number;
+  words: number;
+  chars: number;
+}
+
+function countText(text: string): WcCounts {
+  let newlineCount = 0;
+  let words = 0;
+  let inWord = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (char === "\n") newlineCount++;
+
+    const isWhitespace = WHITESPACE_RE.test(char);
+    if (isWhitespace) {
+      inWord = false;
+      continue;
+    }
+
+    if (!inWord) {
+      words++;
+      inWord = true;
+    }
+  }
+
+  return {
+    lines: text.length === 0 ? 0 : newlineCount + (text.endsWith("\n") ? 0 : 1),
+    words,
+    chars: new TextEncoder().encode(text).byteLength,
+  };
+}

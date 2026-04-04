@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
 
 describe("bash: find", () => {
@@ -142,6 +142,21 @@ describe("bash: find", () => {
       await ctx.fs.writeFile("/dir/file.txt", "x");
       const r = await ctx.bash.execute("find /dir -name file.txt");
       expect(r.stdout).toContain("/dir/file.txt");
+    });
+
+    it("walks the subtree without per-directory readdir calls", async () => {
+      await ctx.fs.mkdir("/dir/a/b", { recursive: true });
+      await ctx.fs.writeFile("/dir/a/file.txt", "x");
+      await ctx.fs.writeFile("/dir/a/b/deep.txt", "x");
+
+      const walkSpy = vi.spyOn(ctx.fs, "walk");
+      const readdirSpy = vi.spyOn(ctx.fs, "readdirWithTypes");
+
+      const r = await ctx.bash.execute("find /dir");
+
+      expect(r.exitCode).toBe(0);
+      expect(walkSpy).toHaveBeenCalledTimes(1);
+      expect(readdirSpy).not.toHaveBeenCalled();
     });
   });
 

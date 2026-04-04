@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { createTestClient } from "../../../../../tests/helpers.js";
+import { ensureSetup } from "../../../../../tests/global-setup.js";
+import { PgFileSystem } from "../../../filesystem.js";
+import { BashInterpreter } from "../../interpreter.js";
 
 describe("bash: cat", () => {
   const ctx = setupBash("bash-cat");
@@ -72,5 +76,45 @@ describe("bash: cat", () => {
     await ctx.fs.writeFile("/src.txt", "source data");
     await ctx.bash.execute("cat /src.txt > /dest.txt");
     expect(await ctx.fs.readFile("/dest.txt")).toBe("source data");
+  });
+
+  it("reads files via ranged chunks", async () => {
+    await ctx.fs.writeFile("/big.txt", "x".repeat(5000));
+    const readFileSpy = vi.spyOn(ctx.fs, "readFile");
+
+    const r = await ctx.bash.execute("cat /big.txt");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("x".repeat(5000));
+    expect(readFileSpy).toHaveBeenCalledWith(
+      "/big.txt",
+      expect.objectContaining({ offset: 0, limit: expect.any(Number) }),
+    );
+  });
+
+  it("reads files larger than maxReadSize by chunking", async () => {
+    await ensureSetup();
+    const { sql, client } = createTestClient();
+
+    try {
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
+        "bash-cat-chunked",
+      ]);
+      const fs = new PgFileSystem({
+        db: client,
+        workspaceId: "bash-cat-chunked",
+        maxReadSize: 4,
+      });
+      await fs.init();
+      const bash = new BashInterpreter(fs);
+      await fs.writeFile("/big.txt", "abcdef");
+
+      const r = await bash.execute("cat /big.txt");
+
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("abcdef");
+    } finally {
+      await sql.end();
+    }
   });
 });

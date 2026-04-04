@@ -43,14 +43,7 @@ export const grepCommand: Command = {
         await grepRecursive(ctx, resolved, regex, lineNumbers, allMatches);
       } else {
         const content = await ctx.fs.readFile(resolved);
-        const lines = content.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (regex.test(lines[i])) {
-            const prefix = showPrefix ? `${filePath}:` : "";
-            const numPrefix = lineNumbers ? `${i + 1}:` : "";
-            allMatches.push(`${prefix}${numPrefix}${lines[i]}`);
-          }
-        }
+        pushMatches(content, regex, lineNumbers, showPrefix ? `${filePath}:` : "", allMatches);
       }
     }
 
@@ -70,30 +63,48 @@ async function grepRecursive(
   const info = await ctx.fs.stat(path);
   if (info.isFile) {
     const content = await ctx.fs.readFile(path);
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      if (regex.test(lines[i])) {
-        const numPrefix = lineNumbers ? `${i + 1}:` : "";
-        results.push(`${path}:${numPrefix}${lines[i]}`);
-      }
-    }
+    pushMatches(content, regex, lineNumbers, `${path}:`, results);
     return;
   }
-  const entries = await ctx.fs.readdirWithTypes(path);
+
+  const resolvedRoot = await ctx.fs.realpath(path).catch(() => path);
+  const entries = await ctx.fs.walk(path);
   for (const entry of entries) {
-    const fullPath =
-      path === "/" ? `/${entry.name}` : `${path}/${entry.name}`;
-    if (entry.isDirectory) {
-      await grepRecursive(ctx, fullPath, regex, lineNumbers, results);
-    } else if (entry.isFile) {
-      const content = await ctx.fs.readFile(fullPath);
-      const lines = content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (regex.test(lines[i])) {
-          const numPrefix = lineNumbers ? `${i + 1}:` : "";
-          results.push(`${fullPath}:${numPrefix}${lines[i]}`);
-        }
-      }
+    if (!entry.isFile) {
+      continue;
     }
+
+    const entryPath =
+      resolvedRoot === path
+        ? entry.path
+        : path + entry.path.slice(resolvedRoot.length);
+    const content = await ctx.fs.readFile(entryPath);
+    pushMatches(content, regex, lineNumbers, `${entryPath}:`, results);
+  }
+}
+
+function pushMatches(
+  content: string,
+  regex: RegExp,
+  lineNumbers: boolean,
+  prefix: string,
+  results: string[],
+): void {
+  let lineStart = 0;
+  let lineNumber = 1;
+
+  for (let i = 0; i <= content.length; i++) {
+    if (i !== content.length && content[i] !== "\n") {
+      continue;
+    }
+
+    const line = content.slice(lineStart, i);
+    if (regex.test(line)) {
+      const numPrefix = lineNumbers ? `${lineNumber}:` : "";
+      results.push(`${prefix}${numPrefix}${line}`);
+    }
+
+    lineStart = i + 1;
+    lineNumber++;
   }
 }

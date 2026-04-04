@@ -95,6 +95,8 @@ class BashInterpreter {
 
   private async expandGlobs(args: string[]): Promise<string[]> {
     const result: string[] = [];
+    const directoryEntries = new Map<string, Promise<Awaited<ReturnType<PgFileSystem["readdirWithTypes"]>>>>();
+
     for (const arg of args) {
       if (/[*?]/.test(arg) && !arg.startsWith("-")) {
         const dir = this.resolve(
@@ -104,7 +106,12 @@ class BashInterpreter {
           ? arg.slice(arg.lastIndexOf("/") + 1)
           : arg;
         try {
-          const entries = await this.fs.readdirWithTypes(dir);
+          let entriesPromise = directoryEntries.get(dir);
+          if (!entriesPromise) {
+            entriesPromise = this.fs.readdirWithTypes(dir);
+            directoryEntries.set(dir, entriesPromise);
+          }
+          const entries = await entriesPromise;
           const matched = entries
             .filter((e) => matchGlob(e.name, pattern))
             .map((e) => (dir === "/" ? `/${e.name}` : `${dir}/${e.name}`));

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "./_setup.js";
 
 describe("bash: general", () => {
@@ -174,6 +174,18 @@ describe("bash: general", () => {
       const r = await ctx.bash.execute("ls /*.zzz");
       // Should fail because *.zzz doesn't match anything, passed as literal
       expect(r.exitCode).not.toBe(0);
+    });
+
+    it("reuses a directory listing for multiple globs in the same directory", async () => {
+      await ctx.fs.writeFile("/a.txt", "aaa");
+      await ctx.fs.writeFile("/b.log", "bbb");
+      await ctx.fs.writeFile("/c.txt", "ccc");
+      const readdirSpy = vi.spyOn(ctx.fs, "readdirWithTypes");
+
+      const r = await ctx.bash.execute("ls /*.txt /*.log");
+
+      expect(r.exitCode).toBe(0);
+      expect(readdirSpy).toHaveBeenCalledTimes(1);
     });
   });
 

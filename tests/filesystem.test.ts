@@ -56,6 +56,22 @@ describe("PgFileSystem", () => {
       await fs.writeFile("/a/b/c/file.txt", "deep", { recursive: true });
       expect(await fs.readFile("/a/b/c/file.txt")).toBe("deep");
     });
+
+    it("reads ranged slices through symlinks", async () => {
+      await fs.writeFile("/target.txt", "abcdef");
+      await fs.symlink("/target.txt", "/link.txt");
+
+      expect(await fs.readFile("/link.txt", { offset: 1, limit: 3 })).toBe("bcd");
+    });
+
+    it("reads ranged slices from binary-backed files", async () => {
+      await fs.writeFile(
+        "/bytes.bin",
+        new TextEncoder().encode("abcdef"),
+      );
+
+      expect(await fs.readFile("/bytes.bin", { offset: 2, limit: 2 })).toBe("cd");
+    });
   });
 
   describe("readFileBuffer", () => {
@@ -173,6 +189,37 @@ describe("PgFileSystem", () => {
     it("throws ENOENT for non-existent dir", async () => {
       await expect(fs.readdir("/nope")).rejects.toThrow("ENOENT");
     });
+
+    it("readdirWithStats returns metadata in one pass", async () => {
+      await fs.mkdir("/parent");
+      await fs.writeFile("/parent/a.txt", "hello");
+      await fs.symlink("/parent/a.txt", "/parent/link.txt");
+
+      const entries = await fs.readdirWithStats("/parent");
+      const byName = new Map(entries.map((entry) => [entry.name, entry]));
+
+      expect(byName.get("a.txt")).toMatchObject({
+        isFile: true,
+        size: 5,
+        symlinkTarget: null,
+      });
+      expect(byName.get("link.txt")).toMatchObject({
+        isSymbolicLink: true,
+        symlinkTarget: "/parent/a.txt",
+      });
+    });
+
+    it("walk returns nested descendants in path order", async () => {
+      await fs.mkdir("/parent/sub", { recursive: true });
+      await fs.writeFile("/parent/a.txt", "hello");
+      await fs.writeFile("/parent/sub/b.txt", "world");
+
+      expect(await fs.walk("/parent")).toMatchObject([
+        { path: "/parent/a.txt", depth: 1, isFile: true },
+        { path: "/parent/sub", depth: 1, isDirectory: true },
+        { path: "/parent/sub/b.txt", depth: 2, isFile: true },
+      ]);
+    });
   });
 
   describe("rm", () => {
@@ -200,6 +247,21 @@ describe("PgFileSystem", () => {
       await fs.rm("/tree", { recursive: true });
       expect(await fs.exists("/tree")).toBe(false);
       expect(await fs.exists("/tree/sub")).toBe(false);
+    });
+
+    it("recursive removes deep trees with siblings", async () => {
+      await fs.mkdir("/tree/a/b", { recursive: true });
+      await fs.mkdir("/tree/a/c", { recursive: true });
+      await fs.mkdir("/tree/d/e", { recursive: true });
+      await fs.writeFile("/tree/a/b/one.txt", "1");
+      await fs.writeFile("/tree/a/c/two.txt", "2");
+      await fs.writeFile("/tree/d/e/three.txt", "3");
+
+      await fs.rm("/tree", { recursive: true });
+
+      expect(await fs.exists("/tree")).toBe(false);
+      expect(await fs.exists("/tree/a/b/one.txt")).toBe(false);
+      expect(await fs.exists("/tree/d/e/three.txt")).toBe(false);
     });
 
     it("force ignores non-existent", async () => {
@@ -251,6 +313,48 @@ describe("PgFileSystem", () => {
       await fs.mkdir("/dest");
       await fs.mv("/srcdir", "/dest/moved");
       expect(await fs.readFile("/dest/moved/sub/file.txt")).toBe("data");
+    });
+  });
+
+  describe("glob", () => {
+    it("matches patterns with a literal directory prefix", async () => {
+      await fs.mkdir("/src/lib", { recursive: true });
+      await fs.writeFile("/src/app.ts", "app");
+      await fs.writeFile("/src/lib/util.ts", "util");
+      await fs.writeFile("/docs/readme.md", "docs", { recursive: true });
+
+      const results = await fs.glob("lib/**/*.ts", { cwd: "/src" });
+
+      expect(results).toEqual(["/src/lib/util.ts"]);
+    });
+
+    it("matches exact file patterns", async () => {
+      await fs.writeFile("/src/app.ts", "app", { recursive: true });
+      await fs.writeFile("/src/other.ts", "other");
+
+      expect(await fs.glob("app.ts", { cwd: "/src" })).toEqual(["/src/app.ts"]);
+    });
+
+    it("matches only direct children for single-segment patterns", async () => {
+      await fs.mkdir("/src/lib", { recursive: true });
+      await fs.writeFile("/src/app.ts", "app");
+      await fs.writeFile("/src/lib/nested.ts", "nested");
+
+      expect(await fs.glob("*.ts", { cwd: "/src" })).toEqual(["/src/app.ts"]);
+    });
+
+    it("matches exact basenames recursively", async () => {
+      await fs.mkdir("/src/lib/deep", { recursive: true });
+      await fs.writeFile("/src/app.ts", "app");
+      await fs.writeFile("/src/lib/app.ts", "lib app");
+      await fs.writeFile("/src/lib/deep/app.ts", "deep app");
+      await fs.writeFile("/src/lib/deep/other.ts", "other");
+
+      expect(await fs.glob("**/app.ts", { cwd: "/src" })).toEqual([
+        "/src/app.ts",
+        "/src/lib/app.ts",
+        "/src/lib/deep/app.ts",
+      ]);
     });
   });
 

@@ -1,12 +1,19 @@
+const globRegexCache = new Map<string, RegExp>();
+
 export function matchGlob(name: string, pattern: string): boolean {
-  let regex = "^";
-  for (const char of pattern) {
-    if (char === "*") regex += ".*";
-    else if (char === "?") regex += ".";
-    else regex += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let regex = globRegexCache.get(pattern);
+  if (!regex) {
+    let source = "^";
+    for (const char of pattern) {
+      if (char === "*") source += ".*";
+      else if (char === "?") source += ".";
+      else source += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+    source += "$";
+    regex = new RegExp(source);
+    globRegexCache.set(pattern, regex);
   }
-  regex += "$";
-  return new RegExp(regex).test(name);
+  return regex.test(name);
 }
 
 export function formatLong(

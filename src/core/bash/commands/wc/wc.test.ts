@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
 
 describe("bash: wc", () => {
@@ -69,6 +69,17 @@ describe("bash: wc", () => {
       expect(r.stdout).toContain("/a.txt");
       expect(r.stdout).toContain("/b.txt");
       expect(r.stdout).toContain("total");
+    });
+
+    it("reads each file once when computing totals", async () => {
+      await ctx.fs.writeFile("/a.txt", "one\n");
+      await ctx.fs.writeFile("/b.txt", "two\nthree\n");
+      const readFileSpy = vi.spyOn(ctx.fs, "readFile");
+
+      const r = await ctx.bash.execute("wc -l /a.txt /b.txt");
+
+      expect(r.exitCode).toBe(0);
+      expect(readFileSpy).toHaveBeenCalledTimes(2);
     });
   });
 

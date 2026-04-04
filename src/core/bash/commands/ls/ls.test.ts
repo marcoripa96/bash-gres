@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
 
 describe("bash: ls", () => {
@@ -133,6 +133,26 @@ describe("bash: ls", () => {
       await ctx.fs.writeFile("/somedir/child.txt", "x");
       const r2 = await ctx.bash.execute("ls -l /somedir");
       expect(r2.stdout).toContain("child.txt");
+    });
+
+    it("batches entry metadata lookups for directory listings", async () => {
+      await ctx.fs.mkdir("/dir");
+      await ctx.fs.writeFile("/dir/a.txt", "a");
+      await ctx.fs.writeFile("/dir/b.txt", "b");
+      await ctx.fs.symlink("/dir/a.txt", "/dir/link.txt");
+
+      const lstatSpy = vi.spyOn(ctx.fs, "lstat");
+      const readlinkSpy = vi.spyOn(ctx.fs, "readlink");
+      const readdirWithTypesSpy = vi.spyOn(ctx.fs, "readdirWithTypes");
+      const readdirWithStatsSpy = vi.spyOn(ctx.fs, "readdirWithStats");
+
+      const r = await ctx.bash.execute("ls -l /dir");
+
+      expect(r.exitCode).toBe(0);
+      expect(readdirWithStatsSpy).toHaveBeenCalledTimes(1);
+      expect(readdirWithTypesSpy).not.toHaveBeenCalled();
+      expect(lstatSpy).toHaveBeenCalledTimes(1);
+      expect(readlinkSpy).not.toHaveBeenCalled();
     });
   });
 

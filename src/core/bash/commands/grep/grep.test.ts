@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
 
 describe("bash: grep", () => {
@@ -93,6 +93,22 @@ describe("bash: grep", () => {
       const r = await ctx.bash.execute("grep -r match /dir");
       expect(r.stdout).toContain("/dir/a.txt:");
       expect(r.stdout).toContain("/dir/b.txt:");
+    });
+
+    it("uses subtree walk instead of recursive readdir calls", async () => {
+      await ctx.fs.mkdir("/dir/sub/deep", { recursive: true });
+      await ctx.fs.writeFile("/dir/a.txt", "match\n");
+      await ctx.fs.writeFile("/dir/sub/b.txt", "match\n");
+      await ctx.fs.writeFile("/dir/sub/deep/c.txt", "match\n");
+
+      const walkSpy = vi.spyOn(ctx.fs, "walk");
+      const readdirSpy = vi.spyOn(ctx.fs, "readdirWithTypes");
+
+      const r = await ctx.bash.execute("grep -r match /dir");
+
+      expect(r.exitCode).toBe(0);
+      expect(walkSpy).toHaveBeenCalledTimes(1);
+      expect(readdirSpy).not.toHaveBeenCalled();
     });
   });
 

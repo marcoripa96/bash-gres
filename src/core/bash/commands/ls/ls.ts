@@ -88,12 +88,11 @@ async function lsDir(
   longFormat: boolean,
   showAll: boolean,
 ): Promise<string[]> {
-  const entries = await ctx.fs.readdirWithTypes(target);
-  const filtered = showAll
-    ? entries
-    : entries.filter((entry) => !entry.name.startsWith("."));
-
   if (!longFormat) {
+    const entries = await ctx.fs.readdirWithTypes(target);
+    const filtered = showAll
+      ? entries
+      : entries.filter((entry) => !entry.name.startsWith("."));
     const names: string[] = [];
     if (showAll) names.push(".", "..");
     names.push(...filtered.map((entry) => entry.name));
@@ -112,13 +111,16 @@ async function lsDir(
     lines.push(formatLong("..", parentStat));
   }
 
-  for (const entry of filtered) {
-    const entryPath = target === "/" ? `/${entry.name}` : `${target}/${entry.name}`;
-    const entryStat = await ctx.fs.lstat(entryPath);
-    const displayName = entry.isSymbolicLink
-      ? `${entry.name} -> ${await ctx.fs.readlink(entryPath)}`
+  const detailedEntries = await ctx.fs.readdirWithStats(target);
+  const visibleEntries = showAll
+    ? detailedEntries
+    : detailedEntries.filter((entry) => !entry.name.startsWith("."));
+
+  for (const entry of visibleEntries) {
+    const displayName = entry.isSymbolicLink && entry.symlinkTarget !== null
+      ? `${entry.name} -> ${entry.symlinkTarget}`
       : entry.name;
-    lines.push(formatLong(displayName, entryStat));
+    lines.push(formatLong(displayName, entry));
   }
 
   return lines;
