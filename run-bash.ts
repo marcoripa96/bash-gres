@@ -5,6 +5,8 @@ import { PgFileSystem } from "./src/core/filesystem.js";
 import { BashInterpreter } from "./src/core/bash.js";
 import { createInterface } from "readline";
 
+const sessionId = process.argv[2] || "manual-test";
+
 const sql = postgres("postgres://postgres:postgres@localhost:5433/bashgres_test", {
   onnotice: () => {},
 });
@@ -16,7 +18,7 @@ await setup(client, {
   enableVectorSearch: false,
 });
 
-const fs = new PgFileSystem({ db: client, sessionId: "manual-test" });
+const fs = new PgFileSystem({ db: client, sessionId });
 await fs.init();
 const bash = new BashInterpreter(fs);
 
@@ -32,5 +34,4 @@ for await (const line of rl) {
   if (r.exitCode !== 0) console.log(`[exit ${r.exitCode}]`);
 }
 
-await client.query("DELETE FROM fs_nodes WHERE session_id = $1", ["manual-test"]);
 await sql.end();
