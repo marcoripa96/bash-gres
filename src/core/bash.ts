@@ -513,6 +513,18 @@ export class BashInterpreter {
     lineNumbers: boolean,
     results: string[],
   ): Promise<void> {
+    const info = await this.fs.stat(path);
+    if (info.isFile) {
+      const content = await this.fs.readFile(path);
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (regex.test(lines[i])) {
+          const numPrefix = lineNumbers ? `${i + 1}:` : "";
+          results.push(`${path}:${numPrefix}${lines[i]}`);
+        }
+      }
+      return;
+    }
     const entries = await this.fs.readdirWithTypes(path);
     for (const entry of entries) {
       const fullPath = path === "/" ? `/${entry.name}` : `${path}/${entry.name}`;
