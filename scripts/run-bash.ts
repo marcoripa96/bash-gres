@@ -1,8 +1,8 @@
 import postgres from "postgres";
-import { createPostgresClient } from "./src/adapters/postgres/index.js";
-import { setup } from "./src/core/setup.js";
-import { PgFileSystem } from "./src/core/filesystem.js";
-import { BashInterpreter } from "./src/core/bash.js";
+import { createPostgresClient } from "../src/adapters/postgres/index.js";
+import { setup } from "../src/core/setup.js";
+import { PgFileSystem } from "../src/core/filesystem.js";
+import { BashInterpreter } from "../src/core/bash/interpreter.js";
 import { createInterface } from "readline";
 
 const sessionId = process.argv[2] || "manual-test";
