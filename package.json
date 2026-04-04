@@ -1,0 +1,68 @@
+{
+  "name": "bash-gres",
+  "version": "0.1.0",
+  "description": "PostgreSQL-backed virtual filesystem with bash command interface",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./drizzle": {
+      "types": "./dist/adapters/drizzle/index.d.ts",
+      "import": "./dist/adapters/drizzle/index.js"
+    },
+    "./postgres": {
+      "types": "./dist/adapters/postgres/index.d.ts",
+      "import": "./dist/adapters/postgres/index.js"
+    },
+    "./bash": {
+      "types": "./dist/core/bash.d.ts",
+      "import": "./dist/core/bash.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "postgresql",
+    "filesystem",
+    "bash",
+    "drizzle",
+    "ltree",
+    "pg_textsearch",
+    "bm25",
+    "virtual-filesystem",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "drizzle-orm": ">=0.30.0",
+    "postgres": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "postgres": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^10.0.0",
+    "@types/node": "^25.5.2",
+    "drizzle-orm": "^0.40.0",
+    "postgres": "^3.4.8",
+    "testcontainers": "^10.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
