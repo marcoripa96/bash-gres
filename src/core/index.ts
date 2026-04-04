@@ -16,6 +16,7 @@ export {
   type ReadFileOptions,
   type SetupOptions,
   type FsPermissions,
+  type FsAccess,
   type PgFileSystemOptions,
 } from "./types.js";
 export {

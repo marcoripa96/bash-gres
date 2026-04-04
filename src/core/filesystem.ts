@@ -3,6 +3,7 @@ import type {
   SqlClient,
   PgFileSystemOptions,
   FsPermissions,
+  FsAccess,
   FsStat,
   DirentEntry,
   MkdirOptions,
@@ -58,6 +59,9 @@ export class PgFileSystem {
   private statementTimeoutMs: number;
   private embed?: (text: string) => Promise<number[]>;
   private embeddingDimensions?: number;
+  private rootDir: string;
+  private accessRead: string[] | null;
+  private accessWrite: string[] | null;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -75,6 +79,17 @@ export class PgFileSystem {
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
+    this.rootDir = normalizePath(options.rootDir ?? "/");
+
+    if (options.access) {
+      const write = (options.access.write ?? []).map((p) => normalizePath(p));
+      const read = (options.access.read ?? []).map((p) => normalizePath(p));
+      this.accessRead = [...read, ...write];
+      this.accessWrite = write;
+    } else {
+      this.accessRead = null;
+      this.accessWrite = null;
+    }
   }
 
   async init(): Promise<void> {
@@ -86,6 +101,10 @@ export class PgFileSystem {
          ON CONFLICT (workspace_id, path) DO NOTHING`,
         [this.workspaceId, rootLtree, 0o755],
       );
+
+      if (this.rootDir !== "/") {
+        await this.internalMkdir(tx, this.rootDir, { recursive: true });
+      }
     });
   }
 
@@ -191,10 +210,16 @@ export class PgFileSystem {
   }
 
   private resolveLinkTargetPath(linkPath: string, target: string): string {
+    let resolved: string;
     if (target.startsWith("/")) {
-      return normalizePath(target);
+      // Absolute symlink targets are in user space — convert to internal
+      resolved = this.toInternalPath(normalizePath(target));
+    } else {
+      // Relative targets resolve from the link's parent (already internal)
+      resolved = normalizePath(parentPath(linkPath) + "/" + target);
     }
-    return this.resolvePath(parentPath(linkPath), target);
+    this.guardRootBoundary(resolved);
+    return resolved;
   }
 
   private validateFileSize(content: string | Uint8Array): void {
@@ -228,6 +253,105 @@ export class PgFileSystem {
         `Path too deep: ${depth} levels exceeds maximum of ${this.maxDepth}`,
       );
     }
+  }
+
+  // -- Path translation & access guards ---------------------------------------
+
+  private toInternalPath(userPath: string): string {
+    const p = normalizePath(userPath);
+    if (this.rootDir === "/") return p;
+    return p === "/" ? this.rootDir : normalizePath(this.rootDir + p);
+  }
+
+  private toUserPath(internalPath: string): string {
+    if (this.rootDir === "/") return internalPath;
+    if (internalPath === this.rootDir) return "/";
+    return internalPath.slice(this.rootDir.length);
+  }
+
+  private isAncestorOfAllowed(
+    path: string,
+    allowedPaths: string[],
+  ): boolean {
+    const prefix = path === "/" ? "/" : path + "/";
+    return allowedPaths.some(
+      (dir) => dir.startsWith(prefix) || dir === path,
+    );
+  }
+
+  private guardRead(userPath: string): string {
+    const p = normalizePath(userPath);
+    if (this.accessRead !== null) {
+      const allowed = this.accessRead.some(
+        (dir) => p === dir || p.startsWith(dir + "/"),
+      );
+      if (!allowed && !this.isAncestorOfAllowed(p, this.accessRead)) {
+        throw new FsError("EACCES", "permission denied", userPath);
+      }
+    }
+    return this.toInternalPath(p);
+  }
+
+  private guardWrite(userPath: string): string {
+    const p = normalizePath(userPath);
+    if (this.accessWrite !== null) {
+      const allowed = this.accessWrite.some(
+        (dir) => p === dir || p.startsWith(dir + "/"),
+      );
+      if (!allowed) {
+        throw new FsError("EACCES", "permission denied", userPath);
+      }
+    }
+    return this.toInternalPath(p);
+  }
+
+  private syntheticReaddir(
+    path: string,
+    allowedPaths: string[],
+  ): string[] {
+    const prefix = path === "/" ? "/" : path + "/";
+    const entries = new Set<string>();
+    for (const dir of allowedPaths) {
+      if (dir.startsWith(prefix)) {
+        const rest = dir.slice(prefix.length);
+        const firstSegment = rest.split("/")[0];
+        if (firstSegment) entries.add(firstSegment);
+      }
+    }
+    return [...entries].sort();
+  }
+
+  private syntheticReaddirWithTypes(
+    path: string,
+    allowedPaths: string[],
+  ): DirentEntry[] {
+    return this.syntheticReaddir(path, allowedPaths).map((name) => ({
+      name,
+      isFile: false,
+      isDirectory: true,
+      isSymbolicLink: false,
+    }));
+  }
+
+  private guardRootBoundary(internalPath: string): void {
+    if (this.rootDir === "/") return;
+    if (
+      internalPath !== this.rootDir &&
+      !internalPath.startsWith(this.rootDir + "/")
+    ) {
+      throw new FsError(
+        "EACCES",
+        "symlink target outside root boundary",
+        this.toUserPath(internalPath),
+      );
+    }
+  }
+
+  private isPathReadable(userPath: string): boolean {
+    if (this.accessRead === null) return true;
+    return this.accessRead.some(
+      (dir) => userPath === dir || userPath.startsWith(dir + "/"),
+    );
   }
 
   // -- Internal write ---------------------------------------------------------
@@ -451,13 +575,12 @@ export class PgFileSystem {
   // -- Public API: File I/O ---------------------------------------------------
 
   async readFile(path: string, options?: ReadFileOptions): Promise<string> {
+    const internal = this.guardRead(path);
     const hasRange = options?.offset !== undefined || options?.limit !== undefined;
 
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-
       if (hasRange) {
-        const node = await this.resolveSymlinkMeta(tx, p);
+        const node = await this.resolveSymlinkMeta(tx, internal);
         if (node.node_type === "directory")
           throw new FsError("EISDIR", "illegal operation on a directory, read", path);
 
@@ -468,7 +591,7 @@ export class PgFileSystem {
           ? `substr(COALESCE(content, ''), $3, $4)`
           : `substr(COALESCE(content, ''), $3)`;
 
-        const params: (string | number)[] = [this.workspaceId, pathToLtree(p, this.workspaceId), sqlOffset];
+        const params: (string | number)[] = [this.workspaceId, pathToLtree(internal, this.workspaceId), sqlOffset];
         if (sqlLimit !== undefined) params.push(sqlLimit);
 
         const result = await tx.query<{ chunk: string }>(
@@ -480,7 +603,7 @@ export class PgFileSystem {
         return result.rows[0]?.chunk ?? "";
       }
 
-      const node = await this.resolveSymlink(tx, p);
+      const node = await this.resolveSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError("EISDIR", "illegal operation on a directory, read", path);
 
@@ -501,9 +624,9 @@ export class PgFileSystem {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.resolveSymlink(tx, p);
+      const node = await this.resolveSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError(
           "EISDIR",
@@ -521,7 +644,7 @@ export class PgFileSystem {
     content: string | Uint8Array,
     options?: { recursive?: boolean },
   ): Promise<void> {
-    const normalized = normalizePath(path);
+    const internal = this.guardWrite(path);
 
     let embedding: number[] | null = null;
     if (typeof content === "string" && this.embed && content.length > 0) {
@@ -531,22 +654,22 @@ export class PgFileSystem {
 
     return this.withWorkspace(async (tx) => {
       if (options?.recursive) {
-        const parent = parentPath(normalized);
+        const parent = parentPath(internal);
         if (parent !== "/") {
           await this.internalMkdir(tx, parent, { recursive: true });
         }
       }
-      await this.internalWriteFile(tx, normalized, content, embedding);
+      await this.internalWriteFile(tx, internal, content, embedding);
     });
   }
 
   async appendFile(path: string, content: string | Uint8Array): Promise<void> {
+    const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const existing = await this.getNodeForUpdate(tx, p);
+      const existing = await this.getNodeForUpdate(tx, internal);
 
       if (!existing) {
-        await this.internalWriteFile(tx, p, content);
+        await this.internalWriteFile(tx, internal, content);
         return;
       }
 
@@ -576,9 +699,9 @@ export class PgFileSystem {
         );
         merged.set(new Uint8Array(existingBytes), 0);
         merged.set(new Uint8Array(appendBytes), existingBytes.byteLength);
-        await this.internalWriteFile(tx, p, merged);
+        await this.internalWriteFile(tx, internal, merged);
       } else {
-        await this.internalWriteFile(tx, p, (existing.content ?? "") + content);
+        await this.internalWriteFile(tx, internal, (existing.content ?? "") + content);
       }
     });
   }
@@ -586,15 +709,17 @@ export class PgFileSystem {
   // -- Public API: Path queries -----------------------------------------------
 
   async exists(path: string): Promise<boolean> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeMeta(tx, normalizePath(path));
+      const node = await this.getNodeMeta(tx, internal);
       return node !== null;
     });
   }
 
   async stat(path: string): Promise<FsStat> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, normalizePath(path));
+      const node = await this.resolveSymlinkMeta(tx, internal);
       return {
         isFile: node.node_type === "file",
         isDirectory: node.node_type === "directory",
@@ -607,9 +732,9 @@ export class PgFileSystem {
   }
 
   async lstat(path: string): Promise<FsStat> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.getNodeMeta(tx, p);
+      const node = await this.getNodeMeta(tx, internal);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -628,8 +753,10 @@ export class PgFileSystem {
   }
 
   async realpath(path: string): Promise<string> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      return this.internalRealpath(tx, normalizePath(path));
+      const resolved = await this.internalRealpath(tx, internal);
+      return this.toUserPath(resolved);
     });
   }
 
@@ -664,15 +791,30 @@ export class PgFileSystem {
   // -- Public API: Directory operations ---------------------------------------
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
+    const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      await this.internalMkdir(tx, normalizePath(path), options);
+      await this.internalMkdir(tx, internal, options);
     });
   }
 
   async readdir(path: string): Promise<string[]> {
+    const p = normalizePath(path);
+
+    if (this.accessRead !== null) {
+      const directlyAllowed = this.accessRead.some(
+        (dir) => p === dir || p.startsWith(dir + "/"),
+      );
+      if (!directlyAllowed) {
+        if (this.isAncestorOfAllowed(p, this.accessRead)) {
+          return this.syntheticReaddir(p, this.accessRead);
+        }
+        throw new FsError("EACCES", "permission denied", path);
+      }
+    }
+
+    const internal = this.toInternalPath(p);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.resolveSymlinkMeta(tx, p);
+      const node = await this.resolveSymlinkMeta(tx, internal);
       if (node.node_type !== "directory") {
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
       }
@@ -681,9 +823,23 @@ export class PgFileSystem {
   }
 
   async readdirWithTypes(path: string): Promise<DirentEntry[]> {
+    const p = normalizePath(path);
+
+    if (this.accessRead !== null) {
+      const directlyAllowed = this.accessRead.some(
+        (dir) => p === dir || p.startsWith(dir + "/"),
+      );
+      if (!directlyAllowed) {
+        if (this.isAncestorOfAllowed(p, this.accessRead)) {
+          return this.syntheticReaddirWithTypes(p, this.accessRead);
+        }
+        throw new FsError("EACCES", "permission denied", path);
+      }
+    }
+
+    const internal = this.toInternalPath(p);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.resolveSymlinkMeta(tx, p);
+      const node = await this.resolveSymlinkMeta(tx, internal);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -711,9 +867,9 @@ export class PgFileSystem {
   // -- Public API: Mutation ---------------------------------------------------
 
   async rm(path: string, options?: RmOptions): Promise<void> {
+    const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.getNodeMeta(tx, p);
+      const node = await this.getNodeMeta(tx, internal);
 
       if (!node) {
         if (options?.force) return;
@@ -739,7 +895,7 @@ export class PgFileSystem {
       }
 
       if (options?.recursive && node.node_type === "directory") {
-        const lt = pathToLtree(p, this.workspaceId);
+        const lt = pathToLtree(internal, this.workspaceId);
         // Delete leaves first to satisfy ON DELETE RESTRICT
         await tx.query(
           `WITH RECURSIVE subtree AS (
@@ -780,20 +936,19 @@ export class PgFileSystem {
   }
 
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
+    const srcInternal = this.guardRead(src);
+    const destInternal = this.guardWrite(dest);
     return this.withWorkspace(async (tx) => {
-      await this.internalCp(
-        tx,
-        normalizePath(src),
-        normalizePath(dest),
-        options,
-      );
+      await this.internalCp(tx, srcInternal, destInternal, options);
     });
   }
 
   async mv(src: string, dest: string): Promise<void> {
+    const srcInternal = this.guardWrite(src);
+    const destInternal = this.guardWrite(dest);
     return this.withWorkspace(async (tx) => {
-      const srcPath = normalizePath(src);
-      const destPath = normalizePath(dest);
+      const srcPath = srcInternal;
+      const destPath = destInternal;
 
       if (destPath.startsWith(srcPath + "/") || destPath === srcPath) {
         throw new FsError(
@@ -904,9 +1059,9 @@ export class PgFileSystem {
         `Invalid mode: ${mode} (must be integer between 0 and 4095/0o7777)`,
       );
     }
+    const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.resolveSymlinkMeta(tx, p);
+      const node = await this.resolveSymlinkMeta(tx, internal);
       await tx.query(
         `UPDATE fs_nodes SET mode = $1 WHERE workspace_id = $2 AND id = $3`,
         [mode, this.workspaceId, node.id],
@@ -915,9 +1070,9 @@ export class PgFileSystem {
   }
 
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
+    const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.resolveSymlinkMeta(tx, p);
+      const node = await this.resolveSymlinkMeta(tx, internal);
       await tx.query(
         `UPDATE fs_nodes SET mtime = $1 WHERE workspace_id = $2 AND id = $3`,
         [mtime, this.workspaceId, node.id],
@@ -928,20 +1083,20 @@ export class PgFileSystem {
   // -- Public API: Links ------------------------------------------------------
 
   async symlink(target: string, linkPath: string): Promise<void> {
+    const internal = this.guardWrite(linkPath);
+
+    if (target.includes("\0")) {
+      throw new Error("Paths cannot contain null bytes");
+    }
+
+    if (target.length > 4096) {
+      throw new Error(
+        "Symlink target exceeds maximum length of 4096 characters",
+      );
+    }
+
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(linkPath);
-
-      if (target.includes("\0")) {
-        throw new Error("Paths cannot contain null bytes");
-      }
-
-      if (target.length > 4096) {
-        throw new Error(
-          "Symlink target exceeds maximum length of 4096 characters",
-        );
-      }
-
-      const parentPosix = parentPath(p);
+      const parentPosix = parentPath(internal);
       const parent = await this.getNodeMeta(tx, parentPosix);
       if (!parent)
         throw new FsError(
@@ -950,10 +1105,12 @@ export class PgFileSystem {
           linkPath,
         );
 
-      this.validatePathDepth(this.resolveLinkTargetPath(p, target));
+      const resolvedTarget = this.resolveLinkTargetPath(internal, target);
+      this.validatePathDepth(resolvedTarget);
+      this.guardRootBoundary(resolvedTarget);
 
-      const name = fileName(p);
-      const lt = pathToLtree(p, this.workspaceId);
+      const name = fileName(internal);
+      const lt = pathToLtree(internal, this.workspaceId);
       const sizeBytes = new TextEncoder().encode(target).byteLength;
 
       await tx.query(
@@ -965,9 +1122,10 @@ export class PgFileSystem {
   }
 
   async link(existingPath: string, newPath: string): Promise<void> {
+    const srcInternal = this.guardRead(existingPath);
+    const destInternal = this.guardWrite(newPath);
     return this.withWorkspace(async (tx) => {
-      const src = normalizePath(existingPath);
-      const srcNode = await this.getNode(tx, src);
+      const srcNode = await this.getNode(tx, srcInternal);
       if (!srcNode)
         throw new FsError(
           "ENOENT",
@@ -985,14 +1143,14 @@ export class PgFileSystem {
         srcNode.content !== null
           ? srcNode.content
           : srcNode.binary_data ?? new Uint8Array(0);
-      await this.internalWriteFile(tx, normalizePath(newPath), content);
+      await this.internalWriteFile(tx, destInternal, content);
     });
   }
 
   async readlink(path: string): Promise<string> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const p = normalizePath(path);
-      const node = await this.getNodeMeta(tx, p);
+      const node = await this.getNodeMeta(tx, internal);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -1024,8 +1182,17 @@ export class PgFileSystem {
     query: string,
     opts?: { path?: string; limit?: number },
   ): Promise<SearchResult[]> {
+    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopePath);
+    const internalScope = this.toInternalPath(scopePath);
     return this.withWorkspace(async (tx) => {
-      return fullTextSearch(tx, this.workspaceId, query, opts);
+      const results = await fullTextSearch(tx, this.workspaceId, query, {
+        ...opts,
+        path: internalScope,
+      });
+      return results
+        .map((r) => ({ ...r, path: this.toUserPath(r.path) }))
+        .filter((r) => this.isPathReadable(r.path));
     });
   }
 
@@ -1034,10 +1201,19 @@ export class PgFileSystem {
     opts?: { path?: string; limit?: number },
   ): Promise<SearchResult[]> {
     if (!this.embed) throw new Error("No embedding provider configured");
+    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopePath);
+    const internalScope = this.toInternalPath(scopePath);
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
     return this.withWorkspace(async (tx) => {
-      return semanticSearch(tx, this.workspaceId, embedding, opts);
+      const results = await semanticSearch(tx, this.workspaceId, embedding, {
+        ...opts,
+        path: internalScope,
+      });
+      return results
+        .map((r) => ({ ...r, path: this.toUserPath(r.path) }))
+        .filter((r) => this.isPathReadable(r.path));
     });
   }
 
@@ -1051,10 +1227,19 @@ export class PgFileSystem {
     },
   ): Promise<SearchResult[]> {
     if (!this.embed) throw new Error("No embedding provider configured");
+    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopePath);
+    const internalScope = this.toInternalPath(scopePath);
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
     return this.withWorkspace(async (tx) => {
-      return hybridSearch(tx, this.workspaceId, query, embedding, opts);
+      const results = await hybridSearch(tx, this.workspaceId, query, embedding, {
+        ...opts,
+        path: internalScope,
+      });
+      return results
+        .map((r) => ({ ...r, path: this.toUserPath(r.path) }))
+        .filter((r) => this.isPathReadable(r.path));
     });
   }
 
@@ -1064,9 +1249,11 @@ export class PgFileSystem {
     pattern: string,
     opts?: { cwd?: string },
   ): Promise<string[]> {
-    const cwd = opts?.cwd ? normalizePath(opts.cwd) : "/";
+    const userCwd = opts?.cwd ? normalizePath(opts.cwd) : "/";
+    this.guardRead(userCwd);
+    const internalCwd = this.toInternalPath(userCwd);
     return this.withWorkspace(async (tx) => {
-      const scopeLtree = pathToLtree(cwd, this.workspaceId);
+      const scopeLtree = pathToLtree(internalCwd, this.workspaceId);
       const result = await tx.query<{ path: string; name: string }>(
         `SELECT path::text, name FROM fs_nodes
          WHERE workspace_id = $1
@@ -1079,8 +1266,10 @@ export class PgFileSystem {
       const regex = globToRegex(pattern);
       return result.rows
         .map((r) => ltreeToPath(r.path))
+        .map((p) => this.toUserPath(p))
         .filter((p) => {
-          const relative = cwd === "/" ? p : p.slice(cwd.length);
+          if (!this.isPathReadable(p)) return false;
+          const relative = userCwd === "/" ? p : p.slice(userCwd.length);
           return regex.test(relative);
         });
     });

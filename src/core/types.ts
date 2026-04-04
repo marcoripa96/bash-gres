@@ -98,10 +98,17 @@ export interface FsPermissions {
   write?: boolean;
 }
 
+export interface FsAccess {
+  read?: string[];
+  write?: string[];
+}
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
   permissions?: FsPermissions;
+  rootDir?: string;
+  access?: FsAccess;
   maxFileSize?: number;
   maxReadSize?: number;
   maxFiles?: number;
