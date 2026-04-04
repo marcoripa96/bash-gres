@@ -84,7 +84,7 @@ export function createSchema(options: SchemaOptions = {}) {
       if (enableFullTextSearch) {
         indexes.push(
           index("idx_fs_content_bm25")
-            .using("bm25", table.name, table.content)
+            .using("bm25", table.content)
             .with({ text_config: "english" })
             .where(
               sql`${table.content} IS NOT NULL AND ${table.binaryData} IS NULL`,

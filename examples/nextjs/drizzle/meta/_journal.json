@@ -15,6 +15,20 @@
       "when": 1775315509644,
       "tag": "0001_fantastic_firebird",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1775315515000,
+      "tag": "0002_bash-gres-rls",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1775315520000,
+      "tag": "0003_bash-gres-root",
+      "breakpoints": true
     }
   ]
 }

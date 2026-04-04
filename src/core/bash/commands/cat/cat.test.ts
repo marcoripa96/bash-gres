@@ -1,12 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
-import { createTestClient } from "../../../../../tests/helpers.js";
-import { ensureSetup } from "../../../../../tests/global-setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 import { PgFileSystem } from "../../../filesystem.js";
 import { BashInterpreter } from "../../interpreter.js";
 
-describe("bash: cat", () => {
-  const ctx = setupBash("bash-cat");
+describe.each(TEST_ADAPTERS)("bash: cat [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-cat", factory);
 
   it("reads a single file", async () => {
     await ctx.fs.writeFile("/hello.txt", "hello world");
@@ -93,8 +92,7 @@ describe("bash: cat", () => {
   });
 
   it("reads files larger than maxReadSize by chunking", async () => {
-    await ensureSetup();
-    const { sql, client } = createTestClient();
+    const { client, teardown } = factory();
 
     try {
       await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
@@ -114,7 +112,7 @@ describe("bash: cat", () => {
       expect(r.exitCode).toBe(0);
       expect(r.stdout).toBe("abcdef");
     } finally {
-      await sql.end();
+      await teardown();
     }
   });
 });

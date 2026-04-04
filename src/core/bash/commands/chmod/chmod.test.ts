@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: chmod", () => {
-  const ctx = setupBash("bash-chmod");
+describe.each(TEST_ADAPTERS)("bash: chmod [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-chmod", factory);
 
   describe("octal mode", () => {
     it("sets mode with octal notation", async () => {

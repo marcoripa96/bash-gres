@@ -4,9 +4,10 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setupBash } from "./_setup.js";
+import { TEST_ADAPTERS } from "../helpers.js";
 
-describe("bash: native parity", () => {
-  const ctx = setupBash("bash-native-parity");
+describe.each(TEST_ADAPTERS)("bash: native parity [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-native-parity", factory);
 
   it("matches native ls output for a single file", async () => {
     const root = await mkdtemp(join(tmpdir(), "bash-gres-native-ls-file-"));

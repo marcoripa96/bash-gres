@@ -1,5 +1,7 @@
 import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
 import { createPostgresClient } from "../src/adapters/postgres/index.js";
+import { createDrizzleClient } from "../src/adapters/drizzle/adapter.js";
 import type { SqlClient } from "../src/core/types.js";
 
 // Re-export for convenience
@@ -9,10 +11,29 @@ const TEST_DB_URL =
   process.env["TEST_DATABASE_URL"] ??
   "postgres://postgres:postgres@localhost:5433/bashgres_test";
 
+export interface TestClient {
+  client: SqlClient;
+  teardown: () => Promise<void>;
+}
+
 export function createTestSql(): postgres.Sql {
   return postgres(TEST_DB_URL, { onnotice: () => {} });
 }
 
+function createPostgresTestClient(): TestClient {
+  const sql = createTestSql();
+  const client = createPostgresClient(sql);
+  return { client, teardown: () => sql.end() };
+}
+
+function createDrizzleTestClient(): TestClient {
+  const sql = postgres(TEST_DB_URL, { onnotice: () => {} });
+  const db = drizzle(sql);
+  const client = createDrizzleClient(db);
+  return { client, teardown: () => sql.end() };
+}
+
+/** @deprecated Use TEST_ADAPTERS with describe.each instead */
 export function createTestClient(): { sql: postgres.Sql; client: SqlClient } {
   const sql = createTestSql();
   const client = createPostgresClient(sql);
@@ -22,3 +43,10 @@ export function createTestClient(): { sql: postgres.Sql; client: SqlClient } {
 export async function resetDb(client: SqlClient): Promise<void> {
   await client.query("TRUNCATE fs_nodes CASCADE");
 }
+
+export type AdapterFactory = () => TestClient;
+
+export const TEST_ADAPTERS: [string, AdapterFactory][] = [
+  ["postgres", createPostgresTestClient],
+  ["drizzle", createDrizzleTestClient],
+];

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: find", () => {
-  const ctx = setupBash("bash-find");
+describe.each(TEST_ADAPTERS)("bash: find [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-find", factory);
 
   it("lists all entries recursively from a path", async () => {
     await ctx.fs.mkdir("/project/src", { recursive: true });

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: ls", () => {
-  const ctx = setupBash("bash-ls");
+describe.each(TEST_ADAPTERS)("bash: ls [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-ls", factory);
 
   it("lists files in a directory", async () => {
     await ctx.fs.mkdir("/mydir");

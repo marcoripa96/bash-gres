@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: rm", () => {
-  const ctx = setupBash("bash-rm");
+describe.each(TEST_ADAPTERS)("bash: rm [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-rm", factory);
 
   it("removes a file", async () => {
     await ctx.fs.writeFile("/doomed.txt", "bye");

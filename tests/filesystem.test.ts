@@ -1,32 +1,31 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { createTestClient, resetDb } from "./helpers.js";
+import { TEST_ADAPTERS } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../src/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
-import type postgres from "postgres";
 
-describe("PgFileSystem", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
   let fs: PgFileSystem;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   beforeEach(async () => {
-    await db.query(
+    await client.query(
       "DELETE FROM fs_nodes WHERE workspace_id = $1",
       ["test-workspace"],
     );
-    fs = new PgFileSystem({ db, workspaceId: "test-workspace" });
+    fs = new PgFileSystem({ db: client, workspaceId: "test-workspace" });
     await fs.init();
   });
 
@@ -436,7 +435,7 @@ describe("PgFileSystem", () => {
 
   describe("workspace isolation", () => {
     it("different workspaces see different files", async () => {
-      const fs2 = new PgFileSystem({ db, workspaceId: "other-workspace" });
+      const fs2 = new PgFileSystem({ db: client, workspaceId: "other-workspace" });
       await fs2.init();
 
       await fs.writeFile("/shared-name.txt", "workspace1");

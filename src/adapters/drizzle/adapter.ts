@@ -20,6 +20,32 @@ export interface DrizzleDb {
 
 // -- SQL builder --------------------------------------------------------------
 
+function pgArrayLiteral(arr: unknown[]): string {
+  return (
+    "{" +
+    arr
+      .map((v) => {
+        if (v === null || v === undefined) return "NULL";
+        const s = String(v);
+        if (
+          s === "" ||
+          s.includes(",") ||
+          s.includes('"') ||
+          s.includes("\\") ||
+          s.includes("{") ||
+          s.includes("}") ||
+          s.includes(" ") ||
+          s.toUpperCase() === "NULL"
+        ) {
+          return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+        }
+        return s;
+      })
+      .join(",") +
+    "}"
+  );
+}
+
 function buildQuery(text: string, params: SqlParam[]) {
   if (params.length === 0) return sql.raw(text);
 
@@ -31,7 +57,14 @@ function buildQuery(text: string, params: SqlParam[]) {
     if (match) {
       const idx = parseInt(match[1], 10) - 1;
       if (idx >= 0 && idx < params.length) {
-        chunks.push(sql`${params[idx]}`);
+        const value = params[idx];
+        if (Array.isArray(value)) {
+          chunks.push(sql`${pgArrayLiteral(value)}`);
+        } else if (value instanceof Date) {
+          chunks.push(sql`${value.toISOString()}`);
+        } else {
+          chunks.push(sql`${value}`);
+        }
       } else {
         chunks.push(sql.raw(part));
       }

@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: cp", () => {
-  const ctx = setupBash("bash-cp");
+describe.each(TEST_ADAPTERS)("bash: cp [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-cp", factory);
 
   it("copies a file", async () => {
     await ctx.fs.writeFile("/src.txt", "data");

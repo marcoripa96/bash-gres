@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: mv", () => {
-  const ctx = setupBash("bash-mv");
+describe.each(TEST_ADAPTERS)("bash: mv [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-mv", factory);
 
   it("renames a file", async () => {
     await ctx.fs.writeFile("/old.txt", "data");

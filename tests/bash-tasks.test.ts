@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { createTestClient } from "./helpers.js";
+import { TEST_ADAPTERS } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../src/core/filesystem.js";
 import { BashInterpreter } from "../src/core/bash/interpreter.js";
 import type { SqlClient } from "./helpers.js";
-import type postgres from "postgres";
 
 /**
  * Integration tests that simulate real-world task completion via bash commands.
@@ -12,9 +11,9 @@ import type postgres from "postgres";
  * exercising the full bash-gres stack as an AI agent would use it.
  */
 
-describe("Bash task scenarios", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("Bash task scenarios [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
   let fs: PgFileSystem;
   let bash: BashInterpreter;
 
@@ -27,21 +26,21 @@ describe("Bash task scenarios", () => {
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   beforeEach(async () => {
-    await db.query(
+    await client.query(
       "DELETE FROM fs_nodes WHERE workspace_id = $1",
       ["task-test"],
     );
-    fs = new PgFileSystem({ db, workspaceId: "task-test" });
+    fs = new PgFileSystem({ db: client, workspaceId: "task-test" });
     await fs.init();
     bash = new BashInterpreter(fs);
   });

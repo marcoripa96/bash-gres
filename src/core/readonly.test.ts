@@ -1,28 +1,27 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { createTestClient } from "../../tests/helpers.js";
+import { TEST_ADAPTERS } from "../../tests/helpers.js";
 import { ensureSetup } from "../../tests/global-setup.js";
 import { PgFileSystem } from "./filesystem.js";
 import { FsError } from "./types.js";
 import type { SqlClient } from "./types.js";
-import type postgres from "postgres";
 
 const WORKSPACE = "test-readonly";
 
-describe("PgFileSystem permissions", () => {
-  let sql: postgres.Sql;
+describe.each(TEST_ADAPTERS)("PgFileSystem permissions [%s]", (_name, factory) => {
   let client: SqlClient;
+  let teardown: () => Promise<void>;
   let rwFs: PgFileSystem;
   let roFs: PgFileSystem;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
+    const test = factory();
     client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   beforeEach(async () => {

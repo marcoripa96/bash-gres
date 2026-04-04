@@ -16,33 +16,32 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type postgres from "postgres";
-import { createTestClient } from "./helpers.js";
+import { TEST_ADAPTERS } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../src/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
 
-describe("PgFileSystem: native parity", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("PgFileSystem: native parity [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
   let fs: PgFileSystem;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   beforeEach(async () => {
-    await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
+    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
       "test-workspace-native-parity",
     ]);
-    fs = new PgFileSystem({ db, workspaceId: "test-workspace-native-parity" });
+    fs = new PgFileSystem({ db: client, workspaceId: "test-workspace-native-parity" });
     await fs.init();
   });
 

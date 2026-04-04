@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: stat", () => {
-  const ctx = setupBash("bash-stat");
+describe.each(TEST_ADAPTERS)("bash: stat [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-stat", factory);
 
   it("shows file info", async () => {
     await ctx.fs.writeFile("/file.txt", "hello world");

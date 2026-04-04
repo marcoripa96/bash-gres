@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: ln & readlink", () => {
-  const ctx = setupBash("bash-ln");
+describe.each(TEST_ADAPTERS)("bash: ln & readlink [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-ln", factory);
 
   describe("ln -s (symbolic link)", () => {
     it("creates a symlink", async () => {

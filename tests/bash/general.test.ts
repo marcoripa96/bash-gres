@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "./_setup.js";
+import { TEST_ADAPTERS } from "../helpers.js";
 
-describe("bash: general", () => {
-  const ctx = setupBash("bash-general");
+describe.each(TEST_ADAPTERS)("bash: general [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-general", factory);
 
   // -- Pipes ------------------------------------------------------------------
 

@@ -26,4 +26,4 @@ CREATE INDEX "idx_fs_path_gist" ON "fs_nodes" USING gist ("path" gist_ltree_ops(
 CREATE INDEX "idx_fs_workspace_parent" ON "fs_nodes" USING btree ("workspace_id","parent_id");--> statement-breakpoint
 CREATE INDEX "idx_fs_stat" ON "fs_nodes" USING btree ("workspace_id","path");--> statement-breakpoint
 CREATE INDEX "idx_fs_dir_lookup" ON "fs_nodes" USING btree ("workspace_id","name","parent_id") WHERE "fs_nodes"."node_type" = 'directory';--> statement-breakpoint
-CREATE INDEX "idx_fs_content_bm25" ON "fs_nodes" USING bm25 ("name","content") WITH (text_config=english) WHERE "fs_nodes"."content" IS NOT NULL AND "fs_nodes"."binary_data" IS NULL;
+CREATE INDEX "idx_fs_content_bm25" ON "fs_nodes" USING bm25 ("content") WITH (text_config=english) WHERE "fs_nodes"."content" IS NOT NULL AND "fs_nodes"."binary_data" IS NULL;

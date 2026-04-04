@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: head", () => {
-  const ctx = setupBash("bash-head");
+describe.each(TEST_ADAPTERS)("bash: head [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-head", factory);
 
   const tenLines = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
   const twentyLines = Array.from({ length: 20 }, (_, i) => String(i + 1)).join("\n") + "\n";

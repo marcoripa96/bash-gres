@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: tree", () => {
-  const ctx = setupBash("bash-tree");
+describe.each(TEST_ADAPTERS)("bash: tree [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-tree", factory);
 
   it("shows directory structure", async () => {
     await ctx.fs.mkdir("/project/src", { recursive: true });

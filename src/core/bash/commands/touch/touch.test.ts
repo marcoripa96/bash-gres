@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: touch", () => {
-  const ctx = setupBash("bash-touch");
+describe.each(TEST_ADAPTERS)("bash: touch [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-touch", factory);
 
   it("creates an empty file", async () => {
     const r = await ctx.bash.execute("touch /new.txt");

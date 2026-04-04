@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { createTestClient } from "./helpers.js";
+import { TEST_ADAPTERS } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../src/core/filesystem.js";
 import { BashInterpreter } from "../src/core/bash/interpreter.js";
 import { FsError } from "../src/core/types.js";
 import type { SqlClient } from "./helpers.js";
-import type postgres from "postgres";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,19 +25,19 @@ function expectEACCES(promise: Promise<unknown>) {
 // rootDir tests
 // ---------------------------------------------------------------------------
 
-describe("rootDir", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("rootDir [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   describe("basic operations", () => {
@@ -46,11 +45,11 @@ describe("rootDir", () => {
     let adminFs: PgFileSystem;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
-      adminFs = new PgFileSystem({ db, workspaceId: WS_ROOT });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      adminFs = new PgFileSystem({ db: client, workspaceId: WS_ROOT });
       await adminFs.init();
 
-      fs = new PgFileSystem({ db, workspaceId: WS_ROOT, rootDir: "/jail" });
+      fs = new PgFileSystem({ db: client, workspaceId: WS_ROOT, rootDir: "/jail" });
       await fs.init();
     });
 
@@ -160,14 +159,14 @@ describe("rootDir", () => {
     let adminFs: PgFileSystem;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
-      adminFs = new PgFileSystem({ db, workspaceId: WS_ROOT });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      adminFs = new PgFileSystem({ db: client, workspaceId: WS_ROOT });
       await adminFs.init();
       // Create /secret outside jail
       await adminFs.mkdir("/secret");
       await adminFs.writeFile("/secret/data.txt", "top secret");
 
-      fs = new PgFileSystem({ db, workspaceId: WS_ROOT, rootDir: "/jail" });
+      fs = new PgFileSystem({ db: client, workspaceId: WS_ROOT, rootDir: "/jail" });
       await fs.init();
       await fs.mkdir("/dir");
     });
@@ -197,8 +196,8 @@ describe("rootDir", () => {
     let fs: PgFileSystem;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
-      fs = new PgFileSystem({ db, workspaceId: WS_ROOT });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      fs = new PgFileSystem({ db: client, workspaceId: WS_ROOT });
       await fs.init();
     });
 
@@ -215,8 +214,8 @@ describe("rootDir", () => {
     let bash: BashInterpreter;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
-      fs = new PgFileSystem({ db, workspaceId: WS_ROOT, rootDir: "/jail" });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      fs = new PgFileSystem({ db: client, workspaceId: WS_ROOT, rootDir: "/jail" });
       await fs.init();
       bash = new BashInterpreter(fs);
       await fs.writeFile("/file.txt", "hello");
@@ -250,19 +249,19 @@ describe("rootDir", () => {
 // access tests
 // ---------------------------------------------------------------------------
 
-describe("access", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("access [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   describe("read and write restrictions", () => {
@@ -270,8 +269,8 @@ describe("access", () => {
     let fs: PgFileSystem;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
-      adminFs = new PgFileSystem({ db, workspaceId: WS_ACCESS });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
+      adminFs = new PgFileSystem({ db: client, workspaceId: WS_ACCESS });
       await adminFs.init();
 
       // Set up directory structure
@@ -283,7 +282,7 @@ describe("access", () => {
       await adminFs.writeFile("/secret/key.pem", "secret-key");
 
       fs = new PgFileSystem({
-        db,
+        db: client,
         workspaceId: WS_ACCESS,
         access: { read: ["/docs"], write: ["/scratch"] },
       });
@@ -410,8 +409,8 @@ describe("access", () => {
     let fs: PgFileSystem;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
-      adminFs = new PgFileSystem({ db, workspaceId: WS_ACCESS });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
+      adminFs = new PgFileSystem({ db: client, workspaceId: WS_ACCESS });
       await adminFs.init();
       await adminFs.mkdir("/docs", { recursive: true });
       await adminFs.mkdir("/scratch", { recursive: true });
@@ -419,7 +418,7 @@ describe("access", () => {
       await adminFs.writeFile("/docs/file.txt", "x");
 
       fs = new PgFileSystem({
-        db,
+        db: client,
         workspaceId: WS_ACCESS,
         access: { read: ["/docs"], write: ["/scratch"] },
       });
@@ -449,14 +448,14 @@ describe("access", () => {
     });
 
     it("deep nested access has synthetic ancestors", async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
-      const admin2 = new PgFileSystem({ db, workspaceId: WS_ACCESS });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
+      const admin2 = new PgFileSystem({ db: client, workspaceId: WS_ACCESS });
       await admin2.init();
       await admin2.mkdir("/a/b/c", { recursive: true });
       await admin2.writeFile("/a/b/c/file.txt", "deep");
 
       const restricted = new PgFileSystem({
-        db,
+        db: client,
         workspaceId: WS_ACCESS,
         access: { read: ["/a/b/c"] },
       });
@@ -472,8 +471,8 @@ describe("access", () => {
     let fs: PgFileSystem;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
-      fs = new PgFileSystem({ db, workspaceId: WS_ACCESS });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
+      fs = new PgFileSystem({ db: client, workspaceId: WS_ACCESS });
       await fs.init();
     });
 
@@ -490,8 +489,8 @@ describe("access", () => {
     let bash: BashInterpreter;
 
     beforeEach(async () => {
-      await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
-      adminFs = new PgFileSystem({ db, workspaceId: WS_ACCESS });
+      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ACCESS]);
+      adminFs = new PgFileSystem({ db: client, workspaceId: WS_ACCESS });
       await adminFs.init();
       await adminFs.mkdir("/docs", { recursive: true });
       await adminFs.mkdir("/scratch", { recursive: true });
@@ -500,7 +499,7 @@ describe("access", () => {
       await adminFs.writeFile("/secret/key.pem", "secret");
 
       fs = new PgFileSystem({
-        db,
+        db: client,
         workspaceId: WS_ACCESS,
         access: { read: ["/docs"], write: ["/scratch"] },
       });
@@ -558,27 +557,27 @@ describe("access", () => {
 // rootDir + access combined
 // ---------------------------------------------------------------------------
 
-describe("rootDir + access combined", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("rootDir + access combined [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   let adminFs: PgFileSystem;
   let fs: PgFileSystem;
 
   beforeEach(async () => {
-    await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_COMBINED]);
-    adminFs = new PgFileSystem({ db, workspaceId: WS_COMBINED });
+    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_COMBINED]);
+    adminFs = new PgFileSystem({ db: client, workspaceId: WS_COMBINED });
     await adminFs.init();
 
     // Create structure inside the jail
@@ -589,7 +588,7 @@ describe("rootDir + access combined", () => {
     await adminFs.writeFile("/users/alice/other/secret.txt", "hidden");
 
     fs = new PgFileSystem({
-      db,
+      db: client,
       workspaceId: WS_COMBINED,
       rootDir: "/users/alice",
       access: { read: ["/shared"], write: ["/home"] },
@@ -638,32 +637,32 @@ describe("rootDir + access combined", () => {
 // Edge cases
 // ---------------------------------------------------------------------------
 
-describe("edge cases", () => {
-  let sql: postgres.Sql;
-  let db: SqlClient;
+describe.each(TEST_ADAPTERS)("edge cases [%s]", (_name, factory) => {
+  let client: SqlClient;
+  let teardown: () => Promise<void>;
 
   beforeAll(async () => {
     await ensureSetup();
-    const test = createTestClient();
-    sql = test.sql;
-    db = test.client;
+    const test = factory();
+    client = test.client;
+    teardown = test.teardown;
   });
 
   afterAll(async () => {
-    await sql.end();
+    await teardown();
   });
 
   beforeEach(async () => {
-    await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_EDGE]);
+    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_EDGE]);
   });
 
   it("empty access arrays deny everything except synthetic readdir", async () => {
-    const adminFs = new PgFileSystem({ db, workspaceId: WS_EDGE });
+    const adminFs = new PgFileSystem({ db: client, workspaceId: WS_EDGE });
     await adminFs.init();
     await adminFs.writeFile("/file.txt", "data");
 
     const fs = new PgFileSystem({
-      db,
+      db: client,
       workspaceId: WS_EDGE,
       access: { read: [], write: [] },
     });
@@ -676,12 +675,12 @@ describe("edge cases", () => {
   });
 
   it("access read: ['/'] gives full read, no write", async () => {
-    const adminFs = new PgFileSystem({ db, workspaceId: WS_EDGE });
+    const adminFs = new PgFileSystem({ db: client, workspaceId: WS_EDGE });
     await adminFs.init();
     await adminFs.writeFile("/file.txt", "data");
 
     const fs = new PgFileSystem({
-      db,
+      db: client,
       workspaceId: WS_EDGE,
       access: { read: ["/"] },
     });
@@ -691,14 +690,14 @@ describe("edge cases", () => {
   });
 
   it("overlapping read paths both work", async () => {
-    const adminFs = new PgFileSystem({ db, workspaceId: WS_EDGE });
+    const adminFs = new PgFileSystem({ db: client, workspaceId: WS_EDGE });
     await adminFs.init();
     await adminFs.mkdir("/a/b", { recursive: true });
     await adminFs.writeFile("/a/file.txt", "outer");
     await adminFs.writeFile("/a/b/file.txt", "inner");
 
     const fs = new PgFileSystem({
-      db,
+      db: client,
       workspaceId: WS_EDGE,
       access: { read: ["/a", "/a/b"] },
     });
@@ -709,7 +708,7 @@ describe("edge cases", () => {
 
   it("rootDir that does not yet exist is created by init", async () => {
     const fs = new PgFileSystem({
-      db,
+      db: client,
       workspaceId: WS_EDGE,
       rootDir: "/deep/nested/root",
     });
@@ -719,7 +718,7 @@ describe("edge cases", () => {
   });
 
   it("paths with .. are normalized before checking", async () => {
-    const adminFs = new PgFileSystem({ db, workspaceId: WS_EDGE });
+    const adminFs = new PgFileSystem({ db: client, workspaceId: WS_EDGE });
     await adminFs.init();
     await adminFs.mkdir("/allowed", { recursive: true });
     await adminFs.writeFile("/allowed/file.txt", "ok");
@@ -727,7 +726,7 @@ describe("edge cases", () => {
     await adminFs.writeFile("/forbidden/secret.txt", "no");
 
     const fs = new PgFileSystem({
-      db,
+      db: client,
       workspaceId: WS_EDGE,
       access: { read: ["/allowed"] },
     });

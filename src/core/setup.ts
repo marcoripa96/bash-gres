@@ -37,7 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_fs_dir_lookup
 
 const FTS_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_fs_content_bm25
-  ON fs_nodes USING bm25 (name, content)
+  ON fs_nodes USING bm25 (content)
   WITH (text_config = 'english')
   WHERE content IS NOT NULL AND binary_data IS NULL;
 `;

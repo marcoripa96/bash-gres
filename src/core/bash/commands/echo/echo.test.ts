@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: echo", () => {
-  const ctx = setupBash("bash-echo");
+describe.each(TEST_ADAPTERS)("bash: echo [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-echo", factory);
 
   it("outputs text with trailing newline", async () => {
     const r = await ctx.bash.execute("echo hello");

@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: mkdir", () => {
-  const ctx = setupBash("bash-mkdir");
+describe.each(TEST_ADAPTERS)("bash: mkdir [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-mkdir", factory);
 
   it("creates a directory", async () => {
     const r = await ctx.bash.execute("mkdir /newdir");

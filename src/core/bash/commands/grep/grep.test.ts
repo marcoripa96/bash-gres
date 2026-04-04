@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: grep", () => {
-  const ctx = setupBash("bash-grep");
+describe.each(TEST_ADAPTERS)("bash: grep [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-grep", factory);
 
   it("matches lines containing pattern", async () => {
     await ctx.fs.writeFile(

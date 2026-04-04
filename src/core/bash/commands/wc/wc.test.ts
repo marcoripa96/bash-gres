@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: wc", () => {
-  const ctx = setupBash("bash-wc");
+describe.each(TEST_ADAPTERS)("bash: wc [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-wc", factory);
 
   it("counts lines, words, and bytes by default", async () => {
     await ctx.fs.writeFile("/text.txt", "hello world\nfoo bar\n");

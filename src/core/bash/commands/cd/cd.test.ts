@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { setupBash } from "../../../../../tests/bash/_setup.js";
+import { TEST_ADAPTERS } from "../../../../../tests/helpers.js";
 
-describe("bash: cd & pwd", () => {
-  const ctx = setupBash("bash-cd");
+describe.each(TEST_ADAPTERS)("bash: cd & pwd [%s]", (_name, factory) => {
+  const ctx = setupBash("bash-cd", factory);
 
   describe("pwd", () => {
     it("starts at root", async () => {
