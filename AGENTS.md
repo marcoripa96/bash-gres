@@ -41,11 +41,11 @@ The Drizzle adapter (`src/adapters/drizzle/adapter.ts`) converts `$1, $2` positi
 
 ## Database
 
-- **Table**: single `fs_nodes` table with ltree paths, session isolation, self-referencing parent_id (ON DELETE RESTRICT)
+- **Table**: single `fs_nodes` table with ltree paths, workspace isolation, self-referencing parent_id (ON DELETE RESTRICT)
 - **Extensions**: `ltree`, `pg_textsearch` (v1.0.0), optionally `pgvector`
 - **Indexes**: GiST on ltree, BM25 on (name, content), partial index for directories, covering index for stat
-- **RLS**: policy on `session_id = current_setting('app.session_id', true)`, set via `SET LOCAL` in every transaction
-- **Session ID**: text (UUID by default), scoped per `PgFileSystem` instance
+- **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set via `SET LOCAL` in every transaction
+- **Workspace ID**: text (UUID by default), scoped per `PgFileSystem` instance
 
 ## Commands
 
@@ -73,7 +73,7 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
 - `as` casts only at driver boundaries (e.g., `result as T[]` when bridging between type systems)
 - Peer deps: `drizzle-orm` and `postgres` are both optional
 - Path encoding: special chars become `_xHEX_` (delimited to prevent greedy regex issues)
-- All filesystem operations run inside explicit transactions with `SET LOCAL app.session_id` and `SET LOCAL statement_timeout`
+- All filesystem operations run inside explicit transactions with `SET LOCAL app.workspace_id` and `SET LOCAL statement_timeout`
 - `setup()` is idempotent (safe to call on every startup) — uses `IF NOT EXISTS` / `IF NOT EXISTS` everywhere
 - Prefer named files over `index.ts` (e.g., `interpreter.ts`, `cat.ts`); avoid barrel/re-export files unless strictly necessary
 

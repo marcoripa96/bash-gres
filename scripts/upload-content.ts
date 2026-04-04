@@ -31,7 +31,7 @@ async function main() {
     enableVectorSearch: false,
   });
 
-  const fs = new PgFileSystem({ db: client, sessionId: "content-upload" });
+  const fs = new PgFileSystem({ db: client, workspaceId: "content-upload" });
   await fs.init();
 
   let dirs = 0;

@@ -47,7 +47,7 @@ export function createSchema(options: SchemaOptions = {}) {
     "fs_nodes",
     {
       id: bigserial({ mode: "number" }).primaryKey(),
-      sessionId: text("session_id").notNull(),
+      workspaceId: text("workspace_id").notNull(),
       parentId: bigint("parent_id", { mode: "number" }),
       name: text().notNull(),
       nodeType: text("node_type").notNull(),
@@ -67,17 +67,17 @@ export function createSchema(options: SchemaOptions = {}) {
     },
     (table) => {
       const indexes = [
-        uniqueIndex("unique_session_path").on(table.sessionId, table.path),
+        uniqueIndex("unique_workspace_path").on(table.workspaceId, table.path),
 
         index("idx_fs_path_gist")
           .using("gist", sql`${table.path} gist_ltree_ops(siglen=124)`),
 
-        index("idx_fs_session_parent").on(table.sessionId, table.parentId),
+        index("idx_fs_workspace_parent").on(table.workspaceId, table.parentId),
 
-        index("idx_fs_stat").on(table.sessionId, table.path),
+        index("idx_fs_stat").on(table.workspaceId, table.path),
 
         index("idx_fs_dir_lookup")
-          .on(table.sessionId, table.name, table.parentId)
+          .on(table.workspaceId, table.name, table.parentId)
           .where(sql`${table.nodeType} = 'directory'`),
       ];
 

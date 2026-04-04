@@ -5,7 +5,7 @@ import { PgFileSystem } from "../src/core/filesystem.js";
 import { BashInterpreter } from "../src/core/bash/interpreter.js";
 import { createInterface } from "readline";
 
-const sessionId = process.argv[2] || "manual-test";
+const workspaceId = process.argv[2] || "manual-test";
 
 const sql = postgres("postgres://postgres:postgres@localhost:5433/bashgres_test", {
   onnotice: () => {},
@@ -18,7 +18,7 @@ await setup(client, {
   enableVectorSearch: false,
 });
 
-const fs = new PgFileSystem({ db: client, sessionId });
+const fs = new PgFileSystem({ db: client, workspaceId });
 await fs.init();
 const bash = new BashInterpreter(fs);
 

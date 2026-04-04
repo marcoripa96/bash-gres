@@ -95,7 +95,7 @@ export interface SetupOptions {
 
 export interface PgFileSystemOptions {
   db: SqlClient;
-  sessionId?: string;
+  workspaceId?: string;
   maxFileSize?: number;
   maxReadSize?: number;
   maxFiles?: number;

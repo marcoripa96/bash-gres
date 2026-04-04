@@ -43,17 +43,17 @@ export function normalizePath(p: string): string {
   return "/" + resolved.join("/");
 }
 
-export function pathToLtree(posixPath: string, sessionId: string): string {
+export function pathToLtree(posixPath: string, workspaceId: string): string {
   const normalized = normalizePath(posixPath);
   const segments = normalized.split("/").filter(Boolean);
-  const prefix = `s_${encodeLabel(sessionId)}`;
+  const prefix = `w_${encodeLabel(workspaceId)}`;
   if (segments.length === 0) return prefix;
   return prefix + "." + segments.map(encodeLabel).join(".");
 }
 
 export function ltreeToPath(ltree: string): string {
   const parts = ltree.split(".");
-  // First part is the session prefix (s_<id>), skip it
+  // First part is the workspace prefix (w_<id>), skip it
   const segments = parts.slice(1);
   if (segments.length === 0) return "/";
   return "/" + segments.map(decodeLabel).join("/");

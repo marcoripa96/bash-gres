@@ -6,7 +6,7 @@ import { BashInterpreter } from "../../src/core/bash/interpreter.js";
 import type { SqlClient } from "../helpers.js";
 import type postgres from "postgres";
 
-export function setupBash(sessionId: string) {
+export function setupBash(workspaceId: string) {
   let sql: postgres.Sql;
   let db: SqlClient;
   let fs: PgFileSystem;
@@ -24,8 +24,8 @@ export function setupBash(sessionId: string) {
   });
 
   beforeEach(async () => {
-    await db.query("DELETE FROM fs_nodes WHERE session_id = $1", [sessionId]);
-    fs = new PgFileSystem({ db, sessionId });
+    await db.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [workspaceId]);
+    fs = new PgFileSystem({ db, workspaceId });
     await fs.init();
     bash = new BashInterpreter(fs);
   });

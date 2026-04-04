@@ -9,7 +9,7 @@ const TEST_DB_URL =
   process.env["TEST_DATABASE_URL"] ??
   "postgres://postgres:postgres@localhost:5433/bashgres_test";
 
-const SESSION_ID = "drizzle-adapter-test";
+const WORKSPACE_ID = "drizzle-adapter-test";
 
 describe("drizzle adapter", () => {
   const sql = postgresLib(TEST_DB_URL, { onnotice: () => {} });
@@ -29,11 +29,11 @@ describe("drizzle adapter", () => {
   });
 
   beforeEach(async () => {
-    await sql`DELETE FROM fs_nodes WHERE session_id = ${SESSION_ID}`;
+    await sql`DELETE FROM fs_nodes WHERE workspace_id = ${WORKSPACE_ID}`;
   });
 
   it("initializes PgFileSystem with drizzle client", async () => {
-    const fs = new PgFileSystem({ db: client, sessionId: SESSION_ID });
+    const fs = new PgFileSystem({ db: client, workspaceId: WORKSPACE_ID });
     await fs.init();
 
     const stat = await fs.stat("/");
@@ -41,7 +41,7 @@ describe("drizzle adapter", () => {
   });
 
   it("creates and reads files", async () => {
-    const fs = new PgFileSystem({ db: client, sessionId: SESSION_ID });
+    const fs = new PgFileSystem({ db: client, workspaceId: WORKSPACE_ID });
     await fs.init();
 
     await fs.writeFile("/hello.txt", "hello from drizzle");
@@ -50,7 +50,7 @@ describe("drizzle adapter", () => {
   });
 
   it("creates directories and lists entries", async () => {
-    const fs = new PgFileSystem({ db: client, sessionId: SESSION_ID });
+    const fs = new PgFileSystem({ db: client, workspaceId: WORKSPACE_ID });
     await fs.init();
 
     await fs.mkdir("/docs");
@@ -61,7 +61,7 @@ describe("drizzle adapter", () => {
   });
 
   it("runs transactions through drizzle bridge", async () => {
-    const fs = new PgFileSystem({ db: client, sessionId: SESSION_ID });
+    const fs = new PgFileSystem({ db: client, workspaceId: WORKSPACE_ID });
     await fs.init();
 
     await fs.writeFile("/a.txt", "aaa");

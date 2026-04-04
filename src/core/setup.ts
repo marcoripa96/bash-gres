@@ -3,7 +3,7 @@ import type { SqlClient, SetupOptions } from "./types.js";
 const TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS fs_nodes (
     id              bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    session_id      text NOT NULL CHECK (length(session_id) > 0),
+    workspace_id      text NOT NULL CHECK (length(workspace_id) > 0),
     parent_id       bigint REFERENCES fs_nodes(id) ON DELETE RESTRICT,
     name            text NOT NULL CHECK (length(name) <= 255),
     node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink')),
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS fs_nodes (
     size_bytes      bigint NOT NULL DEFAULT 0,
     mtime           timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_session_path UNIQUE (session_id, path)
+    CONSTRAINT unique_workspace_path UNIQUE (workspace_id, path)
 );
 `;
 
@@ -23,15 +23,15 @@ const INDEXES_DDL = `
 CREATE INDEX IF NOT EXISTS idx_fs_path_gist
   ON fs_nodes USING GIST (path gist_ltree_ops(siglen=124));
 
-CREATE INDEX IF NOT EXISTS idx_fs_session_parent
-  ON fs_nodes (session_id, parent_id);
+CREATE INDEX IF NOT EXISTS idx_fs_workspace_parent
+  ON fs_nodes (workspace_id, parent_id);
 
 CREATE INDEX IF NOT EXISTS idx_fs_stat
-  ON fs_nodes (session_id, path)
+  ON fs_nodes (workspace_id, path)
   INCLUDE (node_type, mode, size_bytes, mtime);
 
 CREATE INDEX IF NOT EXISTS idx_fs_dir_lookup
-  ON fs_nodes (session_id, name, parent_id)
+  ON fs_nodes (workspace_id, name, parent_id)
   WHERE node_type = 'directory';
 `;
 
@@ -49,11 +49,11 @@ ALTER TABLE fs_nodes FORCE ROW LEVEL SECURITY;
 DO $$ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE tablename = 'fs_nodes' AND policyname = 'session_isolation'
+        WHERE tablename = 'fs_nodes' AND policyname = 'workspace_isolation'
     ) THEN
-        CREATE POLICY session_isolation ON fs_nodes FOR ALL
-            USING (session_id = current_setting('app.session_id', true))
-            WITH CHECK (session_id = current_setting('app.session_id', true));
+        CREATE POLICY workspace_isolation ON fs_nodes FOR ALL
+            USING (workspace_id = current_setting('app.workspace_id', true))
+            WITH CHECK (workspace_id = current_setting('app.workspace_id', true));
     END IF;
 END $$;
 `;

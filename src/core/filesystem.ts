@@ -22,7 +22,7 @@ import { fullTextSearch, semanticSearch, hybridSearch, validateEmbedding } from 
 
 interface FsRow {
   id: number;
-  session_id: string;
+  workspace_id: string;
   parent_id: number | null;
   name: string;
   node_type: string;
@@ -47,7 +47,7 @@ const MAX_CP_NODES = 10_000;
 
 export class PgFileSystem {
   private client: SqlClient;
-  readonly sessionId: string;
+  readonly workspaceId: string;
   private maxFileSize: number;
   private maxReadSize: number | undefined;
   private maxFiles: number;
@@ -58,7 +58,7 @@ export class PgFileSystem {
 
   constructor(options: PgFileSystemOptions) {
     this.client = options.db;
-    this.sessionId = options.sessionId ?? randomUUID();
+    this.workspaceId = options.workspaceId ?? randomUUID();
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
     this.maxReadSize = options.maxReadSize;
     this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
@@ -70,23 +70,23 @@ export class PgFileSystem {
   }
 
   async init(): Promise<void> {
-    await this.withSession(async (tx) => {
-      const rootLtree = pathToLtree("/", this.sessionId);
+    await this.withWorkspace(async (tx) => {
+      const rootLtree = pathToLtree("/", this.workspaceId);
       await tx.query(
-        `INSERT INTO fs_nodes (session_id, name, node_type, path, mode)
+        `INSERT INTO fs_nodes (workspace_id, name, node_type, path, mode)
          VALUES ($1, '/', 'directory', $2::ltree, $3)
-         ON CONFLICT (session_id, path) DO NOTHING`,
-        [this.sessionId, rootLtree, 0o755],
+         ON CONFLICT (workspace_id, path) DO NOTHING`,
+        [this.workspaceId, rootLtree, 0o755],
       );
     });
   }
 
   // -- Transaction wrapper (sets RLS context + timeout) -----------------------
 
-  private withSession<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
+  private withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
     return this.client.transaction(async (tx) => {
-      await tx.query("SELECT set_config('app.session_id', $1, true)", [
-        this.sessionId,
+      await tx.query("SELECT set_config('app.workspace_id', $1, true)", [
+        this.workspaceId,
       ]);
       await tx.query("SELECT set_config('statement_timeout', $1, true)", [
         String(this.statementTimeoutMs),
@@ -98,12 +98,12 @@ export class PgFileSystem {
   // -- Low-level helpers ------------------------------------------------------
 
   private async getNode(tx: SqlClient, posixPath: string): Promise<FsRow | null> {
-    const lt = pathToLtree(posixPath, this.sessionId);
+    const lt = pathToLtree(posixPath, this.workspaceId);
     const result = await tx.query<FsRow>(
       `SELECT * FROM fs_nodes
-       WHERE session_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND path = $2::ltree
        LIMIT 1`,
-      [this.sessionId, lt],
+      [this.workspaceId, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -112,14 +112,14 @@ export class PgFileSystem {
     tx: SqlClient,
     posixPath: string,
   ): Promise<FsRowMeta | null> {
-    const lt = pathToLtree(posixPath, this.sessionId);
+    const lt = pathToLtree(posixPath, this.workspaceId);
     const result = await tx.query<FsRowMeta>(
-      `SELECT id, session_id, parent_id, name, node_type, path,
+      `SELECT id, workspace_id, parent_id, name, node_type, path,
               symlink_target, mode, size_bytes, mtime, created_at
        FROM fs_nodes
-       WHERE session_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND path = $2::ltree
        LIMIT 1`,
-      [this.sessionId, lt],
+      [this.workspaceId, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -128,13 +128,13 @@ export class PgFileSystem {
     tx: SqlClient,
     posixPath: string,
   ): Promise<FsRow | null> {
-    const lt = pathToLtree(posixPath, this.sessionId);
+    const lt = pathToLtree(posixPath, this.workspaceId);
     const result = await tx.query<FsRow>(
       `SELECT * FROM fs_nodes
-       WHERE session_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND path = $2::ltree
        LIMIT 1
        FOR UPDATE`,
-      [this.sessionId, lt],
+      [this.workspaceId, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -191,12 +191,12 @@ export class PgFileSystem {
 
   private async validateNodeCount(tx: SqlClient): Promise<void> {
     const result = await tx.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count FROM fs_nodes WHERE session_id = $1`,
-      [this.sessionId],
+      `SELECT COUNT(*)::int AS count FROM fs_nodes WHERE workspace_id = $1`,
+      [this.workspaceId],
     );
     if (result.rows[0] && result.rows[0].count >= this.maxFiles) {
       throw new Error(
-        `Node limit reached: ${this.maxFiles} nodes per session`,
+        `Node limit reached: ${this.maxFiles} nodes per workspace`,
       );
     }
   }
@@ -235,7 +235,7 @@ export class PgFileSystem {
       await this.validateNodeCount(tx);
     }
 
-    const lt = pathToLtree(path, this.sessionId);
+    const lt = pathToLtree(path, this.workspaceId);
     const isText = typeof content === "string";
     const textContent = isText ? content : null;
     const binaryData = isText ? null : content;
@@ -254,26 +254,26 @@ export class PgFileSystem {
     if (embedding) {
       const embeddingStr = `[${embedding.join(",")}]`;
       await tx.query(
-        `INSERT INTO fs_nodes (session_id, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime, embedding)
+        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime, embedding)
          VALUES ($1, $2, $3, 'file', $4::ltree, $5, $6, $7, now(), $8::vector)
-         ON CONFLICT (session_id, path) DO UPDATE SET
+         ON CONFLICT (workspace_id, path) DO UPDATE SET
            content = EXCLUDED.content,
            binary_data = EXCLUDED.binary_data,
            size_bytes = EXCLUDED.size_bytes,
            mtime = now(),
            embedding = EXCLUDED.embedding`,
-        [this.sessionId, parent.id, name, lt, textContent, binaryData, sizeBytes, embeddingStr],
+        [this.workspaceId, parent.id, name, lt, textContent, binaryData, sizeBytes, embeddingStr],
       );
     } else {
       await tx.query(
-        `INSERT INTO fs_nodes (session_id, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime)
+        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime)
          VALUES ($1, $2, $3, 'file', $4::ltree, $5, $6, $7, now())
-         ON CONFLICT (session_id, path) DO UPDATE SET
+         ON CONFLICT (workspace_id, path) DO UPDATE SET
            content = EXCLUDED.content,
            binary_data = EXCLUDED.binary_data,
            size_bytes = EXCLUDED.size_bytes,
            mtime = now()`,
-        [this.sessionId, parent.id, name, lt, textContent, binaryData, sizeBytes],
+        [this.workspaceId, parent.id, name, lt, textContent, binaryData, sizeBytes],
       );
     }
   }
@@ -298,15 +298,15 @@ export class PgFileSystem {
       for (const segment of segments) {
         current = current === "/" ? `/${segment}` : `${current}/${segment}`;
         allPaths.push(current);
-        allLtrees.push(pathToLtree(current, this.sessionId));
+        allLtrees.push(pathToLtree(current, this.workspaceId));
         allNames.push(segment);
       }
 
       const existingResult = await tx.query<{ path: string; node_type: string }>(
         `SELECT path::text, node_type FROM fs_nodes
-         WHERE session_id = $1
+         WHERE workspace_id = $1
            AND path = ANY($2::text[]::ltree[])`,
-        [this.sessionId, allLtrees],
+        [this.workspaceId, allLtrees],
       );
       const existingMap = new Map(
         existingResult.rows.map((r) => [r.path, r.node_type]),
@@ -323,16 +323,16 @@ export class PgFileSystem {
         if (!existingMap.has(allLtrees[i])) {
           const parentLt =
             i === 0
-              ? pathToLtree("/", this.sessionId)
+              ? pathToLtree("/", this.workspaceId)
               : allLtrees[i - 1];
           await tx.query(
-            `INSERT INTO fs_nodes (session_id, parent_id, name, node_type, path, mode)
+            `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, mode)
              SELECT $1, p.id, $2, 'directory', $3::ltree, $4
              FROM fs_nodes p
-             WHERE p.session_id = $1
+             WHERE p.workspace_id = $1
                AND p.path = $5::ltree
-             ON CONFLICT (session_id, path) DO NOTHING`,
-            [this.sessionId, allNames[i], allLtrees[i], 0o755, parentLt],
+             ON CONFLICT (workspace_id, path) DO NOTHING`,
+            [this.workspaceId, allNames[i], allLtrees[i], 0o755, parentLt],
           );
         }
       }
@@ -349,11 +349,11 @@ export class PgFileSystem {
           path,
         );
       const name = fileName(path);
-      const lt = pathToLtree(path, this.sessionId);
+      const lt = pathToLtree(path, this.workspaceId);
       await tx.query(
-        `INSERT INTO fs_nodes (session_id, parent_id, name, node_type, path, mode)
+        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, mode)
          VALUES ($1, $2, $3, 'directory', $4::ltree, $5)`,
-        [this.sessionId, parent.id, name, lt, 0o755],
+        [this.workspaceId, parent.id, name, lt, 0o755],
       );
     }
   }
@@ -372,9 +372,9 @@ export class PgFileSystem {
 
     const result = await tx.query<{ name: string }>(
       `SELECT name FROM fs_nodes
-       WHERE session_id = $1 AND parent_id = $2
+       WHERE workspace_id = $1 AND parent_id = $2
        ORDER BY name`,
-      [this.sessionId, node.id],
+      [this.workspaceId, node.id],
     );
     return result.rows.map((r) => r.name);
   }
@@ -433,7 +433,7 @@ export class PgFileSystem {
   async readFile(path: string, options?: ReadFileOptions): Promise<string> {
     const hasRange = options?.offset !== undefined || options?.limit !== undefined;
 
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
 
       if (hasRange) {
@@ -448,12 +448,12 @@ export class PgFileSystem {
           ? `substr(COALESCE(content, ''), $3, $4)`
           : `substr(COALESCE(content, ''), $3)`;
 
-        const params: (string | number)[] = [this.sessionId, pathToLtree(p, this.sessionId), sqlOffset];
+        const params: (string | number)[] = [this.workspaceId, pathToLtree(p, this.workspaceId), sqlOffset];
         if (sqlLimit !== undefined) params.push(sqlLimit);
 
         const result = await tx.query<{ chunk: string }>(
           `SELECT ${substringExpr} AS chunk FROM fs_nodes
-           WHERE session_id = $1 AND path = $2::ltree
+           WHERE workspace_id = $1 AND path = $2::ltree
            LIMIT 1`,
           params,
         );
@@ -481,7 +481,7 @@ export class PgFileSystem {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.resolveSymlink(tx, p);
       if (node.node_type === "directory")
@@ -509,7 +509,7 @@ export class PgFileSystem {
       if (embedding) validateEmbedding(embedding, this.embeddingDimensions);
     }
 
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       if (options?.recursive) {
         const parent = parentPath(normalized);
         if (parent !== "/") {
@@ -521,7 +521,7 @@ export class PgFileSystem {
   }
 
   async appendFile(path: string, content: string | Uint8Array): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const existing = await this.getNodeForUpdate(tx, p);
 
@@ -566,14 +566,14 @@ export class PgFileSystem {
   // -- Public API: Path queries -----------------------------------------------
 
   async exists(path: string): Promise<boolean> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const node = await this.getNodeMeta(tx, normalizePath(path));
       return node !== null;
     });
   }
 
   async stat(path: string): Promise<FsStat> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const node = await this.resolveSymlinkMeta(tx, normalizePath(path));
       return {
         isFile: node.node_type === "file",
@@ -587,7 +587,7 @@ export class PgFileSystem {
   }
 
   async lstat(path: string): Promise<FsStat> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.getNodeMeta(tx, p);
       if (!node)
@@ -608,7 +608,7 @@ export class PgFileSystem {
   }
 
   async realpath(path: string): Promise<string> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       return this.internalRealpath(tx, normalizePath(path));
     });
   }
@@ -644,19 +644,19 @@ export class PgFileSystem {
   // -- Public API: Directory operations ---------------------------------------
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       await this.internalMkdir(tx, normalizePath(path), options);
     });
   }
 
   async readdir(path: string): Promise<string[]> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       return this.internalReaddir(tx, normalizePath(path));
     });
   }
 
   async readdirWithTypes(path: string): Promise<DirentEntry[]> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.getNodeMeta(tx, p);
       if (!node)
@@ -670,9 +670,9 @@ export class PgFileSystem {
 
       const result = await tx.query<{ name: string; node_type: string }>(
         `SELECT name, node_type FROM fs_nodes
-         WHERE session_id = $1 AND parent_id = $2
+         WHERE workspace_id = $1 AND parent_id = $2
          ORDER BY name`,
-        [this.sessionId, node.id],
+        [this.workspaceId, node.id],
       );
       return result.rows.map((r) => ({
         name: r.name,
@@ -686,7 +686,7 @@ export class PgFileSystem {
   // -- Public API: Mutation ---------------------------------------------------
 
   async rm(path: string, options?: RmOptions): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.getNodeMeta(tx, p);
 
@@ -699,9 +699,9 @@ export class PgFileSystem {
         if (!options?.recursive) {
           const children = await tx.query(
             `SELECT 1 FROM fs_nodes
-             WHERE session_id = $1 AND parent_id = $2
+             WHERE workspace_id = $1 AND parent_id = $2
              LIMIT 1`,
-            [this.sessionId, node.id],
+            [this.workspaceId, node.id],
           );
           if (children.rows.length > 0) {
             throw new FsError(
@@ -714,48 +714,48 @@ export class PgFileSystem {
       }
 
       if (options?.recursive && node.node_type === "directory") {
-        const lt = pathToLtree(p, this.sessionId);
+        const lt = pathToLtree(p, this.workspaceId);
         // Delete leaves first to satisfy ON DELETE RESTRICT
         await tx.query(
           `WITH RECURSIVE subtree AS (
              SELECT id, path, 0 AS depth FROM fs_nodes
-             WHERE session_id = $1 AND path <@ $2::ltree
+             WHERE workspace_id = $1 AND path <@ $2::ltree
            )
            DELETE FROM fs_nodes
-           WHERE session_id = $1
+           WHERE workspace_id = $1
              AND id IN (SELECT id FROM subtree)
              AND id NOT IN (
                SELECT DISTINCT parent_id FROM fs_nodes
-               WHERE session_id = $1 AND parent_id IS NOT NULL
+               WHERE workspace_id = $1 AND parent_id IS NOT NULL
                  AND id IN (SELECT id FROM subtree)
              )`,
-          [this.sessionId, lt],
+          [this.workspaceId, lt],
         );
         // Repeatedly delete now-childless nodes until all are gone
         let remaining = true;
         while (remaining) {
           const result = await tx.query(
             `DELETE FROM fs_nodes
-             WHERE session_id = $1 AND path <@ $2::ltree
+             WHERE workspace_id = $1 AND path <@ $2::ltree
              AND id NOT IN (
                SELECT DISTINCT parent_id FROM fs_nodes
-               WHERE session_id = $1 AND parent_id IS NOT NULL
+               WHERE workspace_id = $1 AND parent_id IS NOT NULL
              )`,
-            [this.sessionId, lt],
+            [this.workspaceId, lt],
           );
           remaining = (result.rowCount ?? 0) > 0;
         }
       } else {
         await tx.query(
-          `DELETE FROM fs_nodes WHERE session_id = $1 AND id = $2`,
-          [this.sessionId, node.id],
+          `DELETE FROM fs_nodes WHERE workspace_id = $1 AND id = $2`,
+          [this.workspaceId, node.id],
         );
       }
     });
   }
 
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       await this.internalCp(
         tx,
         normalizePath(src),
@@ -766,7 +766,7 @@ export class PgFileSystem {
   }
 
   async mv(src: string, dest: string): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const srcPath = normalizePath(src);
       const destPath = normalizePath(dest);
 
@@ -812,62 +812,62 @@ export class PgFileSystem {
         if (destNode.node_type === "directory") {
           const children = await tx.query(
             `SELECT 1 FROM fs_nodes
-             WHERE session_id = $1 AND parent_id = $2
+             WHERE workspace_id = $1 AND parent_id = $2
              LIMIT 1`,
-            [this.sessionId, destNode.id],
+            [this.workspaceId, destNode.id],
           );
           if (children.rows.length > 0) {
             throw new FsError("ENOTEMPTY", "directory not empty, mv", dest);
           }
         }
         await tx.query(
-          `DELETE FROM fs_nodes WHERE session_id = $1 AND id = $2`,
-          [this.sessionId, destNode.id],
+          `DELETE FROM fs_nodes WHERE workspace_id = $1 AND id = $2`,
+          [this.workspaceId, destNode.id],
         );
       }
 
       const newName = fileName(destPath);
-      const newLtree = pathToLtree(destPath, this.sessionId);
-      const oldLtree = pathToLtree(srcPath, this.sessionId);
+      const newLtree = pathToLtree(destPath, this.workspaceId);
+      const oldLtree = pathToLtree(srcPath, this.workspaceId);
 
       // Lock all descendant rows before path rewrite
       if (srcNode.node_type === "directory") {
         await tx.query(
           `SELECT id FROM fs_nodes
-           WHERE session_id = $1 AND path <@ $2::ltree
+           WHERE workspace_id = $1 AND path <@ $2::ltree
            ORDER BY path
            FOR UPDATE`,
-          [this.sessionId, oldLtree],
+          [this.workspaceId, oldLtree],
         );
       }
 
       await tx.query(
         `UPDATE fs_nodes
          SET name = $1, path = $2::ltree, parent_id = $3, mtime = now()
-         WHERE session_id = $4 AND id = $5`,
-        [newName, newLtree, destParent.id, this.sessionId, srcNode.id],
+         WHERE workspace_id = $4 AND id = $5`,
+        [newName, newLtree, destParent.id, this.workspaceId, srcNode.id],
       );
 
       if (srcNode.node_type === "directory") {
         await tx.query(
           `UPDATE fs_nodes
            SET path = ($1::ltree || subpath(path, nlevel($2::ltree)))
-           WHERE session_id = $3
+           WHERE workspace_id = $3
              AND path <@ $2::ltree
              AND path != $2::ltree`,
-          [newLtree, oldLtree, this.sessionId],
+          [newLtree, oldLtree, this.workspaceId],
         );
 
         await tx.query(
           `UPDATE fs_nodes AS child
            SET parent_id = parent.id
            FROM fs_nodes AS parent
-           WHERE child.session_id = $1
-             AND parent.session_id = $1
+           WHERE child.workspace_id = $1
+             AND parent.workspace_id = $1
              AND child.path <@ $2::ltree
              AND child.path != $2::ltree
              AND parent.path = subltree(child.path, 0, nlevel(child.path) - 1)`,
-          [this.sessionId, newLtree],
+          [this.workspaceId, newLtree],
         );
       }
     });
@@ -879,7 +879,7 @@ export class PgFileSystem {
         `Invalid mode: ${mode} (must be integer between 0 and 4095/0o7777)`,
       );
     }
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.getNodeMeta(tx, p);
       if (!node)
@@ -889,14 +889,14 @@ export class PgFileSystem {
           path,
         );
       await tx.query(
-        `UPDATE fs_nodes SET mode = $1 WHERE session_id = $2 AND id = $3`,
-        [mode, this.sessionId, node.id],
+        `UPDATE fs_nodes SET mode = $1 WHERE workspace_id = $2 AND id = $3`,
+        [mode, this.workspaceId, node.id],
       );
     });
   }
 
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.getNodeMeta(tx, p);
       if (!node)
@@ -906,8 +906,8 @@ export class PgFileSystem {
           path,
         );
       await tx.query(
-        `UPDATE fs_nodes SET mtime = $1 WHERE session_id = $2 AND id = $3`,
-        [mtime, this.sessionId, node.id],
+        `UPDATE fs_nodes SET mtime = $1 WHERE workspace_id = $2 AND id = $3`,
+        [mtime, this.workspaceId, node.id],
       );
     });
   }
@@ -915,7 +915,7 @@ export class PgFileSystem {
   // -- Public API: Links ------------------------------------------------------
 
   async symlink(target: string, linkPath: string): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const normalizedTarget = normalizePath(target);
       const p = normalizePath(linkPath);
 
@@ -936,18 +936,18 @@ export class PgFileSystem {
         );
 
       const name = fileName(p);
-      const lt = pathToLtree(p, this.sessionId);
+      const lt = pathToLtree(p, this.workspaceId);
 
       await tx.query(
-        `INSERT INTO fs_nodes (session_id, parent_id, name, node_type, path, symlink_target, mode)
+        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, symlink_target, mode)
          VALUES ($1, $2, $3, 'symlink', $4::ltree, $5, $6)`,
-        [this.sessionId, parent.id, name, lt, normalizedTarget, 0o777],
+        [this.workspaceId, parent.id, name, lt, normalizedTarget, 0o777],
       );
     });
   }
 
   async link(existingPath: string, newPath: string): Promise<void> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const src = normalizePath(existingPath);
       const srcNode = await this.getNode(tx, src);
       if (!srcNode)
@@ -972,7 +972,7 @@ export class PgFileSystem {
   }
 
   async readlink(path: string): Promise<string> {
-    return this.withSession(async (tx) => {
+    return this.withWorkspace(async (tx) => {
       const p = normalizePath(path);
       const node = await this.getNodeMeta(tx, p);
       if (!node)
@@ -1006,8 +1006,8 @@ export class PgFileSystem {
     query: string,
     opts?: { path?: string; limit?: number },
   ): Promise<SearchResult[]> {
-    return this.withSession(async (tx) => {
-      return fullTextSearch(tx, this.sessionId, query, opts);
+    return this.withWorkspace(async (tx) => {
+      return fullTextSearch(tx, this.workspaceId, query, opts);
     });
   }
 
@@ -1018,8 +1018,8 @@ export class PgFileSystem {
     if (!this.embed) throw new Error("No embedding provider configured");
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withSession(async (tx) => {
-      return semanticSearch(tx, this.sessionId, embedding, opts);
+    return this.withWorkspace(async (tx) => {
+      return semanticSearch(tx, this.workspaceId, embedding, opts);
     });
   }
 
@@ -1035,8 +1035,8 @@ export class PgFileSystem {
     if (!this.embed) throw new Error("No embedding provider configured");
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withSession(async (tx) => {
-      return hybridSearch(tx, this.sessionId, query, embedding, opts);
+    return this.withWorkspace(async (tx) => {
+      return hybridSearch(tx, this.workspaceId, query, embedding, opts);
     });
   }
 
@@ -1047,15 +1047,15 @@ export class PgFileSystem {
     opts?: { cwd?: string },
   ): Promise<string[]> {
     const cwd = opts?.cwd ? normalizePath(opts.cwd) : "/";
-    return this.withSession(async (tx) => {
-      const scopeLtree = pathToLtree(cwd, this.sessionId);
+    return this.withWorkspace(async (tx) => {
+      const scopeLtree = pathToLtree(cwd, this.workspaceId);
       const result = await tx.query<{ path: string; name: string }>(
         `SELECT path::text, name FROM fs_nodes
-         WHERE session_id = $1
+         WHERE workspace_id = $1
            AND path <@ $2::ltree
            AND node_type = 'file'
          ORDER BY path`,
-        [this.sessionId, scopeLtree],
+        [this.workspaceId, scopeLtree],
       );
 
       const regex = globToRegex(pattern);
@@ -1069,11 +1069,11 @@ export class PgFileSystem {
   }
 
   async dispose(): Promise<void> {
-    await this.withSession(async (tx) => {
-      const rootLtree = pathToLtree("/", this.sessionId);
+    await this.withWorkspace(async (tx) => {
+      const rootLtree = pathToLtree("/", this.workspaceId);
       await tx.query(
-        `DELETE FROM fs_nodes WHERE session_id = $1 AND path <@ $2::ltree`,
-        [this.sessionId, rootLtree],
+        `DELETE FROM fs_nodes WHERE workspace_id = $1 AND path <@ $2::ltree`,
+        [this.workspaceId, rootLtree],
       );
     });
   }

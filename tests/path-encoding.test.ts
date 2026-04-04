@@ -86,8 +86,8 @@ describe("normalizePath", () => {
 
 describe("pathToLtree / ltreeToPath", () => {
   it("converts root path", () => {
-    const ltree = pathToLtree("/", "session1");
-    expect(ltree).toBe("s_session1");
+    const ltree = pathToLtree("/", "workspace1");
+    expect(ltree).toBe("w_workspace1");
     expect(ltreeToPath(ltree)).toBe("/");
   });
 

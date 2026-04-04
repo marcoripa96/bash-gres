@@ -23,10 +23,10 @@ describe("PgFileSystem", () => {
 
   beforeEach(async () => {
     await db.query(
-      "DELETE FROM fs_nodes WHERE session_id = $1",
-      ["test-session"],
+      "DELETE FROM fs_nodes WHERE workspace_id = $1",
+      ["test-workspace"],
     );
-    fs = new PgFileSystem({ db, sessionId: "test-session" });
+    fs = new PgFileSystem({ db, workspaceId: "test-workspace" });
     await fs.init();
   });
 
@@ -275,16 +275,16 @@ describe("PgFileSystem", () => {
     });
   });
 
-  describe("session isolation", () => {
-    it("different sessions see different files", async () => {
-      const fs2 = new PgFileSystem({ db, sessionId: "other-session" });
+  describe("workspace isolation", () => {
+    it("different workspaces see different files", async () => {
+      const fs2 = new PgFileSystem({ db, workspaceId: "other-workspace" });
       await fs2.init();
 
-      await fs.writeFile("/shared-name.txt", "session1");
-      await fs2.writeFile("/shared-name.txt", "session2");
+      await fs.writeFile("/shared-name.txt", "workspace1");
+      await fs2.writeFile("/shared-name.txt", "workspace2");
 
-      expect(await fs.readFile("/shared-name.txt")).toBe("session1");
-      expect(await fs2.readFile("/shared-name.txt")).toBe("session2");
+      expect(await fs.readFile("/shared-name.txt")).toBe("workspace1");
+      expect(await fs2.readFile("/shared-name.txt")).toBe("workspace2");
 
       // cleanup
       await fs2.dispose();
@@ -292,7 +292,7 @@ describe("PgFileSystem", () => {
   });
 
   describe("dispose", () => {
-    it("removes all session data", async () => {
+    it("removes all workspace data", async () => {
       await fs.writeFile("/a.txt", "a");
       await fs.mkdir("/dir");
       await fs.writeFile("/dir/b.txt", "b");

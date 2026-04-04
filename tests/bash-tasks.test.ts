@@ -38,10 +38,10 @@ describe("Bash task scenarios", () => {
 
   beforeEach(async () => {
     await db.query(
-      "DELETE FROM fs_nodes WHERE session_id = $1",
+      "DELETE FROM fs_nodes WHERE workspace_id = $1",
       ["task-test"],
     );
-    fs = new PgFileSystem({ db, sessionId: "task-test" });
+    fs = new PgFileSystem({ db, workspaceId: "task-test" });
     await fs.init();
     bash = new BashInterpreter(fs);
   });

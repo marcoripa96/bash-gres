@@ -32,12 +32,12 @@ export function validateEmbedding(
 
 export async function fullTextSearch(
   client: SqlClient,
-  sessionId: string,
+  workspaceId: string,
   query: string,
   opts?: { path?: string; limit?: number },
 ): Promise<SearchResult[]> {
   const limit = clampLimit(opts?.limit);
-  const scopeLtree = pathToLtree(opts?.path ?? "/", sessionId);
+  const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
 
   const result = await client.query<{
     path: string;
@@ -49,14 +49,14 @@ export async function fullTextSearch(
        name,
        -(content <@> to_bm25query($1)) AS rank
      FROM fs_nodes
-     WHERE session_id = $2
+     WHERE workspace_id = $2
        AND path <@ $3::ltree
        AND node_type = 'file'
        AND content IS NOT NULL
        AND binary_data IS NULL
      ORDER BY content <@> to_bm25query($1)
      LIMIT $4`,
-    [query, sessionId, scopeLtree, limit],
+    [query, workspaceId, scopeLtree, limit],
   );
 
   return result.rows.map((r) => ({
@@ -68,12 +68,12 @@ export async function fullTextSearch(
 
 export async function semanticSearch(
   client: SqlClient,
-  sessionId: string,
+  workspaceId: string,
   embedding: number[],
   opts?: { path?: string; limit?: number },
 ): Promise<SearchResult[]> {
   const limit = clampLimit(opts?.limit);
-  const scopeLtree = pathToLtree(opts?.path ?? "/", sessionId);
+  const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
   validateEmbedding(embedding);
   const embeddingStr = `[${embedding.join(",")}]`;
 
@@ -87,13 +87,13 @@ export async function semanticSearch(
        name,
        1 - (embedding <=> $1::vector) AS rank
      FROM fs_nodes
-     WHERE session_id = $2
+     WHERE workspace_id = $2
        AND path <@ $3::ltree
        AND node_type = 'file'
        AND embedding IS NOT NULL
      ORDER BY embedding <=> $1::vector
      LIMIT $4`,
-    [embeddingStr, sessionId, scopeLtree, limit],
+    [embeddingStr, workspaceId, scopeLtree, limit],
   );
 
   return result.rows.map((r) => ({
@@ -105,7 +105,7 @@ export async function semanticSearch(
 
 export async function hybridSearch(
   client: SqlClient,
-  sessionId: string,
+  workspaceId: string,
   query: string,
   embedding: number[],
   opts?: {
@@ -123,7 +123,7 @@ export async function hybridSearch(
     throw new Error("Search weights must be finite numbers");
   }
 
-  const scopeLtree = pathToLtree(opts?.path ?? "/", sessionId);
+  const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
   validateEmbedding(embedding);
   const embeddingStr = `[${embedding.join(",")}]`;
 
@@ -138,14 +138,14 @@ export async function hybridSearch(
        ($1::float * (-(content <@> to_bm25query($2))) +
         $3::float * (1 - (embedding <=> $4::vector))) AS rank
      FROM fs_nodes
-     WHERE session_id = $5
+     WHERE workspace_id = $5
        AND path <@ $6::ltree
        AND node_type = 'file'
        AND content IS NOT NULL
        AND embedding IS NOT NULL
      ORDER BY rank DESC
      LIMIT $7`,
-    [textWeight, query, vectorWeight, embeddingStr, sessionId, scopeLtree, limit],
+    [textWeight, query, vectorWeight, embeddingStr, workspaceId, scopeLtree, limit],
   );
 
   return result.rows.map((r) => ({
