@@ -13,6 +13,7 @@ export {
   type MkdirOptions,
   type RmOptions,
   type CpOptions,
+  type ReadFileOptions,
   type SetupOptions,
   type PgFileSystemOptions,
   type DrizzleDb,

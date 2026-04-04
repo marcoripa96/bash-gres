@@ -80,6 +80,11 @@ export interface CpOptions {
   recursive?: boolean;
 }
 
+export interface ReadFileOptions {
+  offset?: number;
+  limit?: number;
+}
+
 export interface SetupOptions {
   enableRLS?: boolean;
   enableFullTextSearch?: boolean;
@@ -105,6 +110,7 @@ export interface PgFileSystemOptions {
   db: SqlClient | DrizzleDb;
   sessionId?: string;
   maxFileSize?: number;
+  maxReadSize?: number;
   maxFiles?: number;
   maxDepth?: number;
   statementTimeoutMs?: number;

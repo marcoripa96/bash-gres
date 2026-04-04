@@ -8,6 +8,7 @@ import type {
   MkdirOptions,
   RmOptions,
   CpOptions,
+  ReadFileOptions,
   SearchResult,
 } from "./types.js";
 import { FsError } from "./types.js";
@@ -50,6 +51,7 @@ export class PgFileSystem {
   private client: SqlClient;
   readonly sessionId: string;
   private maxFileSize: number;
+  private maxReadSize: number | undefined;
   private maxFiles: number;
   private maxDepth: number;
   private statementTimeoutMs: number;
@@ -60,6 +62,7 @@ export class PgFileSystem {
     this.client = isSqlClient(options.db) ? options.db : toDrizzleSqlClient(options.db);
     this.sessionId = options.sessionId ?? randomUUID();
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
+    this.maxReadSize = options.maxReadSize;
     this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.statementTimeoutMs =
@@ -429,16 +432,49 @@ export class PgFileSystem {
 
   // -- Public API: File I/O ---------------------------------------------------
 
-  async readFile(path: string): Promise<string> {
+  async readFile(path: string, options?: ReadFileOptions): Promise<string> {
+    const hasRange = options?.offset !== undefined || options?.limit !== undefined;
+
     return this.withSession(async (tx) => {
       const p = normalizePath(path);
+
+      if (hasRange) {
+        const node = await this.resolveSymlinkMeta(tx, p);
+        if (node.node_type === "directory")
+          throw new FsError("EISDIR", "illegal operation on a directory, read", path);
+
+        const sqlOffset = (options?.offset ?? 0) + 1; // SQL SUBSTRING is 1-based
+        const sqlLimit = options?.limit;
+
+        const substringExpr = sqlLimit !== undefined
+          ? `substr(COALESCE(content, ''), $3, $4)`
+          : `substr(COALESCE(content, ''), $3)`;
+
+        const params: (string | number)[] = [this.sessionId, pathToLtree(p, this.sessionId), sqlOffset];
+        if (sqlLimit !== undefined) params.push(sqlLimit);
+
+        const result = await tx.query<{ chunk: string }>(
+          `SELECT ${substringExpr} AS chunk FROM fs_nodes
+           WHERE session_id = $1 AND path = $2::ltree
+           LIMIT 1`,
+          params,
+        );
+        return result.rows[0]?.chunk ?? "";
+      }
+
       const node = await this.resolveSymlink(tx, p);
       if (node.node_type === "directory")
+        throw new FsError("EISDIR", "illegal operation on a directory, read", path);
+
+      const size = node.size_bytes;
+      if (this.maxReadSize !== undefined && size > this.maxReadSize) {
         throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, read",
+          "E2BIG",
+          `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFile with { offset, limit } to read in chunks`,
           path,
         );
+      }
+
       if (node.content !== null) return node.content;
       if (node.binary_data !== null)
         return new TextDecoder().decode(node.binary_data);
