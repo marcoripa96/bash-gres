@@ -24,6 +24,11 @@
       "import": "./dist/core/bash/interpreter.js",
       "default": "./dist/core/bash/interpreter.js"
     },
+    "./just-bash": {
+      "types": "./dist/adapters/just-bash/index.d.ts",
+      "import": "./dist/adapters/just-bash/index.js",
+      "default": "./dist/adapters/just-bash/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -50,6 +55,7 @@
   "license": "MIT",
   "peerDependencies": {
     "drizzle-orm": ">=0.30.0",
+    "just-bash": ">=2.0.0",
     "postgres": ">=3.0.0"
   },
   "peerDependenciesMeta": {
@@ -58,12 +64,16 @@
     },
     "drizzle-orm": {
       "optional": true
+    },
+    "just-bash": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^10.0.0",
     "@types/node": "^25.5.2",
     "drizzle-orm": "^0.40.0",
+    "just-bash": "^2.14.0",
     "postgres": "^3.4.8",
     "testcontainers": "^10.0.0",
     "typescript": "^5.7.0",
