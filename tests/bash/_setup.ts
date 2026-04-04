@@ -2,7 +2,7 @@ import { beforeAll, afterAll, beforeEach } from "vitest";
 import { createTestClient } from "../helpers.js";
 import { ensureSetup } from "../global-setup.js";
 import { PgFileSystem } from "../../src/core/filesystem.js";
-import { BashInterpreter } from "../../src/core/bash.js";
+import { BashInterpreter } from "../../src/core/bash/interpreter.js";
 import type { SqlClient } from "../helpers.js";
 import type postgres from "postgres";
 

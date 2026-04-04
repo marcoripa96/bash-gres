@@ -27,7 +27,12 @@ The Drizzle bridge lives in `src/core/drizzle-bridge.ts`. It converts `$1, $2` p
 - `src/core/setup.ts` — idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `src/core/path-encoding.ts` — path <-> ltree conversion using `_xHEX_` delimited encoding
 - `src/core/search.ts` — BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
-- `src/core/bash.ts` — closed-grammar bash interpreter returning `{ exitCode, stdout, stderr }`
+- `src/core/bash/interpreter.ts` — `BashInterpreter` class, orchestration (pipes, redirects, globs)
+- `src/core/bash/types.ts` — `Command` interface, `CommandContext`, `ok`/`err` helpers
+- `src/core/bash/parsing.ts` — tokenizer, command parser, pipe/operator splitting
+- `src/core/bash/helpers.ts` — `matchGlob`, `formatLong` shared utilities
+- `src/core/bash/commands/<name>/<name>.ts` — one file per command, each exports a `Command`
+- `src/core/bash/commands/<name>/<name>.test.ts` — co-located tests for each command
 - `src/adapters/drizzle/schema.ts` — Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `src/adapters/postgres/index.ts` — wraps `postgres.Sql` into `SqlClient`
 
@@ -67,6 +72,7 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
 - Path encoding: special chars become `_xHEX_` (delimited to prevent greedy regex issues)
 - All filesystem operations run inside explicit transactions with `SET LOCAL app.session_id` and `SET LOCAL statement_timeout`
 - `setup()` is idempotent (safe to call on every startup) — uses `IF NOT EXISTS` / `IF NOT EXISTS` everywhere
+- Prefer named files over `index.ts` (e.g., `interpreter.ts`, `cat.ts`); avoid barrel/re-export files unless strictly necessary
 
 ## Subpath exports
 
@@ -75,6 +81,6 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
   ".":          "dist/core/index.js",
   "./drizzle":  "dist/adapters/drizzle/index.js",
   "./postgres": "dist/adapters/postgres/index.js",
-  "./bash":     "dist/core/bash.js"
+  "./bash":     "dist/core/bash/interpreter.js"
 }
 ```

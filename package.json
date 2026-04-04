@@ -17,8 +17,8 @@
       "import": "./dist/adapters/postgres/index.js"
     },
     "./bash": {
-      "types": "./dist/core/bash.d.ts",
-      "import": "./dist/core/bash.js"
+      "types": "./dist/core/bash/interpreter.d.ts",
+      "import": "./dist/core/bash/interpreter.js"
     },
     "./package.json": "./package.json"
   },
