@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1775315503752,
+      "tag": "0000_bash-gres-extensions",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775315509644,
+      "tag": "0001_fantastic_firebird",
+      "breakpoints": true
+    }
+  ]
+}

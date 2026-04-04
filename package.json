@@ -6,19 +6,23 @@
   "exports": {
     ".": {
       "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js"
+      "import": "./dist/core/index.js",
+      "default": "./dist/core/index.js"
     },
     "./drizzle": {
       "types": "./dist/adapters/drizzle/index.d.ts",
-      "import": "./dist/adapters/drizzle/index.js"
+      "import": "./dist/adapters/drizzle/index.js",
+      "default": "./dist/adapters/drizzle/index.js"
     },
     "./postgres": {
       "types": "./dist/adapters/postgres/index.d.ts",
-      "import": "./dist/adapters/postgres/index.js"
+      "import": "./dist/adapters/postgres/index.js",
+      "default": "./dist/adapters/postgres/index.js"
     },
     "./bash": {
       "types": "./dist/core/bash/interpreter.d.ts",
-      "import": "./dist/core/bash/interpreter.js"
+      "import": "./dist/core/bash/interpreter.js",
+      "default": "./dist/core/bash/interpreter.js"
     },
     "./package.json": "./package.json"
   },
