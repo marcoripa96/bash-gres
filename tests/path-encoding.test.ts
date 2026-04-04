@@ -13,19 +13,19 @@ describe("encodeLabel", () => {
   });
 
   it("encodes dots", () => {
-    expect(encodeLabel("file.txt")).toBe("file_2Etxt");
+    expect(encodeLabel("file.txt")).toBe("file_x2E_txt");
   });
 
   it("encodes spaces", () => {
-    expect(encodeLabel("my file")).toBe("my_20file");
+    expect(encodeLabel("my file")).toBe("my_x20_file");
   });
 
   it("encodes underscores", () => {
-    expect(encodeLabel("my_file")).toBe("my_5Ffile");
+    expect(encodeLabel("my_file")).toBe("my_x5F_file");
   });
 
   it("encodes special characters", () => {
-    expect(encodeLabel("hello@world!")).toBe("hello_40world_21");
+    expect(encodeLabel("hello@world!")).toBe("hello_x40_world_x21_");
   });
 
   it("rejects empty strings", () => {
@@ -39,15 +39,15 @@ describe("encodeLabel", () => {
 
 describe("decodeLabel", () => {
   it("decodes encoded dots", () => {
-    expect(decodeLabel("file_2Etxt")).toBe("file.txt");
+    expect(decodeLabel("file_x2E_txt")).toBe("file.txt");
   });
 
   it("decodes encoded spaces", () => {
-    expect(decodeLabel("my_20file")).toBe("my file");
+    expect(decodeLabel("my_x20_file")).toBe("my file");
   });
 
   it("decodes encoded underscores", () => {
-    expect(decodeLabel("my_5Ffile")).toBe("my_file");
+    expect(decodeLabel("my_x5F_file")).toBe("my_file");
   });
 
   it("round-trips with encodeLabel", () => {

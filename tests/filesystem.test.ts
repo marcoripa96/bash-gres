@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { createTestClient, resetDb } from "./helpers.js";
+import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../src/core/filesystem.js";
-import { setup } from "../src/core/setup.js";
 import type { SqlClient } from "./helpers.js";
 import type postgres from "postgres";
 
@@ -11,18 +11,13 @@ describe("PgFileSystem", () => {
   let fs: PgFileSystem;
 
   beforeAll(async () => {
+    await ensureSetup();
     const test = createTestClient();
     sql = test.sql;
     db = test.client;
-    await setup(db, {
-      enableRLS: false,
-      enableFullTextSearch: false,
-      enableVectorSearch: false,
-    });
   });
 
   afterAll(async () => {
-    await resetDb(db);
     await sql.end();
   });
 
@@ -75,7 +70,8 @@ describe("PgFileSystem", () => {
       const data = new Uint8Array([0x00, 0x01, 0xff, 0xfe]);
       await fs.writeFile("/bin.dat", data);
       const buf = await fs.readFileBuffer("/bin.dat");
-      expect(buf).toEqual(data);
+      // postgres.js returns Buffer (a Uint8Array subclass), so compare bytes
+      expect(new Uint8Array(buf)).toEqual(data);
     });
   });
 

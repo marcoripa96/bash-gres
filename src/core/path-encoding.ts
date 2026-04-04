@@ -9,7 +9,7 @@ export function encodeLabel(name: string): string {
       result += char;
     } else {
       const hex = char.codePointAt(0)!.toString(16).toUpperCase().padStart(2, "0");
-      result += `_${hex}`;
+      result += `_x${hex}_`;
     }
   }
   if (result.length > MAX_LTREE_LABEL_LENGTH) {
@@ -21,7 +21,7 @@ export function encodeLabel(name: string): string {
 }
 
 export function decodeLabel(label: string): string {
-  return label.replace(/_([0-9A-Fa-f]{2,6})/g, (_match, hex) => {
+  return label.replace(/_x([0-9A-Fa-f]{2,6})_/g, (_match, hex) => {
     const code = parseInt(hex, 16);
     if (code === 0) return _match;
     return String.fromCodePoint(code);

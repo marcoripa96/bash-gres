@@ -20,5 +20,5 @@ export function createTestClient(): { sql: postgres.Sql; client: SqlClient } {
 }
 
 export async function resetDb(client: SqlClient): Promise<void> {
-  await client.query("DROP TABLE IF EXISTS fs_nodes CASCADE");
+  await client.query("TRUNCATE fs_nodes CASCADE");
 }

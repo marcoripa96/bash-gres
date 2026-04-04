@@ -343,8 +343,12 @@ export class BashInterpreter {
         ? await this.fs.readFile(this.resolve(paths[0]))
         : pipedInput;
 
-    const lines = text.split("\n");
-    const result = lines.slice(-n);
+    const allLines = text.split("\n");
+    // Remove trailing empty element from trailing newline
+    if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
+      allLines.pop();
+    }
+    const result = allLines.slice(-n);
     return ok(result.join("\n") + (result.length ? "\n" : ""));
   }
 

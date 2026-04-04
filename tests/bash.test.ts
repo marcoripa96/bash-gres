@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { createTestClient, resetDb } from "./helpers.js";
+import { createTestClient } from "./helpers.js";
+import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../src/core/filesystem.js";
 import { BashInterpreter } from "../src/core/bash.js";
-import { setup } from "../src/core/setup.js";
 import type { SqlClient } from "./helpers.js";
 import type postgres from "postgres";
 
@@ -13,18 +13,13 @@ describe("BashInterpreter", () => {
   let bash: BashInterpreter;
 
   beforeAll(async () => {
+    await ensureSetup();
     const test = createTestClient();
     sql = test.sql;
     db = test.client;
-    await setup(db, {
-      enableRLS: false,
-      enableFullTextSearch: false,
-      enableVectorSearch: false,
-    });
   });
 
   afterAll(async () => {
-    await resetDb(db);
     await sql.end();
   });
 
