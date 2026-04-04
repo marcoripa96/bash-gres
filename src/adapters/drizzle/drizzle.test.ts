@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import postgresLib from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { createDrizzleClient } from "./bridge.js";
+import { createDrizzleClient } from "./adapter.js";
 import { setup } from "../../core/setup.js";
 import { PgFileSystem } from "../../core/filesystem.js";
 

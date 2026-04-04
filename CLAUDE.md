@@ -20,7 +20,7 @@ The core operates on a `SqlClient` interface (`query(text, params)` + `transacti
 
 Then pass the resulting `SqlClient` to `PgFileSystem({ db: client })` and `setup(client)`. Core has zero knowledge of any specific driver.
 
-The Drizzle adapter bridge (`src/adapters/drizzle/bridge.ts`) converts `$1, $2` positional params into Drizzle's `sql` tagged template.
+The Drizzle adapter (`src/adapters/drizzle/adapter.ts`) converts `$1, $2` positional params into Drizzle's `sql` tagged template.
 
 ### Key modules
 
@@ -35,7 +35,7 @@ The Drizzle adapter bridge (`src/adapters/drizzle/bridge.ts`) converts `$1, $2` 
 - `src/core/bash/helpers.ts` — `matchGlob`, `formatLong` shared utilities
 - `src/core/bash/commands/<name>/<name>.ts` — one file per command, each exports a `Command`
 - `src/core/bash/commands/<name>/<name>.test.ts` — co-located tests for each command
-- `src/adapters/drizzle/bridge.ts` — converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
+- `src/adapters/drizzle/adapter.ts` — converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `src/adapters/drizzle/schema.ts` — Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `src/adapters/postgres/index.ts` — wraps `postgres.Sql` into `SqlClient`
 
