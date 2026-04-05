@@ -23,7 +23,7 @@ export function Hero() {
             </div>
           </Magnetic>
           <a
-            href="https://github.com/nickreps/bash-gres"
+            href="https://github.com/marcoripa96/bash-gres"
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
             target="_blank"
             rel="noopener noreferrer"

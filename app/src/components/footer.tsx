@@ -18,7 +18,7 @@ export function Footer() {
             npm
           </a>
           <a
-            href="https://github.com"
+            href="https://github.com/marcoripa96/bash-gres"
             className="hover:text-foreground transition-colors"
             target="_blank"
             rel="noopener noreferrer"
