@@ -92,7 +92,7 @@ export function TerminalDemo() {
 
   return (
     <div className="border border-border/50 rounded-lg overflow-hidden font-mono text-[13px] leading-relaxed">
-      <div className="p-4 min-h-[240px] max-h-[320px] overflow-hidden">
+      <div className="p-4 h-[320px] overflow-hidden">
         {lines.map((line, i) => (
           <div key={i} className="whitespace-pre-wrap break-all">
             {line.type === "cmd" ? (
