@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { TerminalDemo } from "./terminal-demo";
 import { CopyButton } from "./copy-button";
 import { AsciiHeader } from "./ascii-header";
@@ -22,6 +23,12 @@ export function Hero() {
               <CopyButton text="npm install bash-gres" />
             </div>
           </Magnetic>
+          <Link
+            href="/docs"
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Docs
+          </Link>
           <a
             href="https://github.com/nickreps/bash-gres"
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
