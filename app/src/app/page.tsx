@@ -101,21 +101,7 @@ const bash = new Bash({ fs })
 // A full bash environment, backed by PostgreSQL
 await bash.exec("mkdir -p /project/src")
 await bash.exec('echo "hello world" > /project/src/index.ts')
-await bash.exec("cat /project/src/index.ts")
-// { exitCode: 0, stdout: "hello world\\n", stderr: "" }
-
-// Pipes, redirects, globs, variables, loops
-await bash.exec("ls /project/src/*.ts | wc -l")
-await bash.exec('echo "more" >> /project/src/index.ts')
-await bash.exec("for f in /project/src/*.ts; do wc -l \\$f; done")
-
-// 60+ commands: find, grep, sed, awk, jq, sort, ...
-await bash.exec("find /project -name '*.ts' -type f")
-await bash.exec("grep -rn 'hello' /project")
-await bash.exec("sed -i 's/hello/goodbye/' /project/src/index.ts")
-
-// Everything persists in PostgreSQL across sessions
-// Every workspace is isolated via Row-Level Security`;
+await bash.exec("cat /project/src/index.ts")`;
 
 async function buildTabs(
   tabs: { label: string; code: string; lang?: string }[]
