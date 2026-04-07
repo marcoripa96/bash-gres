@@ -9,6 +9,22 @@ export function Hero() {
   return (
     <section className="pt-12 pb-0 lg:pt-20">
       <div className="max-w-[768px] mx-auto px-6 lg:px-8">
+        <nav className="flex items-center justify-end gap-4 mb-8 font-mono text-xs">
+          <Link
+            href="/docs"
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Docs
+          </Link>
+          <a
+            href="https://github.com/nickreps/bash-gres"
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHub
+          </a>
+        </nav>
         <AsciiHeader />
         <p className="mt-4 text-sm text-muted-foreground leading-relaxed max-w-[48ch]">
           PostgreSQL-backed virtual filesystem with a bash interface.
@@ -23,20 +39,6 @@ export function Hero() {
               <CopyButton text="npm install bash-gres" />
             </div>
           </Magnetic>
-          <Link
-            href="/docs"
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Docs
-          </Link>
-          <a
-            href="https://github.com/nickreps/bash-gres"
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            GitHub
-          </a>
         </div>
         <div className="mt-8">
           <TerminalDemo />

@@ -2,7 +2,13 @@
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { Database } from "@phosphor-icons/react";
+
+const MINI_ASCII = `██████╗  ██████╗
+██╔══██╗██╔════╝
+██████╔╝██║  ███╗
+██╔══██╗██║   ██║
+██████╔╝╚██████╔╝
+╚═════╝  ╚═════╝`;
 
 const NAV = [
   {
@@ -38,10 +44,11 @@ export function DocsSidebar() {
       <div className="sticky top-8 space-y-6">
         <Link
           href="/"
-          className="flex items-center gap-2 text-muted hover:text-foreground transition-colors"
+          className="block text-muted hover:text-foreground transition-colors"
         >
-          <Database size={14} weight="duotone" />
-          <span className="font-mono text-sm">BashGres</span>
+          <pre className="font-mono text-[4px] leading-[1.1] select-none">
+            {MINI_ASCII}
+          </pre>
         </Link>
         <nav className="space-y-5">
           {NAV.map((section) => (
