@@ -11,14 +11,12 @@ export {
   type DirentStatEntry,
   type WalkEntry,
   type SearchResult,
-  type BashResult,
   type MkdirOptions,
   type RmOptions,
   type CpOptions,
-  type ReadFileOptions,
+  type ReadFileRangeOptions,
   type SetupOptions,
   type FsPermissions,
-  type FsAccess,
   type PgFileSystemOptions,
 } from "./types.js";
 export {

@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { Bash } from "just-bash";
-import { ensureSetup } from "../../../tests/global-setup.js";
-import { TEST_ADAPTERS } from "../../../tests/helpers.js";
-import type { SqlClient } from "../../../tests/helpers.js";
-import { PgFileSystem } from "../../core/filesystem.js";
-import { PostgresFileSystem } from "./adapter.js";
+import { ensureSetup } from "./global-setup.js";
+import { TEST_ADAPTERS } from "./helpers.js";
+import type { SqlClient } from "./helpers.js";
+import { PgFileSystem } from "../lib/core/filesystem.js";
 
 describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
   let client: SqlClient;
@@ -28,7 +27,7 @@ describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
     await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [wsId]);
     pgFs = new PgFileSystem({ db: client, workspaceId: wsId });
     await pgFs.init();
-    bash = new Bash({ fs: new PostgresFileSystem(pgFs) });
+    bash = new Bash({ fs: pgFs });
   });
 
   it("echo", async () => {

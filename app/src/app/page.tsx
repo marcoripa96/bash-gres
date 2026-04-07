@@ -47,10 +47,9 @@ const TOC = [
   { id: "connect", label: "03. Connect" },
   { id: "schema", label: "04. Schema" },
   { id: "filesystem", label: "05. Filesystem" },
-  { id: "bash", label: "06. Bash" },
+  { id: "bash", label: "06. just-bash" },
   { id: "search", label: "07. Search" },
-  { id: "access", label: "08. Access" },
-  { id: "config", label: "09. Config" },
+  { id: "config", label: "08. Config" },
 ];
 
 const INSTALL_TABS = [
@@ -147,52 +146,25 @@ console.log(sql)
   },
 ];
 
-const BASH_TABS = [
-  {
-    label: "BashInterpreter",
-    code: `import { BashInterpreter } from "bash-gres/bash"
+const BASH_CODE = `import { Bash } from "just-bash"
+import { PgFileSystem } from "bash-gres"
 
-const bash = new BashInterpreter(fs)
-
-// Basic commands
-await bash.execute("mkdir -p /project/src")
-await bash.execute('echo "hello world" > /project/src/index.ts')
-await bash.execute("cat /project/src/index.ts")
-// { exitCode: 0, stdout: "hello world\\n", stderr: "" }
-
-// Pipes
-await bash.execute("cat /project/src/index.ts | wc -l")
-
-// Redirects
-await bash.execute('echo "appended" >> /project/src/index.ts')
-
-// Globs and operators
-await bash.execute("ls /project/src/*.ts && echo 'found'")
-
-// Find and grep
-await bash.execute("find /project -name '*.ts' -type f")
-await bash.execute("grep -r 'hello' /project")`,
-  },
-  {
-    label: "just-bash",
-    code: `import { Bash } from "just-bash"
-import { PostgresFileSystem } from "bash-gres/just-bash"
-
-const pgFs = new PgFileSystem({ db: client, workspaceId: "workspace-1" })
-const fs = new PostgresFileSystem(pgFs)
+const fs = new PgFileSystem({ db: client, workspaceId: "workspace-1" })
 const bash = new Bash({ fs })
 
-// Same commands, powered by the just-bash interpreter
-await bash.execute("mkdir -p /project/src")
-await bash.execute('echo "hello world" > /project/src/index.ts')
-await bash.execute("cat /project/src/index.ts")
+await bash.exec("mkdir -p /project/src")
+await bash.exec('echo "hello world" > /project/src/index.ts')
+await bash.exec("cat /project/src/index.ts")
+// { exitCode: 0, stdout: "hello world\\n", stderr: "" }
 
-// Pipes, redirects, globs all work
-await bash.execute("cat /project/src/index.ts | wc -l")
-await bash.execute("find /project -name '*.ts' -type f")
-await bash.execute("grep -r 'hello' /project")`,
-  },
-];
+// Pipes, redirects, globs, operators
+await bash.exec("cat /project/src/index.ts | wc -l")
+await bash.exec('echo "appended" >> /project/src/index.ts')
+await bash.exec("ls /project/src/*.ts && echo 'found'")
+
+// 60+ commands: find, grep, sed, awk, jq, sort, ...
+await bash.exec("find /project -name '*.ts' -type f")
+await bash.exec("grep -r 'hello' /project")`;
 
 async function buildTabs(
   tabs: { label: string; code: string; lang?: string }[]
@@ -208,13 +180,12 @@ async function buildTabs(
 }
 
 export default async function Home() {
-  const [installTabs, driverTabs, connectTabs, drizzleSchemaTabs, bashTabs] =
+  const [installTabs, driverTabs, connectTabs, drizzleSchemaTabs] =
     await Promise.all([
       buildTabs(INSTALL_TABS),
       buildTabs(DRIVER_TABS),
       buildTabs(CONNECT_TABS),
       buildTabs(DRIZZLE_SCHEMA_TABS),
-      buildTabs(BASH_TABS),
     ]);
 
   return (
@@ -356,12 +327,21 @@ const target = await fs.readlink("/latest")`}
           </Section>
 
           {/* Bash */}
-          <Section id="bash" label="06" title="Bash interpreter">
+          <Section id="bash" label="06" title="Bash">
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Run bash commands against the virtual filesystem. Supports pipes,
-              redirects, globs, and conditional operators.
+              PgFileSystem implements the{" "}
+              <a
+                href="https://github.com/nichochar/just-bash"
+                className="text-foreground/70 underline underline-offset-2 hover:text-foreground transition-colors"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                just-bash
+              </a>{" "}
+              filesystem interface. Pass it directly to get 60+ bash commands,
+              pipes, redirects, variables, loops, and more.
             </p>
-            <CodeTabs tabs={bashTabs} />
+            <CodeBlock code={BASH_CODE} />
           </Section>
 
           {/* Search */}
@@ -421,37 +401,8 @@ const hybrid = await fs.hybridSearch("transformer architecture", {
             />
           </Section>
 
-          {/* Access Control */}
-          <Section id="access" label="08" title="Access control">
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              Restrict what paths can be read or written. Jail the filesystem to
-              a subdirectory. Symlink escapes are prevented automatically.
-            </p>
-            <CodeBlock
-              code={`const fs = new PgFileSystem({
-  db: client,
-  workspaceId: "agent-session-42",
-
-  // Jail to a subdirectory
-  rootDir: "/home/agent",
-
-  // Path-based whitelist
-  access: {
-    read: ["/public", "/shared"],
-    write: ["/shared/workspace"],
-  },
-
-  // Global kill switch
-  permissions: {
-    read: true,
-    write: true,  // set false for read-only
-  },
-})`}
-            />
-          </Section>
-
           {/* Configuration */}
-          <Section id="config" label="09" title="Configuration">
+          <Section id="config" label="08" title="Configuration">
             <CodeBlock
               code={`const fs = new PgFileSystem({
   db: client,
@@ -464,10 +415,9 @@ const hybrid = await fs.hybridSearch("transformer architecture", {
   maxDepth: 50,                     // path depth (default)
   statementTimeoutMs: 5000,         // query timeout (default)
 
-  // Access control
+  // Sandbox
   rootDir: "/",
   permissions: { read: true, write: true },
-  access: { read: [], write: [] },
 
   // Vector search
   embed: undefined,

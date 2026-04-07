@@ -1,12 +1,11 @@
 # bash-gres
 
-PostgreSQL-backed virtual filesystem with bash command interface for AI agents.
+PostgreSQL-backed virtual filesystem for AI agents. `PgFileSystem` implements the `just-bash` `IFileSystem` interface, so it can be passed directly to `new Bash({ fs })`.
 
 ## Architecture
 
 ```
 bash-gres (core)          — PgFileSystem, setup(), search, types
-bash-gres/bash            — BashInterpreter (ls, cat, echo, mkdir, rm, etc.)
 bash-gres/drizzle         — Drizzle adapter (createDrizzleClient) + schema
 bash-gres/postgres        — postgres.js adapter (createPostgresClient)
 ```
@@ -22,19 +21,23 @@ Then pass the resulting `SqlClient` to `PgFileSystem({ db: client })` and `setup
 
 The Drizzle adapter (`lib/adapters/drizzle/adapter.ts`) converts `$1, $2` positional params into Drizzle's `sql` tagged template.
 
+### Bash integration
+
+`PgFileSystem` structurally implements the `just-bash` `IFileSystem` interface. Users pass it directly:
+
+```ts
+import { Bash } from "just-bash";
+const bash = new Bash({ fs: pgFs });
+await bash.exec("echo hello > /file.txt");
+```
+
 ### Key modules
 
 - `lib/core/types.ts` — `SqlClient`, `FsError`, `SqlError`, all option/result interfaces
-- `lib/core/filesystem.ts` — `PgFileSystem` class with all fs operations
+- `lib/core/filesystem.ts` — `PgFileSystem` class with all fs operations (implements `IFileSystem`)
 - `lib/core/setup.ts` — idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `lib/core/path-encoding.ts` — path <-> ltree conversion using `_xHEX_` delimited encoding
 - `lib/core/search.ts` — BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
-- `lib/core/bash/interpreter.ts` — `BashInterpreter` class, orchestration (pipes, redirects, globs)
-- `lib/core/bash/types.ts` — `Command` interface, `CommandContext`, `ok`/`err` helpers
-- `lib/core/bash/parsing.ts` — tokenizer, command parser, pipe/operator splitting
-- `lib/core/bash/helpers.ts` — `matchGlob`, `formatLong` shared utilities
-- `lib/core/bash/commands/<name>/<name>.ts` — one file per command, each exports a `Command`
-- `lib/core/bash/commands/<name>/<name>.test.ts` — co-located tests for each command
 - `lib/adapters/drizzle/adapter.ts` — converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `lib/adapters/drizzle/schema.ts` — Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/postgres/index.ts` — wraps `postgres.Sql` into `SqlClient`
@@ -71,11 +74,11 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
 - ESM-only, TypeScript strict mode
 - No `any` — use structural interfaces and type guards at adapter boundaries
 - `as` casts only at driver boundaries (e.g., `result as T[]` when bridging between type systems)
-- Peer deps: `drizzle-orm` and `postgres` are both optional
+- Peer deps: `drizzle-orm`, `postgres`, and `just-bash` are all optional
 - Path encoding: special chars become `_xHEX_` (delimited to prevent greedy regex issues)
 - All filesystem operations run inside explicit transactions with `SET LOCAL app.workspace_id` and `SET LOCAL statement_timeout`
 - `setup()` is idempotent (safe to call on every startup) — uses `IF NOT EXISTS` / `IF NOT EXISTS` everywhere
-- Prefer named files over `index.ts` (e.g., `interpreter.ts`, `cat.ts`); avoid barrel/re-export files unless strictly necessary
+- Prefer named files over `index.ts` (e.g., `filesystem.ts`, `setup.ts`); avoid barrel/re-export files unless strictly necessary
 
 ## Subpath exports
 
@@ -83,7 +86,6 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
 {
   ".":          "dist/core/index.js",
   "./drizzle":  "dist/adapters/drizzle/index.js",
-  "./postgres": "dist/adapters/postgres/index.js",
-  "./bash":     "dist/core/bash/interpreter.js"
+  "./postgres": "dist/adapters/postgres/index.js"
 }
 ```

@@ -51,8 +51,8 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
       await expect(fs.readFile("/nope.txt")).rejects.toThrow("ENOENT");
     });
 
-    it("auto-creates parent dirs with recursive option", async () => {
-      await fs.writeFile("/a/b/c/file.txt", "deep", { recursive: true });
+    it("auto-creates parent dirs", async () => {
+      await fs.writeFile("/a/b/c/file.txt", "deep");
       expect(await fs.readFile("/a/b/c/file.txt")).toBe("deep");
     });
 
@@ -60,7 +60,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
       await fs.writeFile("/target.txt", "abcdef");
       await fs.symlink("/target.txt", "/link.txt");
 
-      expect(await fs.readFile("/link.txt", { offset: 1, limit: 3 })).toBe("bcd");
+      expect(await fs.readFileRange("/link.txt", { offset: 1, limit: 3 })).toBe("bcd");
     });
 
     it("reads ranged slices from binary-backed files", async () => {
@@ -69,7 +69,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
         new TextEncoder().encode("abcdef"),
       );
 
-      expect(await fs.readFile("/bytes.bin", { offset: 2, limit: 2 })).toBe("cd");
+      expect(await fs.readFileRange("/bytes.bin", { offset: 2, limit: 2 })).toBe("cd");
     });
   });
 
@@ -320,7 +320,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
       await fs.mkdir("/src/lib", { recursive: true });
       await fs.writeFile("/src/app.ts", "app");
       await fs.writeFile("/src/lib/util.ts", "util");
-      await fs.writeFile("/docs/readme.md", "docs", { recursive: true });
+      await fs.writeFile("/docs/readme.md", "docs");
 
       const results = await fs.glob("lib/**/*.ts", { cwd: "/src" });
 
@@ -328,7 +328,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
     });
 
     it("matches exact file patterns", async () => {
-      await fs.writeFile("/src/app.ts", "app", { recursive: true });
+      await fs.writeFile("/src/app.ts", "app");
       await fs.writeFile("/src/other.ts", "other");
 
       expect(await fs.glob("app.ts", { cwd: "/src" })).toEqual(["/src/app.ts"]);

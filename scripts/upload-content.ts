@@ -46,7 +46,7 @@ async function main() {
       if (dirs % 20 === 0) console.log(`  created ${dirs} directories...`);
     } else {
       const content = await readFile(entry.path, "utf-8");
-      await fs.writeFile(rel, content, { recursive: true });
+      await fs.writeFile(rel, content);
       files++;
       if (files % 50 === 0) console.log(`  uploaded ${files} files...`);
     }
