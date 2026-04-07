@@ -67,7 +67,7 @@ import { setup, PgFileSystem } from "bash-gres/postgres"
 
 const sql = postgres("postgres://localhost:5432/myapp")
 
-await setup(sql) // idempotent — safe on every startup
+await setup(sql) // idempotent, safe on every startup
 
 const fs = new PgFileSystem({ db: sql, workspaceId: "workspace-1" })`,
   },
@@ -98,7 +98,7 @@ import { PgFileSystem } from "bash-gres"
 const fs = new PgFileSystem({ db: client, workspaceId: "workspace-1" })
 const bash = new Bash({ fs })
 
-// A full bash environment — backed by PostgreSQL
+// A full bash environment, backed by PostgreSQL
 await bash.exec("mkdir -p /project/src")
 await bash.exec('echo "hello world" > /project/src/index.ts')
 await bash.exec("cat /project/src/index.ts")
@@ -166,7 +166,7 @@ export default async function Home() {
             <p className="text-sm text-muted-foreground leading-relaxed">
               Create a{" "}
               <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
-              — a PostgreSQL-backed virtual filesystem scoped to a workspace.{" "}
+              , a PostgreSQL-backed virtual filesystem scoped to a workspace.{" "}
               <code className="font-mono text-foreground/80">setup()</code>{" "}
               creates tables, indexes, and extensions idempotently.
             </p>
@@ -232,8 +232,8 @@ const hybrid = await fs.hybridSearch("transformer architecture", {
               >
                 just-bash
               </a>{" "}
-              and get a complete bash environment — 60+ commands,
-              pipes, redirects, variables, loops — all persisted in
+              and get a complete bash environment: 60+ commands,
+              pipes, redirects, variables, loops, all persisted in
               PostgreSQL.
             </p>
             <CodeBlock code={BASH_CODE} />

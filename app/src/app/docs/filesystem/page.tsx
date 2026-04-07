@@ -18,6 +18,32 @@ export default function FilesystemPage() {
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
+          Workspace Isolation
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Every{" "}
+          <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
+          instance is scoped to a workspace. Workspaces are isolated via
+          PostgreSQL Row-Level Security. Each transaction sets{" "}
+          <code className="font-mono text-foreground/80">
+            SET LOCAL app.workspace_id
+          </code>{" "}
+          before executing any query. If you omit{" "}
+          <code className="font-mono text-foreground/80">workspaceId</code>, a
+          random UUID is generated.
+        </p>
+        <CodeBlock
+          code={`// Each workspace is fully isolated
+const ws1 = new PgFileSystem({ db: sql, workspaceId: "tenant-a" })
+const ws2 = new PgFileSystem({ db: sql, workspaceId: "tenant-b" })
+
+await ws1.writeFile("/data.txt", "tenant A data")
+await ws2.exists("/data.txt") // false, different workspace`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
           Reading & Writing
         </h2>
         <CodeBlock
@@ -210,6 +236,7 @@ fs.resolvePath("/docs", "./guide.md")
 // "/docs/guide.md"`}
         />
       </section>
+
     </div>
   );
 }

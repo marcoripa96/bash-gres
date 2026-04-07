@@ -21,7 +21,7 @@ export default function SchemaPage() {
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
           The <code className="font-mono text-foreground/80">setup()</code>{" "}
-          function creates everything idempotently &mdash; safe to call on every
+          function creates everything idempotently. Safe to call on every
           startup. It works with both adapters.
         </p>
         <CodeBlock
@@ -73,7 +73,7 @@ await setup(sql, {
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">embeddingDimensions</td>
                 <td className="py-2 pr-4 font-mono">number</td>
-                <td className="py-2 pr-4 font-mono">&mdash;</td>
+                <td className="py-2 pr-4 font-mono">-</td>
                 <td className="py-2">Vector dimensions (required when enableVectorSearch is true)</td>
               </tr>
               <tr>
@@ -229,7 +229,7 @@ export const fsNodes = createSchema({
             generateMigrationSQL()
           </code>{" "}
           produces SQL for extensions and RLS policies that Drizzle can&apos;t
-          express &mdash; paste it into a custom migration.
+          express. Paste it into a custom migration.
         </p>
         <CodeBlock
           code={`import { generateMigrationSQL } from "bash-gres/drizzle"
@@ -255,31 +255,6 @@ npx drizzle-kit migrate`}
         />
       </section>
 
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold tracking-tight">
-          Docker Compose
-        </h2>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          The easiest way to get a compatible PostgreSQL instance running:
-        </p>
-        <CodeBlock
-          lang="yaml"
-          filename="docker-compose.yml"
-          code={`services:
-  postgres:
-    image: postgres:17
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: myapp
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    command: >
-      postgres
-        -c shared_preload_libraries=ltree`}
-        />
-        <CodeBlock lang="bash" code={`docker compose up -d`} />
-      </section>
     </div>
   );
 }

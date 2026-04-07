@@ -62,7 +62,7 @@ export default function ConfigurationPage() {
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">db</td>
                 <td className="py-2 pr-4 font-mono">SqlClient</td>
-                <td className="py-2 pr-4 font-mono">&mdash;</td>
+                <td className="py-2 pr-4 font-mono">-</td>
                 <td className="py-2">Database client (required)</td>
               </tr>
               <tr className="border-b border-border/30">
@@ -80,7 +80,7 @@ export default function ConfigurationPage() {
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">maxReadSize</td>
                 <td className="py-2 pr-4 font-mono">number</td>
-                <td className="py-2 pr-4 font-mono">&mdash;</td>
+                <td className="py-2 pr-4 font-mono">-</td>
                 <td className="py-2">Maximum bytes returned by readFile (throws E2BIG if exceeded)</td>
               </tr>
               <tr className="border-b border-border/30">
@@ -105,7 +105,7 @@ export default function ConfigurationPage() {
                 <td className="py-2 pr-4 font-mono">rootDir</td>
                 <td className="py-2 pr-4 font-mono">string</td>
                 <td className="py-2 pr-4 font-mono">&quot;/&quot;</td>
-                <td className="py-2">Root directory &mdash; operations are sandboxed within</td>
+                <td className="py-2">Root directory - operations are sandboxed within</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">permissions</td>
@@ -116,13 +116,13 @@ export default function ConfigurationPage() {
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">embed</td>
                 <td className="py-2 pr-4 font-mono">(text: string) =&gt; Promise&lt;number[]&gt;</td>
-                <td className="py-2 pr-4 font-mono">&mdash;</td>
+                <td className="py-2 pr-4 font-mono">-</td>
                 <td className="py-2">Embedding function for semantic search</td>
               </tr>
               <tr>
                 <td className="py-2 pr-4 font-mono">embeddingDimensions</td>
                 <td className="py-2 pr-4 font-mono">number</td>
-                <td className="py-2 pr-4 font-mono">&mdash;</td>
+                <td className="py-2 pr-4 font-mono">-</td>
                 <td className="py-2">Expected vector dimensions (validated on write)</td>
               </tr>
             </tbody>

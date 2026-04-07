@@ -60,32 +60,6 @@ await bash.exec("cat /project/src/index.ts")
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold tracking-tight">Architecture</h2>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          BashGres is split into a core package and two database adapters:
-        </p>
-        <div className="bg-surface/50 border border-border/50 rounded-xl p-5">
-          <pre className="font-mono text-[13px] text-muted-foreground leading-relaxed">
-{`bash-gres            Core: PgFileSystem, setup(), search, types
-bash-gres/postgres   postgres.js adapter
-bash-gres/drizzle    Drizzle ORM adapter + schema + migrations`}
-          </pre>
-        </div>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          The core operates on a{" "}
-          <code className="font-mono text-foreground/80">SqlClient</code>{" "}
-          interface. Each adapter wraps a driver-specific connection into{" "}
-          <code className="font-mono text-foreground/80">SqlClient</code>.
-          Both adapters also re-export{" "}
-          <code className="font-mono text-foreground/80">setup()</code> and{" "}
-          <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
-          that accept the native driver directly, so you never need to touch{" "}
-          <code className="font-mono text-foreground/80">SqlClient</code>{" "}
-          yourself.
-        </p>
-      </section>
-
-      <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">Requirements</h2>
         <ul className="text-sm text-muted-foreground leading-relaxed space-y-1 list-disc list-inside">
           <li>

@@ -76,7 +76,7 @@ try {
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">EACCES</td>
-                <td className="py-2">Access denied &mdash; outside rootDir or permissions disabled</td>
+                <td className="py-2">Access denied: outside rootDir or permissions disabled</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">EPERM</td>
@@ -133,7 +133,7 @@ try {
   const content = await fs.readFile("/config.json")
 } catch (e) {
   if (e instanceof FsError && e.code === "ENOENT") {
-    // file doesn't exist — use default config
+    // file doesn't exist, use default config
   }
 }
 
