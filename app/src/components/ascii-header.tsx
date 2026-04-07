@@ -59,42 +59,67 @@ export function AsciiHeader() {
   const spanRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const cooldowns = useRef<(ReturnType<typeof setTimeout> | null)[]>([]);
 
-  // Initial decode animation
+  // Initial decode animation — single rAF loop instead of hundreds of timers
   useEffect(() => {
     const spans = spanRefs.current;
-    const timeouts: ReturnType<typeof setTimeout>[] = [];
+    const STEPS = 4;
+    const STEP_MS = 30;
 
-    for (const idx of NON_SPACE) {
-      const el = spans[idx];
+    // Pre-compute delay and state per cell
+    const delays = new Float32Array(NON_SPACE.length);
+    const step = new Int8Array(NON_SPACE.length); // -1 = waiting, 0..STEPS-1 = animating, STEPS = done
+    step.fill(-1);
+
+    for (let i = 0; i < NON_SPACE.length; i++) {
+      const { col, row } = CELLS[NON_SPACE[i]];
+      delays[i] = col * 16 + row * 25 + Math.random() * 50;
+      const el = spans[NON_SPACE[i]];
       if (el) {
         el.textContent = rg();
         el.style.opacity = "0.15";
       }
     }
 
-    for (const idx of NON_SPACE) {
-      const { col, row } = CELLS[idx];
-      const delay = col * 16 + row * 25 + Math.random() * 50;
+    let raf = 0;
+    let done = 0;
+    const start = performance.now();
 
-      const t = setTimeout(() => {
-        const el = spans[idx];
-        if (!el) return;
-        let n = 0;
-        const iv = setInterval(() => {
-          el.textContent = rg();
-          el.style.opacity = String(Math.min(1, 0.15 + n * 0.22));
-          n++;
-          if (n >= 4) {
-            clearInterval(iv);
-            el.textContent = CELLS[idx].char;
+    function tick(now: number) {
+      const elapsed = now - start;
+
+      for (let i = 0; i < NON_SPACE.length; i++) {
+        if (step[i] === STEPS) continue;
+        const el = spans[NON_SPACE[i]];
+        if (!el) continue;
+
+        if (step[i] === -1) {
+          if (elapsed < delays[i]) continue;
+          step[i] = 0;
+        }
+
+        const cellElapsed = elapsed - delays[i];
+        const newStep = Math.min(STEPS, Math.floor(cellElapsed / STEP_MS));
+
+        if (newStep > step[i]) {
+          step[i] = newStep;
+          if (newStep >= STEPS) {
+            el.textContent = CELLS[NON_SPACE[i]].char;
             el.style.opacity = "1";
+            done++;
+          } else {
+            el.textContent = rg();
+            el.style.opacity = String(Math.min(1, 0.15 + newStep * 0.22));
           }
-        }, 30);
-      }, delay);
-      timeouts.push(t);
+        }
+      }
+
+      if (done < NON_SPACE.length) {
+        raf = requestAnimationFrame(tick);
+      }
     }
 
-    return () => timeouts.forEach(clearTimeout);
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
   }, []);
 
   // Mouse proximity scramble
