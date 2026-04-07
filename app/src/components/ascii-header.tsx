@@ -12,6 +12,9 @@ const ASCII = `██████╗  █████╗ ███████�
 const COLS = Math.max(...ASCII.split("\n").map((l) => l.length));
 const ROWS = ASCII.split("\n").length;
 const GLITCH = "░▒▓╳┃━┏┓┗┛╋╸╺╻╹▐▌▀▄";
+const RADIUS = 4.5;
+const RADIUS_SQ = RADIUS * RADIUS;
+const RADIUS_CEIL = Math.ceil(RADIUS);
 
 function rg() {
   return GLITCH[Math.floor(Math.random() * GLITCH.length)];
@@ -23,55 +26,58 @@ interface Cell {
   row: number;
 }
 
-function buildGrid(): Cell[] {
-  const cells: Cell[] = [];
+// Pre-compute grid and spatial lookup once
+const CELLS: Cell[] = [];
+const NON_SPACE: number[] = [];
+// 2D grid: GRID[row][col] = index into CELLS (or -1 for spaces/newlines)
+const GRID: number[][] = Array.from({ length: ROWS }, () =>
+  new Array(COLS).fill(-1),
+);
+
+{
   let row = 0,
     col = 0;
   for (const ch of ASCII) {
     if (ch === "\n") {
-      cells.push({ char: ch, col: -1, row: -1 });
+      CELLS.push({ char: ch, col: -1, row: -1 });
       row++;
       col = 0;
     } else {
-      cells.push({ char: ch, col, row });
+      const idx = CELLS.length;
+      CELLS.push({ char: ch, col, row });
+      if (ch !== " ") {
+        NON_SPACE.push(idx);
+        GRID[row][col] = idx;
+      }
       col++;
     }
   }
-  return cells;
 }
 
 export function AsciiHeader() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const spanRefs = useRef<Map<number, HTMLSpanElement>>(new Map());
-  const cooldowns = useRef<Map<number, ReturnType<typeof setTimeout>>>(
-    new Map(),
-  );
-  const grid = useRef<Cell[]>(buildGrid());
-  const cells = grid.current;
+  const spanRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const cooldowns = useRef<(ReturnType<typeof setTimeout> | null)[]>([]);
 
-  // Initial decode animation: characters start as glitch, resolve left-to-right
+  // Initial decode animation
   useEffect(() => {
-    const nonSpace: number[] = [];
-
-    cells.forEach((c, i) => {
-      if (c.char !== " " && c.char !== "\n") {
-        nonSpace.push(i);
-        const el = spanRefs.current.get(i);
-        if (el) {
-          el.textContent = rg();
-          el.style.opacity = "0.15";
-        }
-      }
-    });
-
+    const spans = spanRefs.current;
     const timeouts: ReturnType<typeof setTimeout>[] = [];
 
-    nonSpace.forEach((idx) => {
-      const { col, row } = cells[idx];
+    for (const idx of NON_SPACE) {
+      const el = spans[idx];
+      if (el) {
+        el.textContent = rg();
+        el.style.opacity = "0.15";
+      }
+    }
+
+    for (const idx of NON_SPACE) {
+      const { col, row } = CELLS[idx];
       const delay = col * 16 + row * 25 + Math.random() * 50;
 
       const t = setTimeout(() => {
-        const el = spanRefs.current.get(idx);
+        const el = spans[idx];
         if (!el) return;
         let n = 0;
         const iv = setInterval(() => {
@@ -80,16 +86,16 @@ export function AsciiHeader() {
           n++;
           if (n >= 4) {
             clearInterval(iv);
-            el.textContent = cells[idx].char;
+            el.textContent = CELLS[idx].char;
             el.style.opacity = "1";
           }
         }, 30);
       }, delay);
       timeouts.push(t);
-    });
+    }
 
     return () => timeouts.forEach(clearTimeout);
-  }, [cells]);
+  }, []);
 
   // Mouse proximity scramble
   useEffect(() => {
@@ -98,34 +104,41 @@ export function AsciiHeader() {
 
     let raf = 0;
     const cd = cooldowns.current;
+    const spans = spanRefs.current;
 
     function onMove(e: MouseEvent) {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         const rect = container!.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
         const cw = rect.width / COLS;
         const ch = rect.height / ROWS;
-        const radius = 4.5;
+        const mcol = (e.clientX - rect.left) / cw;
+        const mrow = (e.clientY - rect.top) / ch;
 
-        cells.forEach((c, i) => {
-          if (c.col < 0 || c.char === " " || cd.has(i)) return;
-          const dx = mx / cw - (c.col + 0.5);
-          const dy = my / ch - (c.row + 0.5);
-          if (dx * dx + dy * dy < radius * radius) {
-            const el = spanRefs.current.get(i);
-            if (!el) return;
+        const rMin = Math.max(0, Math.floor(mrow - RADIUS_CEIL));
+        const rMax = Math.min(ROWS - 1, Math.ceil(mrow + RADIUS_CEIL));
+        const cMin = Math.max(0, Math.floor(mcol - RADIUS_CEIL));
+        const cMax = Math.min(COLS - 1, Math.ceil(mcol + RADIUS_CEIL));
+
+        for (let r = rMin; r <= rMax; r++) {
+          const gridRow = GRID[r];
+          for (let c = cMin; c <= cMax; c++) {
+            const idx = gridRow[c];
+            if (idx < 0 || cd[idx]) continue;
+            const dx = mcol - (c + 0.5);
+            const dy = mrow - (r + 0.5);
+            if (dx * dx + dy * dy >= RADIUS_SQ) continue;
+            const el = spans[idx];
+            if (!el) continue;
             el.textContent = rg();
             el.style.opacity = "0.4";
-            const t = setTimeout(() => {
-              el.textContent = c.char;
+            cd[idx] = setTimeout(() => {
+              el.textContent = CELLS[idx].char;
               el.style.opacity = "1";
-              cd.delete(i);
+              cd[idx] = null;
             }, 80 + Math.random() * 120);
-            cd.set(i, t);
           }
-        });
+        }
       });
     }
 
@@ -133,9 +146,11 @@ export function AsciiHeader() {
     return () => {
       container.removeEventListener("mousemove", onMove);
       cancelAnimationFrame(raf);
-      cd.forEach(clearTimeout);
+      for (const t of cd) {
+        if (t) clearTimeout(t);
+      }
     };
-  }, [cells]);
+  }, []);
 
   return (
     <div
@@ -143,14 +158,14 @@ export function AsciiHeader() {
       className="relative select-none overflow-hidden cursor-crosshair w-fit"
     >
       <pre className="font-mono text-[6px] sm:text-[8px] md:text-[10px] leading-[1.2] text-foreground whitespace-pre">
-        {cells.map((c, i) =>
+        {CELLS.map((c, i) =>
           c.char === "\n" ? (
             "\n"
           ) : (
             <span
               key={i}
               ref={(el) => {
-                if (el) spanRefs.current.set(i, el);
+                spanRefs.current[i] = el;
               }}
             >
               {c.char}
