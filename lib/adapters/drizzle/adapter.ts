@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
-import type { SqlClient, QueryResult, SqlParam, PgFileSystemOptions } from "../../core/types.js";
+import type { SqlClient, QueryResult, SqlParam, PgFileSystemOptions, SetupOptions } from "../../core/types.js";
 import { SqlError } from "../../core/types.js";
 import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
+import { setup as coreSetup } from "../../core/setup.js";
 
 /**
  * Structural interface for any Drizzle PG database or transaction.
@@ -157,6 +158,24 @@ export function createDrizzleClient(db: DrizzleDb): SqlClient {
       return db.transaction((tx) => fn(createDrizzleClient(tx)));
     },
   };
+}
+
+// -- setup (Drizzle-native) ---------------------------------------------------
+
+/**
+ * Drizzle-native setup — accepts a Drizzle `db` instance directly.
+ *
+ * @example
+ * ```ts
+ * import { drizzle } from "drizzle-orm/postgres-js";
+ * import { setup } from "bash-gres/drizzle";
+ *
+ * const db = drizzle(sql);
+ * await setup(db);
+ * ```
+ */
+export function setup(db: DrizzleDb, options?: SetupOptions): Promise<void> {
+  return coreSetup(createDrizzleClient(db), options);
 }
 
 // -- PgFileSystem (Drizzle-native) --------------------------------------------
