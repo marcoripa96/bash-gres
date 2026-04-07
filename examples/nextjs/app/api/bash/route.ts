@@ -1,5 +1,5 @@
+import { Bash } from "just-bash";
 import { PgFileSystem } from "bash-gres/drizzle";
-import { BashInterpreter } from "bash-gres/bash";
 import { db } from "@/src/db";
 
 const WORKSPACE_ID = "demo";
@@ -12,8 +12,8 @@ export async function POST(request: Request) {
   }
 
   const fs = new PgFileSystem({ db, workspaceId: WORKSPACE_ID });
-  const bash = new BashInterpreter(fs);
-  const result = await bash.execute(command);
+  const bash = new Bash({ fs });
+  const result = await bash.exec(command);
 
   return Response.json(result);
 }

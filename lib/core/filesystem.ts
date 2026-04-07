@@ -2,8 +2,6 @@ import { randomUUID } from "crypto";
 import type {
   SqlClient,
   PgFileSystemOptions,
-  FsPermissions,
-  FsAccess,
   FsStat,
   DirentEntry,
   DirentStatEntry,
@@ -11,7 +9,7 @@ import type {
   MkdirOptions,
   RmOptions,
   CpOptions,
-  ReadFileOptions,
+  ReadFileRangeOptions,
   SearchResult,
 } from "./types.js";
 import { FsError, SqlError } from "./types.js";
@@ -84,8 +82,6 @@ export class PgFileSystem {
   private embed?: (text: string) => Promise<number[]>;
   private embeddingDimensions?: number;
   private rootDir: string;
-  private accessRead: string[] | null;
-  private accessWrite: string[] | null;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -104,16 +100,6 @@ export class PgFileSystem {
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
     this.rootDir = normalizePath(options.rootDir ?? "/");
-
-    if (options.access) {
-      const write = (options.access.write ?? []).map((p) => normalizePath(p));
-      const read = (options.access.read ?? []).map((p) => normalizePath(p));
-      this.accessRead = [...read, ...write];
-      this.accessWrite = write;
-    } else {
-      this.accessRead = null;
-      this.accessWrite = null;
-    }
   }
 
   async init(): Promise<void> {
@@ -328,119 +314,12 @@ export class PgFileSystem {
     return internalPath.slice(this.rootDir.length);
   }
 
-  private isAncestorOfAllowed(
-    path: string,
-    allowedPaths: string[],
-  ): boolean {
-    const prefix = path === "/" ? "/" : path + "/";
-    return allowedPaths.some(
-      (dir) => dir.startsWith(prefix) || dir === path,
-    );
-  }
-
   private guardRead(userPath: string): string {
-    const p = normalizePath(userPath);
-    if (this.accessRead !== null) {
-      const allowed = this.accessRead.some(
-        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
-      );
-      if (!allowed && !this.isAncestorOfAllowed(p, this.accessRead)) {
-        throw new FsError("EACCES", "permission denied", userPath);
-      }
-    }
-    return this.toInternalPath(p);
+    return this.toInternalPath(normalizePath(userPath));
   }
 
   private guardWrite(userPath: string): string {
-    const p = normalizePath(userPath);
-    if (this.accessWrite !== null) {
-      const allowed = this.accessWrite.some(
-        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
-      );
-      if (!allowed) {
-        throw new FsError("EACCES", "permission denied", userPath);
-      }
-    }
-    return this.toInternalPath(p);
-  }
-
-  private syntheticReaddir(
-    path: string,
-    allowedPaths: string[],
-  ): string[] {
-    const prefix = path === "/" ? "/" : path + "/";
-    const entries = new Set<string>();
-    for (const dir of allowedPaths) {
-      if (dir.startsWith(prefix)) {
-        const rest = dir.slice(prefix.length);
-        const firstSegment = rest.split("/")[0];
-        if (firstSegment) entries.add(firstSegment);
-      }
-    }
-    return [...entries].sort();
-  }
-
-  private syntheticReaddirWithTypes(
-    path: string,
-    allowedPaths: string[],
-  ): DirentEntry[] {
-    return this.syntheticReaddir(path, allowedPaths).map((name) => ({
-      name,
-      isFile: false,
-      isDirectory: true,
-      isSymbolicLink: false,
-    }));
-  }
-
-  private async syntheticReaddirWithStats(
-    path: string,
-    allowedPaths: string[],
-  ): Promise<DirentStatEntry[]> {
-    const names = this.syntheticReaddir(path, allowedPaths);
-    if (names.length === 0) return [];
-
-    const internal = this.toInternalPath(path);
-    return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeMeta(tx, internal);
-      if (!node) {
-        return names.map((name) => ({
-          name,
-          isFile: false,
-          isDirectory: true,
-          isSymbolicLink: false,
-          mode: 0o755,
-          size: 0,
-          mtime: new Date(0),
-          symlinkTarget: null,
-        }));
-      }
-
-      const result = await tx.query<DirentStatRow>(
-        `SELECT name, node_type, mode, size_bytes, mtime, symlink_target
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND parent_id = $2 AND name = ANY($3::text[])
-         ORDER BY name`,
-        [this.workspaceId, node.id, names],
-      );
-      const rowMap = new Map(result.rows.map((row) => [row.name, row]));
-
-      return names.map((name) => {
-        const row = rowMap.get(name);
-        if (!row) {
-          return {
-            name,
-            isFile: false,
-            isDirectory: true,
-            isSymbolicLink: false,
-            mode: 0o755,
-            size: 0,
-            mtime: new Date(0),
-            symlinkTarget: null,
-          };
-        }
-        return this.mapDirentStatRow(row);
-      });
-    });
+    return this.toInternalPath(normalizePath(userPath));
   }
 
   private mapDirentStatRow(row: DirentStatRow): DirentStatEntry {
@@ -476,13 +355,6 @@ export class PgFileSystem {
         this.toUserPath(internalPath),
       );
     }
-  }
-
-  private isPathReadable(userPath: string): boolean {
-    if (this.accessRead === null) return true;
-    return this.accessRead.some(
-      (dir) => dir === "/" || userPath === dir || userPath.startsWith(dir + "/"),
-    );
   }
 
   // -- Internal write ---------------------------------------------------------
@@ -705,50 +577,13 @@ export class PgFileSystem {
 
   // -- Public API: File I/O ---------------------------------------------------
 
-  async readFile(path: string, options?: ReadFileOptions): Promise<string> {
+  async readFile(
+    path: string,
+    _options?: { encoding?: string | null } | string,
+  ): Promise<string> {
     const internal = this.guardRead(path);
-    const hasRange = options?.offset !== undefined || options?.limit !== undefined;
 
     return this.withWorkspace(async (tx) => {
-      if (hasRange) {
-        const node = await this.resolveSymlinkMeta(tx, internal);
-        if (node.node_type === "directory")
-          throw new FsError("EISDIR", "illegal operation on a directory, read", path);
-
-        const sqlOffset = (options?.offset ?? 0) + 1; // SQL SUBSTRING is 1-based
-        const sqlLimit = options?.limit;
-
-        const textExpr = sqlLimit !== undefined
-          ? `substr(content, $3, $4)`
-          : `substr(content, $3)`;
-        const binaryExpr = sqlLimit !== undefined
-          ? `substring(binary_data FROM $3 FOR $4)`
-          : `substring(binary_data FROM $3)`;
-
-        const params: (string | number)[] = [this.workspaceId, node.id, sqlOffset];
-        if (sqlLimit !== undefined) params.push(sqlLimit);
-
-        const result = await tx.query<{
-          chunk_text: string | null;
-          chunk_binary: Uint8Array | null;
-        }>(
-          `SELECT ${textExpr} AS chunk_text,
-                  ${binaryExpr} AS chunk_binary
-           FROM fs_nodes
-           WHERE workspace_id = $1 AND id = $2
-           LIMIT 1`,
-          params,
-        );
-
-        const chunk = result.rows[0];
-        if (!chunk) return "";
-        if (chunk.chunk_text !== null) return chunk.chunk_text;
-        if (chunk.chunk_binary !== null) {
-          return new TextDecoder().decode(chunk.chunk_binary);
-        }
-        return "";
-      }
-
       const node = await this.resolveSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError("EISDIR", "illegal operation on a directory, read", path);
@@ -757,7 +592,7 @@ export class PgFileSystem {
       if (this.maxReadSize !== undefined && size > this.maxReadSize) {
         throw new FsError(
           "E2BIG",
-          `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFile with { offset, limit } to read in chunks`,
+          `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFileRange with { offset, limit } to read in chunks`,
           path,
         );
       }
@@ -765,6 +600,49 @@ export class PgFileSystem {
       if (node.content !== null) return node.content;
       if (node.binary_data !== null)
         return new TextDecoder().decode(node.binary_data);
+      return "";
+    });
+  }
+
+  async readFileRange(path: string, options?: ReadFileRangeOptions): Promise<string> {
+    const internal = this.guardRead(path);
+
+    return this.withWorkspace(async (tx) => {
+      const node = await this.resolveSymlinkMeta(tx, internal);
+      if (node.node_type === "directory")
+        throw new FsError("EISDIR", "illegal operation on a directory, read", path);
+
+      const sqlOffset = (options?.offset ?? 0) + 1; // SQL SUBSTRING is 1-based
+      const sqlLimit = options?.limit;
+
+      const textExpr = sqlLimit !== undefined
+        ? `substr(content, $3, $4)`
+        : `substr(content, $3)`;
+      const binaryExpr = sqlLimit !== undefined
+        ? `substring(binary_data FROM $3 FOR $4)`
+        : `substring(binary_data FROM $3)`;
+
+      const params: (string | number)[] = [this.workspaceId, node.id, sqlOffset];
+      if (sqlLimit !== undefined) params.push(sqlLimit);
+
+      const result = await tx.query<{
+        chunk_text: string | null;
+        chunk_binary: Uint8Array | null;
+      }>(
+        `SELECT ${textExpr} AS chunk_text,
+                ${binaryExpr} AS chunk_binary
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND id = $2
+         LIMIT 1`,
+        params,
+      );
+
+      const chunk = result.rows[0];
+      if (!chunk) return "";
+      if (chunk.chunk_text !== null) return chunk.chunk_text;
+      if (chunk.chunk_binary !== null) {
+        return new TextDecoder().decode(chunk.chunk_binary);
+      }
       return "";
     });
   }
@@ -788,7 +666,7 @@ export class PgFileSystem {
   async writeFile(
     path: string,
     content: string | Uint8Array,
-    options?: { recursive?: boolean },
+    _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
 
@@ -799,19 +677,25 @@ export class PgFileSystem {
     }
 
     return this.withWorkspace(async (tx) => {
-      if (options?.recursive) {
-        const parent = parentPath(internal);
-        if (parent !== "/") {
-          await this.internalMkdir(tx, parent, { recursive: true });
-        }
+      const parent = parentPath(internal);
+      if (parent !== "/") {
+        await this.internalMkdir(tx, parent, { recursive: true });
       }
       await this.internalWriteFile(tx, internal, content, embedding);
     });
   }
 
-  async appendFile(path: string, content: string | Uint8Array): Promise<void> {
+  async appendFile(
+    path: string,
+    content: string | Uint8Array,
+    _options?: { encoding?: string } | string,
+  ): Promise<void> {
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
+      const parent = parentPath(internal);
+      if (parent !== "/") {
+        await this.internalMkdir(tx, parent, { recursive: true });
+      }
       const existing = await this.getNodeForUpdate(tx, internal);
 
       if (!existing) {
@@ -951,21 +835,7 @@ export class PgFileSystem {
   }
 
   async readdir(path: string): Promise<string[]> {
-    const p = normalizePath(path);
-
-    if (this.accessRead !== null) {
-      const directlyAllowed = this.accessRead.some(
-        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
-      );
-      if (!directlyAllowed) {
-        if (this.isAncestorOfAllowed(p, this.accessRead) || p === "/") {
-          return this.syntheticReaddir(p, this.accessRead);
-        }
-        throw new FsError("EACCES", "permission denied", path);
-      }
-    }
-
-    const internal = this.toInternalPath(p);
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveSymlinkMeta(tx, internal);
       if (node.node_type !== "directory") {
@@ -982,22 +852,8 @@ export class PgFileSystem {
     });
   }
 
-  async readdirWithTypes(path: string): Promise<DirentEntry[]> {
-    const p = normalizePath(path);
-
-    if (this.accessRead !== null) {
-      const directlyAllowed = this.accessRead.some(
-        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
-      );
-      if (!directlyAllowed) {
-        if (this.isAncestorOfAllowed(p, this.accessRead) || p === "/") {
-          return this.syntheticReaddirWithTypes(p, this.accessRead);
-        }
-        throw new FsError("EACCES", "permission denied", path);
-      }
-    }
-
-    const internal = this.toInternalPath(p);
+  async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveSymlinkMeta(tx, internal);
       if (!node)
@@ -1026,21 +882,7 @@ export class PgFileSystem {
   }
 
   async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
-    const p = normalizePath(path);
-
-    if (this.accessRead !== null) {
-      const directlyAllowed = this.accessRead.some(
-        (dir) => dir === "/" || p === dir || p.startsWith(dir + "/"),
-      );
-      if (!directlyAllowed) {
-        if (this.isAncestorOfAllowed(p, this.accessRead) || p === "/") {
-          return this.syntheticReaddirWithStats(p, this.accessRead);
-        }
-        throw new FsError("EACCES", "permission denied", path);
-      }
-    }
-
-    const internal = this.toInternalPath(p);
+    const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveSymlinkMeta(tx, internal);
       if (node.node_type !== "directory") {
@@ -1079,9 +921,7 @@ export class PgFileSystem {
         [this.workspaceId, rootLtree],
       );
 
-      return result.rows
-        .map((row) => this.mapWalkRow(row))
-        .filter((entry) => this.isPathReadable(entry.path));
+      return result.rows.map((row) => this.mapWalkRow(row));
     });
   }
 
@@ -1402,6 +1242,10 @@ export class PgFileSystem {
     return normalizePath(base + "/" + path);
   }
 
+  getAllPaths(): string[] {
+    return [];
+  }
+
   // -- Public API: Search -----------------------------------------------------
 
   async textSearch(
@@ -1416,9 +1260,7 @@ export class PgFileSystem {
         ...opts,
         path: internalScope,
       });
-      return results
-        .map((r) => ({ ...r, path: this.toUserPath(r.path) }))
-        .filter((r) => this.isPathReadable(r.path));
+      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }
 
@@ -1437,9 +1279,7 @@ export class PgFileSystem {
         ...opts,
         path: internalScope,
       });
-      return results
-        .map((r) => ({ ...r, path: this.toUserPath(r.path) }))
-        .filter((r) => this.isPathReadable(r.path));
+      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }
 
@@ -1463,9 +1303,7 @@ export class PgFileSystem {
         ...opts,
         path: internalScope,
       });
-      return results
-        .map((r) => ({ ...r, path: this.toUserPath(r.path) }))
-        .filter((r) => this.isPathReadable(r.path));
+      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }
 
@@ -1513,7 +1351,6 @@ export class PgFileSystem {
         .map((r) => ltreeToPath(r.path))
         .map((p) => this.toUserPath(p))
         .filter((p) => {
-          if (!this.isPathReadable(p)) return false;
           const relative = userCwd === "/" ? p.slice(1) : p.slice(userCwd.length + 1);
           return regex.test(relative);
         });

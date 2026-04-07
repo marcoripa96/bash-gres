@@ -42,8 +42,6 @@ src/
   db/
     schema.ts          # Drizzle schema (notes table)
     index.ts           # postgres-js + Drizzle client singleton
-  bash-gres/
-    index.ts           # bash-gres setup + BashInterpreter factory
 app/
   layout.tsx           # Root layout
   page.tsx             # Terminal UI
@@ -54,5 +52,5 @@ app/
 
 1. The Drizzle `db` instance is wrapped with `createDrizzleClient(db)` to produce a `SqlClient`
 2. `setup(client)` creates the `fs_nodes` table idempotently on first request
-3. `PgFileSystem` + `BashInterpreter` are created per-request with a workspace ID
+3. `PgFileSystem` is created per-request with a workspace ID and passed to `new Bash({ fs })` from just-bash
 4. The API route at `/api/bash` accepts `{ command: string }` and returns `{ exitCode, stdout, stderr }`

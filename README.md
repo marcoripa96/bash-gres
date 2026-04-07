@@ -1,6 +1,6 @@
 # bash-gres
 
-PostgreSQL-backed virtual filesystem with a bash command interface. Built for AI agents that need persistent, searchable file storage with familiar shell semantics.
+PostgreSQL-backed virtual filesystem for AI agents. Persistent, searchable file storage with familiar shell semantics powered by [just-bash](https://github.com/nichochar/just-bash).
 
 ## Features
 
@@ -8,13 +8,13 @@ PostgreSQL-backed virtual filesystem with a bash command interface. Built for AI
 - Workspace isolation via PostgreSQL Row-Level Security
 - BM25 full-text search via `pg_textsearch`
 - Optional pgvector semantic/hybrid search
-- Pipes, redirects, globs, and operators (`&&`, `||`, `;`)
+- Compatible with [just-bash](https://github.com/nichochar/just-bash) — 60+ commands, pipes, redirects, variables, loops
 - Bring your own driver: works with `postgres.js` or Drizzle ORM
 
 ## Install
 
 ```sh
-npm install bash-gres
+npm install bash-gres just-bash
 ```
 
 Then install one (or both) database drivers as peer dependencies:
@@ -35,7 +35,7 @@ npm install drizzle-orm
 import postgres from "postgres";
 import { createPostgresClient } from "bash-gres/postgres";
 import { PgFileSystem, setup } from "bash-gres";
-import { BashInterpreter } from "bash-gres/bash";
+import { Bash } from "just-bash";
 
 const sql = postgres("postgres://localhost:5432/mydb");
 const client = createPostgresClient(sql);
@@ -45,10 +45,10 @@ await setup(client);
 const fs = new PgFileSystem({ db: client, workspaceId: "my-workspace" });
 await fs.init();
 
-const bash = new BashInterpreter(fs);
+const bash = new Bash({ fs });
 
-const result = await bash.execute('echo "hello world" > /greeting.txt');
-const cat = await bash.execute("cat /greeting.txt");
+await bash.exec('echo "hello world" > /greeting.txt');
+const cat = await bash.exec("cat /greeting.txt");
 console.log(cat.stdout); // "hello world\n"
 ```
 
@@ -59,7 +59,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { createDrizzleClient } from "bash-gres/drizzle";
 import { PgFileSystem, setup } from "bash-gres";
-import { BashInterpreter } from "bash-gres/bash";
+import { Bash } from "just-bash";
 
 const sql = postgres("postgres://localhost:5432/mydb");
 const db = drizzle(sql);
@@ -70,17 +70,17 @@ await setup(client);
 const fs = new PgFileSystem({ db: client, workspaceId: "my-workspace" });
 await fs.init();
 
-const bash = new BashInterpreter(fs);
-await bash.execute("mkdir -p /project/src");
-await bash.execute('echo "console.log(42)" > /project/src/index.ts');
+const bash = new Bash({ fs });
+await bash.exec("mkdir -p /project/src");
+await bash.exec('echo "console.log(42)" > /project/src/index.ts');
 
-const tree = await bash.execute("tree /project");
+const tree = await bash.exec("tree /project");
 console.log(tree.stdout);
 ```
 
 ## Filesystem API
 
-You can also use the filesystem directly without the bash layer:
+You can also use the filesystem directly without bash:
 
 ```ts
 await fs.mkdir("/docs/notes", { recursive: true });
@@ -90,34 +90,6 @@ const content = await fs.readFile("/docs/notes/todo.txt");
 const entries = await fs.readdir("/docs");
 const stats = await fs.stat("/docs/notes/todo.txt");
 ```
-
-## Bash commands
-
-The bash interpreter supports:
-
-| Command | Description |
-|---------|-------------|
-| `ls`    | List directory contents (`-l`, `-a`, `-R`) |
-| `cat`   | Read file contents |
-| `echo`  | Write text (with `>` and `>>` redirects) |
-| `mkdir` | Create directories (`-p` for recursive) |
-| `rm`    | Remove files and directories (`-r`, `-f`) |
-| `cp`    | Copy files and directories (`-r`) |
-| `mv`    | Move/rename files and directories |
-| `find`  | Search for files (`-name`, `-type`, `-maxdepth`) |
-| `grep`  | Search file contents (`-r`, `-i`, `-l`, `-n`) |
-| `tree`  | Display directory tree |
-| `touch` | Create empty files or update timestamps |
-| `ln`    | Create symbolic links (`-s`) |
-| `pwd`   | Print working directory |
-| `cd`    | Change working directory |
-| `head`  | Output first lines of a file |
-| `tail`  | Output last lines of a file |
-| `wc`    | Word, line, and byte counts |
-| `stat`  | Display file status |
-| `du`    | Estimate file space usage |
-
-Shell features: pipes (`|`), sequential execution (`;`), conditional (`&&`, `||`), redirects (`>`, `>>`), and glob patterns (`*`, `?`, `**`).
 
 ## Database requirements
 
@@ -129,7 +101,6 @@ The `setup()` function is idempotent and creates the required table, indexes, an
 
 ```
 bash-gres            — PgFileSystem, setup(), types
-bash-gres/bash       — BashInterpreter
 bash-gres/postgres   — createPostgresClient (postgres.js adapter)
 bash-gres/drizzle    — createDrizzleClient (Drizzle adapter)
 ```

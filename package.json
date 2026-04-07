@@ -19,16 +19,6 @@
       "import": "./dist/adapters/postgres/index.js",
       "default": "./dist/adapters/postgres/index.js"
     },
-    "./bash": {
-      "types": "./dist/core/bash/interpreter.d.ts",
-      "import": "./dist/core/bash/interpreter.js",
-      "default": "./dist/core/bash/interpreter.js"
-    },
-    "./just-bash": {
-      "types": "./dist/adapters/just-bash/index.d.ts",
-      "import": "./dist/adapters/just-bash/index.js",
-      "default": "./dist/adapters/just-bash/index.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -79,8 +69,5 @@
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
-  "dependencies": {
-    "@types/yargs-parser": "^21.0.3",
-    "yargs-parser": "^22.0.0"
-  }
+  "dependencies": {}
 }

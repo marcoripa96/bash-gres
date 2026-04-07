@@ -81,12 +81,6 @@ export interface SearchResult {
   snippet?: string;
 }
 
-export interface BashResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
 export interface MkdirOptions {
   recursive?: boolean;
 }
@@ -100,7 +94,7 @@ export interface CpOptions {
   recursive?: boolean;
 }
 
-export interface ReadFileOptions {
+export interface ReadFileRangeOptions {
   offset?: number;
   limit?: number;
 }
@@ -118,17 +112,11 @@ export interface FsPermissions {
   write?: boolean;
 }
 
-export interface FsAccess {
-  read?: string[];
-  write?: string[];
-}
-
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
   permissions?: FsPermissions;
   rootDir?: string;
-  access?: FsAccess;
   maxFileSize?: number;
   maxReadSize?: number;
   maxFiles?: number;

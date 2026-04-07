@@ -1,5 +1,7 @@
-import type { SqlClient, QueryResult, SqlParam } from "../../core/types.js";
+import type { SqlClient, QueryResult, SqlParam, SetupOptions, PgFileSystemOptions } from "../../core/types.js";
 import { SqlError } from "../../core/types.js";
+import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
+import { setup as coreSetup } from "../../core/setup.js";
 import type postgres from "postgres";
 
 /**
@@ -82,6 +84,50 @@ export function createPostgresClient<
       return result as U;
     },
   };
+}
+
+// -- setup (postgres.js-native) -----------------------------------------------
+
+/**
+ * postgres.js-native setup — accepts a postgres.js `sql` instance directly.
+ *
+ * @example
+ * ```ts
+ * import postgres from "postgres";
+ * import { setup } from "bash-gres/postgres";
+ *
+ * const sql = postgres("postgres://localhost:5432/mydb");
+ * await setup(sql);
+ * ```
+ */
+export function setup<TTypes extends Record<string, unknown> = Record<string, unknown>>(
+  sql: postgres.Sql<TTypes>,
+  options?: SetupOptions,
+): Promise<void> {
+  return coreSetup(createPostgresClient(sql), options);
+}
+
+// -- PgFileSystem (postgres.js-native) ----------------------------------------
+
+export type PostgresPgFileSystemOptions<TTypes extends Record<string, unknown> = Record<string, unknown>> =
+  Omit<PgFileSystemOptions, "db"> & { db: postgres.Sql<TTypes> };
+
+/**
+ * PgFileSystem that accepts a postgres.js `sql` instance directly.
+ *
+ * @example
+ * ```ts
+ * import postgres from "postgres";
+ * import { PgFileSystem } from "bash-gres/postgres";
+ *
+ * const sql = postgres("postgres://localhost:5432/mydb");
+ * const fs = new PgFileSystem({ db: sql, workspaceId: "ws-1" });
+ * ```
+ */
+export class PgFileSystem extends CorePgFileSystem {
+  constructor(options: PostgresPgFileSystemOptions) {
+    super({ ...options, db: createPostgresClient(options.db) });
+  }
 }
 
 // -- Error handling -----------------------------------------------------------
