@@ -9,7 +9,7 @@ PostgreSQL-backed virtual filesystem for AI agents. Implements the [just-bash](h
 - Workspace isolation via PostgreSQL Row-Level Security
 - BM25 full-text search via `pg_textsearch`
 - Optional pgvector semantic and hybrid search
-- Bring your own driver: `postgres.js` or Drizzle ORM
+- Bring your own driver: `postgres.js`, `node-postgres (pg)`, or Drizzle ORM
 
 ## Install
 
@@ -22,6 +22,9 @@ Then install your database driver and just-bash:
 ```sh
 # postgres.js
 npm install postgres just-bash
+
+# node-postgres (pg)
+npm install pg just-bash
 
 # Drizzle ORM
 npm install drizzle-orm just-bash
@@ -44,6 +47,20 @@ await bash.exec("mkdir -p /project/src")
 await bash.exec('echo "hello world" > /project/src/index.ts')
 await bash.exec("cat /project/src/index.ts")
 // { exitCode: 0, stdout: "hello world\n", stderr: "" }
+```
+
+### With node-postgres (pg)
+
+```ts
+import pg from "pg"
+import { Bash } from "just-bash"
+import { setup, PgFileSystem } from "bash-gres/node-postgres"
+
+const pool = new pg.Pool({ connectionString: "postgres://localhost:5432/myapp" })
+await setup(pool)
+
+const fs = new PgFileSystem({ db: pool, workspaceId: "workspace-1" })
+const bash = new Bash({ fs })
 ```
 
 ### With Drizzle ORM
@@ -111,9 +128,10 @@ const hybrid = await fs.hybridSearch("transformer architecture", {
 ## Subpath Exports
 
 ```
-bash-gres            PgFileSystem, setup(), search, types
-bash-gres/postgres   postgres.js adapter (setup, PgFileSystem, createPostgresClient)
-bash-gres/drizzle    Drizzle adapter (setup, PgFileSystem, createDrizzleClient, createSchema)
+bash-gres                PgFileSystem, setup(), search, types
+bash-gres/postgres       postgres.js adapter (setup, PgFileSystem, createPostgresClient)
+bash-gres/node-postgres  node-postgres (pg) adapter (setup, PgFileSystem, createNodePgClient)
+bash-gres/drizzle        Drizzle adapter (setup, PgFileSystem, createDrizzleClient, createSchema)
 ```
 
 ## Development

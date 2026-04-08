@@ -1,7 +1,9 @@
 import postgres from "postgres";
+import pg from "pg";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { createPostgresClient } from "../lib/adapters/postgres/index.js";
 import { createDrizzleClient } from "../lib/adapters/drizzle/adapter.js";
+import { createNodePgClient } from "../lib/adapters/node-postgres/index.js";
 import type { SqlClient } from "../lib/core/types.js";
 
 // Re-export for convenience
@@ -33,6 +35,12 @@ function createDrizzleTestClient(): TestClient {
   return { client, teardown: () => sql.end() };
 }
 
+function createNodePgTestClient(): TestClient {
+  const pool = new pg.Pool({ connectionString: TEST_DB_URL });
+  const client = createNodePgClient(pool);
+  return { client, teardown: () => pool.end() };
+}
+
 /** @deprecated Use TEST_ADAPTERS with describe.each instead */
 export function createTestClient(): { sql: postgres.Sql; client: SqlClient } {
   const sql = createTestSql();
@@ -49,4 +57,5 @@ export type AdapterFactory = () => TestClient;
 export const TEST_ADAPTERS: [string, AdapterFactory][] = [
   ["postgres", createPostgresTestClient],
   ["drizzle", createDrizzleTestClient],
+  ["node-postgres", createNodePgTestClient],
 ];
