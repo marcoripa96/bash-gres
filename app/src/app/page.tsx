@@ -3,6 +3,7 @@ import { Hero } from "@/components/hero";
 import { Footer } from "@/components/footer";
 import { CodeBlock } from "@/components/code-block";
 import { CodeTabs } from "@/components/code-tabs";
+import { DriverTabProvider } from "@/components/driver-tab-context";
 import { ScrollReveal } from "@/components/scroll-reveal";
 import { FloatingToc } from "@/components/floating-toc";
 import { highlight } from "@/lib/highlight";
@@ -49,14 +50,9 @@ const TOC = [
 ];
 
 const INSTALL_TABS = [
-  { label: "npm", code: `npm install bash-gres`, lang: "bash" },
-  { label: "pnpm", code: `pnpm add bash-gres`, lang: "bash" },
-  { label: "yarn", code: `yarn add bash-gres`, lang: "bash" },
-];
-
-const DRIVER_TABS = [
-  { label: "postgres.js", code: `npm install postgres just-bash`, lang: "bash" },
-  { label: "Drizzle ORM", code: `npm install drizzle-orm just-bash`, lang: "bash" },
+  { label: "postgres.js", code: `npm install bash-gres postgres just-bash`, lang: "bash" },
+  { label: "node-postgres", code: `npm install bash-gres pg just-bash`, lang: "bash" },
+  { label: "Drizzle ORM", code: `npm install bash-gres drizzle-orm just-bash`, lang: "bash" },
 ];
 
 const CONNECT_TABS = [
@@ -70,6 +66,17 @@ const sql = postgres("postgres://localhost:5432/myapp")
 await setup(sql) // idempotent, safe on every startup
 
 const fs = new PgFileSystem({ db: sql, workspaceId: "workspace-1" })`,
+  },
+  {
+    label: "node-postgres",
+    code: `import pg from "pg"
+import { setup, PgFileSystem } from "bash-gres/node-postgres"
+
+const pool = new pg.Pool({ connectionString: "postgres://localhost:5432/myapp" })
+
+await setup(pool) // idempotent, safe on every startup
+
+const fs = new PgFileSystem({ db: pool, workspaceId: "workspace-1" })`,
   },
   {
     label: "Drizzle ORM",
@@ -117,9 +124,8 @@ async function buildTabs(
 }
 
 export default async function Home() {
-  const [installTabs, driverTabs, connectTabs] = await Promise.all([
+  const [installTabs, connectTabs] = await Promise.all([
     buildTabs(INSTALL_TABS),
-    buildTabs(DRIVER_TABS),
     buildTabs(CONNECT_TABS),
   ]);
 
@@ -129,11 +135,11 @@ export default async function Home() {
       <FloatingToc items={TOC} />
       <main className="max-w-[768px] mx-auto px-6 lg:px-8 pt-20 lg:pt-28 pb-24">
         <div className="space-y-20">
+          <DriverTabProvider defaultLabel="postgres.js">
           {/* Install */}
           <Section id="install" label="01" title="Install">
-            <CodeTabs tabs={installTabs} />
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Then install your database driver and{" "}
+              Install BashGres with your preferred PostgreSQL driver and{" "}
               <a
                 href="https://github.com/nichochar/just-bash"
                 className="text-foreground/70 underline underline-offset-2 hover:text-foreground transition-colors"
@@ -144,7 +150,7 @@ export default async function Home() {
               </a>
               :
             </p>
-            <CodeTabs tabs={driverTabs} />
+            <CodeTabs tabs={installTabs} />
           </Section>
 
           {/* Connect */}
@@ -158,6 +164,7 @@ export default async function Home() {
             </p>
             <CodeTabs tabs={connectTabs} />
           </Section>
+          </DriverTabProvider>
 
           {/* Filesystem */}
           <Section id="filesystem" label="03" title="Filesystem">

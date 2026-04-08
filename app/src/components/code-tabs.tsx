@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { CopyButton } from "./copy-button";
+import { useDriverTab } from "./driver-tab-context";
 
 interface Tab {
   label: string;
@@ -16,7 +17,21 @@ export function CodeTabs({
   tabs: Tab[];
   className?: string;
 }) {
-  const [activeTab, setActiveTab] = useState(0);
+  const driverCtx = useDriverTab();
+  const [localTab, setLocalTab] = useState(0);
+
+  // If a driver context exists and one of our tabs matches, sync to it
+  const syncedIndex = driverCtx
+    ? tabs.findIndex((t) => t.label === driverCtx.activeLabel)
+    : -1;
+  const activeTab = syncedIndex >= 0 ? syncedIndex : localTab;
+
+  function handleClick(i: number) {
+    setLocalTab(i);
+    if (driverCtx) {
+      driverCtx.setActiveLabel(tabs[i].label);
+    }
+  }
 
   return (
     <div
@@ -26,7 +41,7 @@ export function CodeTabs({
         {tabs.map((tab, i) => (
           <button
             key={tab.label}
-            onClick={() => setActiveTab(i)}
+            onClick={() => handleClick(i)}
             className={`px-5 py-3 text-sm font-mono font-medium whitespace-nowrap transition-colors relative active:scale-[0.98] ${
               i === activeTab
                 ? "text-foreground"
