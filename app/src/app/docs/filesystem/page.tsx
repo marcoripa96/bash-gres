@@ -51,7 +51,7 @@ await ws2.exists("/data.txt") // false, different workspace`}
           <code className="font-mono text-foreground/80">version</code> within
           the workspace (default:{" "}
           <code className="font-mono text-foreground/80">&quot;main&quot;</code>
-          ). Versions are fully isolated, forkable, and deletable — see{" "}
+          ). Versions are fully isolated, forkable, and deletable. See{" "}
           <a
             href="/docs/versioning"
             className="underline underline-offset-2 hover:text-foreground transition-colors"

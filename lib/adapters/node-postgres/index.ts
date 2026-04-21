@@ -5,7 +5,7 @@ import { setup as coreSetup } from "../../core/setup.js";
 
 /**
  * Structural interface matching `pg.PoolClient`.
- * Keeps `pg` as a peer dep — no direct import required.
+ * Keeps `pg` as a peer dep: no direct import required.
  */
 export interface NodePgPoolClient {
   query(text: string, values?: unknown[]): Promise<{
@@ -123,7 +123,7 @@ export function createNodePgClient(pool: NodePgPool): SqlClient {
 // -- setup (node-postgres-native) ---------------------------------------------
 
 /**
- * node-postgres-native setup — accepts a `pg.Pool` instance directly.
+ * node-postgres-native setup: accepts a `pg.Pool` instance directly.
  *
  * @example
  * ```ts

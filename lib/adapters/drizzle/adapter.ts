@@ -163,7 +163,7 @@ export function createDrizzleClient(db: DrizzleDb): SqlClient {
 // -- setup (Drizzle-native) ---------------------------------------------------
 
 /**
- * Drizzle-native setup — accepts a Drizzle `db` instance directly.
+ * Drizzle-native setup: accepts a Drizzle `db` instance directly.
  *
  * @example
  * ```ts

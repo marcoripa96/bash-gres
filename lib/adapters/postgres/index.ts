@@ -89,7 +89,7 @@ export function createPostgresClient<
 // -- setup (postgres.js-native) -----------------------------------------------
 
 /**
- * postgres.js-native setup — accepts a postgres.js `sql` instance directly.
+ * postgres.js-native setup: accepts a postgres.js `sql` instance directly.
  *
  * @example
  * ```ts

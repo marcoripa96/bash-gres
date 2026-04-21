@@ -12,8 +12,8 @@ export default function VersioningPage() {
           <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
           instance is bound to a{" "}
           <code className="font-mono text-foreground/80">version</code> within
-          a workspace. Versions are fully isolated — the same path can hold
-          different contents across versions — and you can fork, list, and
+          a workspace. Versions are fully isolated, so the same path can hold
+          different contents across versions, and you can fork, list, and
           delete them. Use this to keep a working copy alongside deployed
           snapshots, diff two states, or roll back.
         </p>
@@ -27,8 +27,7 @@ export default function VersioningPage() {
           The <code className="font-mono text-foreground/80">version</code>{" "}
           option selects which version an instance reads from and writes to.
           If omitted, it defaults to{" "}
-          <code className="font-mono text-foreground/80">&quot;main&quot;</code>,
-          so existing code keeps working unchanged.
+          <code className="font-mono text-foreground/80">&quot;main&quot;</code>.
         </p>
         <CodeBlock
           code={`// Scoped to (workspaceId, "v2")
@@ -101,7 +100,7 @@ await v1.deleteVersion("v2")`}
           Diffs
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          The library doesn&apos;t ship a diff helper — since each version is
+          The library doesn&apos;t ship a diff helper. Since each version is
           a regular filesystem, you can read the same path from two instances
           and diff the strings with whatever tool you already use.
         </p>
@@ -123,7 +122,7 @@ const patch = createTwoFilesPatch("v1", "v2", before, after)`}
           Deploy Pattern
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          BashGres doesn&apos;t track a &quot;live&quot; version — that&apos;s
+          BashGres doesn&apos;t track a &quot;live&quot; version. That&apos;s
           application logic. A typical pattern: keep a pointer in your own
           config (or a small table) to the version your runtime should read
           from, fork it when you want to edit, and flip the pointer when you
@@ -141,7 +140,7 @@ await runtime.readFile("/config.json")
 const draft = await runtime.fork("v3")
 await draft.writeFile("/config.json", '{"env":"prod-v2"}')
 
-// 4. When ready, flip the pointer — caller's responsibility
+// 4. When ready, flip the pointer (caller's responsibility)
 await setLiveVersionInConfig("v3")`}
         />
       </section>

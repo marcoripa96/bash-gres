@@ -183,7 +183,7 @@ describe.each(TEST_ADAPTERS)("rootDir [%s]", (_name, factory) => {
 
     it("symlink escaping rootDir via absolute path throws EACCES", async () => {
       // Absolute symlink target "/../../secret" normalizes but still within user space
-      // which maps to internal /jail/../../secret = /secret — outside rootDir
+      // which maps to internal /jail/../../secret = /secret, outside rootDir
       await expectEACCES(
         fs.symlink("/../../secret/data.txt", "/dir/escape"),
       );

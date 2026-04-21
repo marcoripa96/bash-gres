@@ -59,7 +59,7 @@ export function AsciiHeader() {
   const spanRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const cooldowns = useRef<(ReturnType<typeof setTimeout> | null)[]>([]);
 
-  // Initial decode animation — single rAF loop instead of hundreds of timers
+  // Initial decode animation: single rAF loop instead of hundreds of timers
   useEffect(() => {
     const spans = spanRefs.current;
     const STEPS = 4;

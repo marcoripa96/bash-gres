@@ -45,7 +45,7 @@ src/
 app/
   layout.tsx           # Root layout
   page.tsx             # Terminal UI
-  api/bash/route.ts    # POST /api/bash — executes commands
+  api/bash/route.ts    # POST /api/bash: executes commands
 ```
 
 ## How bash-gres is integrated
