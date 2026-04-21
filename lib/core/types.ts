@@ -115,6 +115,7 @@ export interface FsPermissions {
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
+  version?: string;
   permissions?: FsPermissions;
   rootDir?: string;
   maxFileSize?: number;

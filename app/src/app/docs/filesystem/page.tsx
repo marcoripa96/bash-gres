@@ -44,6 +44,35 @@ await ws2.exists("/data.txt") // false, different workspace`}
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
+          Versions
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Each instance is also scoped to a{" "}
+          <code className="font-mono text-foreground/80">version</code> within
+          the workspace (default:{" "}
+          <code className="font-mono text-foreground/80">&quot;main&quot;</code>
+          ). Versions are fully isolated, forkable, and deletable — see{" "}
+          <a
+            href="/docs/versioning"
+            className="underline underline-offset-2 hover:text-foreground transition-colors"
+          >
+            Versioning
+          </a>{" "}
+          for the full API.
+        </p>
+        <CodeBlock
+          code={`const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
+await v1.writeFile("/config.json", '{"env":"staging"}')
+
+const v2 = await v1.fork("v2")
+await v2.writeFile("/config.json", '{"env":"prod"}')
+
+await v1.readFile("/config.json") // '{"env":"staging"}' -- untouched`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
           Reading & Writing
         </h2>
         <CodeBlock

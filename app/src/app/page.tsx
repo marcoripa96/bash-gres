@@ -191,6 +191,17 @@ const stat = await fs.stat("/docs/guide.md")
 const tree = await fs.walk("/docs")`}
             />
             <CodeBlock
+              code={`// Named versions per workspace -- isolated working copies & deploy snapshots
+const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
+await v1.writeFile("/config.json", '{"env":"staging"}')
+
+const v2 = await v1.fork("v2")
+await v2.writeFile("/config.json", '{"env":"prod"}')
+
+await v1.readFile("/config.json") // '{"env":"staging"}' (untouched)
+await v1.listVersions()           // ["v1", "v2"]`}
+            />
+            <CodeBlock
               code={`// Full-text search (BM25 via pg_textsearch)
 const results = await fs.textSearch("machine learning", {
   path: "/docs",

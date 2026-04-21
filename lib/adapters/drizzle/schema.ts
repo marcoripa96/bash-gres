@@ -48,6 +48,7 @@ export function createSchema(options: SchemaOptions = {}) {
     {
       id: bigserial({ mode: "number" }).primaryKey(),
       workspaceId: text("workspace_id").notNull(),
+      version: text().notNull().default("main"),
       parentId: bigint("parent_id", { mode: "number" }),
       name: text().notNull(),
       nodeType: text("node_type").notNull(),
@@ -67,14 +68,18 @@ export function createSchema(options: SchemaOptions = {}) {
     },
     (table) => {
       const indexes = [
-        uniqueIndex("unique_workspace_path").on(table.workspaceId, table.path),
+        uniqueIndex("unique_workspace_version_path").on(
+          table.workspaceId,
+          table.version,
+          table.path,
+        ),
 
         index("idx_fs_path_gist")
           .using("gist", sql`${table.path} gist_ltree_ops(siglen=124)`),
 
         index("idx_fs_workspace_parent").on(table.workspaceId, table.parentId),
 
-        index("idx_fs_stat").on(table.workspaceId, table.path),
+        index("idx_fs_stat").on(table.workspaceId, table.version, table.path),
 
         index("idx_fs_dir_lookup")
           .on(table.workspaceId, table.name, table.parentId)

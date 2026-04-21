@@ -33,6 +33,7 @@ export function validateEmbedding(
 export async function fullTextSearch(
   client: SqlClient,
   workspaceId: string,
+  version: string,
   query: string,
   opts?: { path?: string; limit?: number },
 ): Promise<SearchResult[]> {
@@ -50,13 +51,14 @@ export async function fullTextSearch(
        -(content <@> to_bm25query($1)) AS rank
      FROM fs_nodes
      WHERE workspace_id = $2
-       AND path <@ $3::ltree
+       AND version = $3
+       AND path <@ $4::ltree
        AND node_type = 'file'
        AND content IS NOT NULL
        AND binary_data IS NULL
      ORDER BY content <@> to_bm25query($1)
-     LIMIT $4`,
-    [query, workspaceId, scopeLtree, limit],
+     LIMIT $5`,
+    [query, workspaceId, version, scopeLtree, limit],
   );
 
   return result.rows.map((r) => ({
@@ -69,6 +71,7 @@ export async function fullTextSearch(
 export async function semanticSearch(
   client: SqlClient,
   workspaceId: string,
+  version: string,
   embedding: number[],
   opts?: { path?: string; limit?: number },
 ): Promise<SearchResult[]> {
@@ -88,12 +91,13 @@ export async function semanticSearch(
        1 - (embedding <=> $1::vector) AS rank
      FROM fs_nodes
      WHERE workspace_id = $2
-       AND path <@ $3::ltree
+       AND version = $3
+       AND path <@ $4::ltree
        AND node_type = 'file'
        AND embedding IS NOT NULL
      ORDER BY embedding <=> $1::vector
-     LIMIT $4`,
-    [embeddingStr, workspaceId, scopeLtree, limit],
+     LIMIT $5`,
+    [embeddingStr, workspaceId, version, scopeLtree, limit],
   );
 
   return result.rows.map((r) => ({
@@ -106,6 +110,7 @@ export async function semanticSearch(
 export async function hybridSearch(
   client: SqlClient,
   workspaceId: string,
+  version: string,
   query: string,
   embedding: number[],
   opts?: {
@@ -139,13 +144,14 @@ export async function hybridSearch(
         $3::float * (1 - (embedding <=> $4::vector))) AS rank
      FROM fs_nodes
      WHERE workspace_id = $5
-       AND path <@ $6::ltree
+       AND version = $6
+       AND path <@ $7::ltree
        AND node_type = 'file'
        AND content IS NOT NULL
        AND embedding IS NOT NULL
      ORDER BY rank DESC
-     LIMIT $7`,
-    [textWeight, query, vectorWeight, embeddingStr, workspaceId, scopeLtree, limit],
+     LIMIT $8`,
+    [textWeight, query, vectorWeight, embeddingStr, workspaceId, version, scopeLtree, limit],
   );
 
   return result.rows.map((r) => ({

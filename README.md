@@ -7,6 +7,7 @@ PostgreSQL-backed virtual filesystem for AI agents. Implements the [just-bash](h
 - Full bash environment via [just-bash](https://github.com/vercel-labs/just-bash): 60+ commands, pipes, redirects, variables, loops
 - Node.js `fs`-compatible API: readFile, writeFile, mkdir, cp, mv, rm, symlink, stat, walk, glob
 - Workspace isolation via PostgreSQL Row-Level Security
+- Named versions per workspace: fork, list, delete -- isolated working copies and deploy snapshots
 - BM25 full-text search via `pg_textsearch`
 - Optional pgvector semantic and hybrid search
 - Bring your own driver: `postgres.js`, `node-postgres (pg)`, or Drizzle ORM
@@ -94,6 +95,26 @@ await fs.symlink("/docs/guide.md", "/latest")
 const stat = await fs.stat("/docs/guide.md")
 const tree = await fs.walk("/docs")
 ```
+
+## Versioning
+
+Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are fully isolated, so the same path can hold different contents. Fork copies every row into a new version; the fork diverges from the source on the next write.
+
+```ts
+const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
+await v1.writeFile("/config.json", '{"env":"staging"}')
+
+const v2 = await v1.fork("v2")                 // copy v1 -> v2
+await v2.writeFile("/config.json", '{"env":"prod"}')
+
+await v1.readFile("/config.json") // '{"env":"staging"}' (untouched)
+await v2.readFile("/config.json") // '{"env":"prod"}'
+
+await v1.listVersions()     // ["v1", "v2"]
+await v1.deleteVersion("v2") // drops every row in v2
+```
+
+The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the deploy pattern.
 
 ## Search
 

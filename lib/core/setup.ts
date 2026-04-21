@@ -4,6 +4,7 @@ const TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS fs_nodes (
     id              bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     workspace_id      text NOT NULL CHECK (length(workspace_id) > 0),
+    version         text NOT NULL DEFAULT 'main' CHECK (length(version) > 0),
     parent_id       bigint REFERENCES fs_nodes(id) ON DELETE RESTRICT,
     name            text NOT NULL CHECK (length(name) <= 255),
     node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink')),
@@ -15,8 +16,31 @@ CREATE TABLE IF NOT EXISTS fs_nodes (
     size_bytes      bigint NOT NULL DEFAULT 0,
     mtime           timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_workspace_path UNIQUE (workspace_id, path)
+    CONSTRAINT unique_workspace_version_path UNIQUE (workspace_id, version, path)
 );
+`;
+
+const MIGRATE_DDL = `
+DO $$ BEGIN
+  ALTER TABLE fs_nodes ADD COLUMN version text NOT NULL DEFAULT 'main' CHECK (length(version) > 0);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  IF EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'unique_workspace_path' AND conrelid = 'fs_nodes'::regclass
+  ) THEN
+      ALTER TABLE fs_nodes DROP CONSTRAINT unique_workspace_path;
+  END IF;
+  IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'unique_workspace_version_path' AND conrelid = 'fs_nodes'::regclass
+  ) THEN
+      ALTER TABLE fs_nodes ADD CONSTRAINT unique_workspace_version_path
+          UNIQUE (workspace_id, version, path);
+  END IF;
+END $$;
 `;
 
 const INDEXES_DDL = `
@@ -26,8 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_fs_path_gist
 CREATE INDEX IF NOT EXISTS idx_fs_workspace_parent
   ON fs_nodes (workspace_id, parent_id);
 
+DROP INDEX IF EXISTS idx_fs_stat;
 CREATE INDEX IF NOT EXISTS idx_fs_stat
-  ON fs_nodes (workspace_id, path)
+  ON fs_nodes (workspace_id, version, path)
   INCLUDE (node_type, mode, size_bytes, mtime);
 
 CREATE INDEX IF NOT EXISTS idx_fs_dir_lookup
@@ -102,6 +127,7 @@ export async function setup(
   }
 
   await client.query(TABLE_DDL);
+  await client.query(MIGRATE_DDL);
   await client.query(INDEXES_DDL);
 
   if (enableFullTextSearch) {

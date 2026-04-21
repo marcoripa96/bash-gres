@@ -100,6 +100,7 @@ await setup(sql, {
           code={`CREATE TABLE fs_nodes (
     id              bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     workspace_id    text NOT NULL,
+    version         text NOT NULL DEFAULT 'main',
     parent_id       bigint REFERENCES fs_nodes(id) ON DELETE RESTRICT,
     name            text NOT NULL,
     node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink')),
@@ -111,9 +112,22 @@ await setup(sql, {
     size_bytes      bigint NOT NULL DEFAULT 0,
     mtime           timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_workspace_path UNIQUE (workspace_id, path)
+    CONSTRAINT unique_workspace_version_path UNIQUE (workspace_id, version, path)
 );`}
         />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          The{" "}
+          <code className="font-mono text-foreground/80">version</code>{" "}
+          column scopes every read and write so multiple named versions can
+          coexist within a workspace. See{" "}
+          <a
+            href="/docs/versioning"
+            className="underline underline-offset-2 hover:text-foreground transition-colors"
+          >
+            Versioning
+          </a>{" "}
+          for the API.
+        </p>
       </section>
 
       <section className="space-y-4">
@@ -141,7 +155,7 @@ await setup(sql, {
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">idx_fs_stat</td>
                 <td className="py-2 pr-4">B-tree (covering)</td>
-                <td className="py-2">stat() with INCLUDE (node_type, mode, size_bytes, mtime)</td>
+                <td className="py-2">stat() on (workspace_id, version, path) with INCLUDE (node_type, mode, size_bytes, mtime)</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">idx_fs_dir_lookup</td>

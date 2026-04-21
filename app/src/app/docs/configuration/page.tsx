@@ -22,6 +22,7 @@ export default function ConfigurationPage() {
           code={`const fs = new PgFileSystem({
   db: sql,                            // SqlClient (required)
   workspaceId: "workspace-1",         // string (default: random UUID)
+  version: "main",                    // string (default: "main") -- see Versioning
 
   // Limits
   maxFileSize: 10 * 1024 * 1024,      // max file size in bytes (default: 10 MB)
@@ -70,6 +71,12 @@ export default function ConfigurationPage() {
                 <td className="py-2 pr-4 font-mono">string</td>
                 <td className="py-2 pr-4 font-mono">UUID</td>
                 <td className="py-2">Workspace identifier for multi-tenant isolation</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">version</td>
+                <td className="py-2 pr-4 font-mono">string</td>
+                <td className="py-2 pr-4 font-mono">&quot;main&quot;</td>
+                <td className="py-2">Version label this instance reads from and writes to. See <a href="/docs/versioning" className="underline underline-offset-2 hover:text-foreground transition-colors">Versioning</a>.</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">maxFileSize</td>

@@ -70,9 +70,13 @@ const DEFAULT_STATEMENT_TIMEOUT_MS = 5000;
 const MAX_SYMLINK_DEPTH = 16;
 const MAX_CP_NODES = 10_000;
 
+const DEFAULT_VERSION = "main";
+
 export class PgFileSystem {
   private client: SqlClient;
+  private rawDb: SqlClient;
   readonly workspaceId: string;
+  readonly version: string;
   readonly permissions: { read: boolean; write: boolean };
   private maxFileSize: number;
   private maxReadSize: number | undefined;
@@ -82,6 +86,7 @@ export class PgFileSystem {
   private embed?: (text: string) => Promise<number[]>;
   private embeddingDimensions?: number;
   private rootDir: string;
+  private readonly baseOptions: PgFileSystemOptions;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -89,8 +94,13 @@ export class PgFileSystem {
       write: options.permissions?.write ?? true,
     };
     this.permissions = perms;
+    this.rawDb = options.db;
     this.client = perms.write ? options.db : readonlySqlClient(options.db);
     this.workspaceId = options.workspaceId ?? randomUUID();
+    this.version = options.version ?? DEFAULT_VERSION;
+    if (this.version.length === 0) {
+      throw new Error("version must be a non-empty string");
+    }
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
     this.maxReadSize = options.maxReadSize;
     this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
@@ -100,16 +110,20 @@ export class PgFileSystem {
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
     this.rootDir = normalizePath(options.rootDir ?? "/");
+    this.baseOptions = {
+      ...options,
+      workspaceId: this.workspaceId,
+    };
   }
 
   async init(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const rootLtree = pathToLtree("/", this.workspaceId);
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, name, node_type, path, mode)
-         VALUES ($1, '/', 'directory', $2::ltree, $3)
-         ON CONFLICT (workspace_id, path) DO NOTHING`,
-        [this.workspaceId, rootLtree, 0o755],
+        `INSERT INTO fs_nodes (workspace_id, version, name, node_type, path, mode)
+         VALUES ($1, $2, '/', 'directory', $3::ltree, $4)
+         ON CONFLICT (workspace_id, version, path) DO NOTHING`,
+        [this.workspaceId, this.version, rootLtree, 0o755],
       );
 
       if (this.rootDir !== "/") {
@@ -143,9 +157,9 @@ export class PgFileSystem {
     const lt = pathToLtree(posixPath, this.workspaceId);
     const result = await tx.query<FsRow>(
       `SELECT * FROM fs_nodes
-       WHERE workspace_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
        LIMIT 1`,
-      [this.workspaceId, lt],
+      [this.workspaceId, this.version, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -159,9 +173,9 @@ export class PgFileSystem {
       `SELECT id, workspace_id, parent_id, name, node_type, path,
               symlink_target, mode, size_bytes, mtime, created_at
        FROM fs_nodes
-       WHERE workspace_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
        LIMIT 1`,
-      [this.workspaceId, lt],
+      [this.workspaceId, this.version, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -174,9 +188,9 @@ export class PgFileSystem {
     const result = await tx.query<FsStatRow>(
       `SELECT node_type, symlink_target, mode, size_bytes, mtime
        FROM fs_nodes
-       WHERE workspace_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
        LIMIT 1`,
-      [this.workspaceId, lt],
+      [this.workspaceId, this.version, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -188,10 +202,10 @@ export class PgFileSystem {
     const lt = pathToLtree(posixPath, this.workspaceId);
     const result = await tx.query<FsRow>(
       `SELECT * FROM fs_nodes
-       WHERE workspace_id = $1 AND path = $2::ltree
+       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
        LIMIT 1
        FOR UPDATE`,
-      [this.workspaceId, lt],
+      [this.workspaceId, this.version, lt],
     );
     return result.rows[0] ?? null;
   }
@@ -281,8 +295,9 @@ export class PgFileSystem {
 
   private async validateNodeCount(tx: SqlClient): Promise<void> {
     const result = await tx.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count FROM fs_nodes WHERE workspace_id = $1`,
-      [this.workspaceId],
+      `SELECT COUNT(*)::int AS count FROM fs_nodes
+       WHERE workspace_id = $1 AND version = $2`,
+      [this.workspaceId, this.version],
     );
     if (result.rows[0] && result.rows[0].count >= this.maxFiles) {
       throw new Error(
@@ -401,26 +416,26 @@ export class PgFileSystem {
     if (embedding) {
       const embeddingStr = `[${embedding.join(",")}]`;
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime, embedding)
-         VALUES ($1, $2, $3, 'file', $4::ltree, $5, $6, $7, now(), $8::vector)
-         ON CONFLICT (workspace_id, path) DO UPDATE SET
+        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime, embedding)
+         VALUES ($1, $2, $3, $4, 'file', $5::ltree, $6, $7, $8, now(), $9::vector)
+         ON CONFLICT (workspace_id, version, path) DO UPDATE SET
            content = EXCLUDED.content,
            binary_data = EXCLUDED.binary_data,
            size_bytes = EXCLUDED.size_bytes,
            mtime = now(),
            embedding = EXCLUDED.embedding`,
-        [this.workspaceId, parent.id, name, lt, textContent, binaryData, sizeBytes, embeddingStr],
+        [this.workspaceId, this.version, parent.id, name, lt, textContent, binaryData, sizeBytes, embeddingStr],
       );
     } else {
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime)
-         VALUES ($1, $2, $3, 'file', $4::ltree, $5, $6, $7, now())
-         ON CONFLICT (workspace_id, path) DO UPDATE SET
+        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime)
+         VALUES ($1, $2, $3, $4, 'file', $5::ltree, $6, $7, $8, now())
+         ON CONFLICT (workspace_id, version, path) DO UPDATE SET
            content = EXCLUDED.content,
            binary_data = EXCLUDED.binary_data,
            size_bytes = EXCLUDED.size_bytes,
            mtime = now()`,
-        [this.workspaceId, parent.id, name, lt, textContent, binaryData, sizeBytes],
+        [this.workspaceId, this.version, parent.id, name, lt, textContent, binaryData, sizeBytes],
       );
     }
   }
@@ -452,8 +467,9 @@ export class PgFileSystem {
       const existingResult = await tx.query<{ path: string; node_type: string }>(
         `SELECT path::text, node_type FROM fs_nodes
          WHERE workspace_id = $1
-           AND path = ANY($2::text[]::ltree[])`,
-        [this.workspaceId, allLtrees],
+           AND version = $2
+           AND path = ANY($3::text[]::ltree[])`,
+        [this.workspaceId, this.version, allLtrees],
       );
       const existingMap = new Map(
         existingResult.rows.map((r) => [r.path, r.node_type]),
@@ -473,13 +489,14 @@ export class PgFileSystem {
               ? pathToLtree("/", this.workspaceId)
               : allLtrees[i - 1];
           await tx.query(
-            `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, mode)
-             SELECT $1, p.id, $2, 'directory', $3::ltree, $4
+            `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, mode)
+             SELECT $1, $2, p.id, $3, 'directory', $4::ltree, $5
              FROM fs_nodes p
              WHERE p.workspace_id = $1
-               AND p.path = $5::ltree
-             ON CONFLICT (workspace_id, path) DO NOTHING`,
-            [this.workspaceId, allNames[i], allLtrees[i], 0o755, parentLt],
+               AND p.version = $2
+               AND p.path = $6::ltree
+             ON CONFLICT (workspace_id, version, path) DO NOTHING`,
+            [this.workspaceId, this.version, allNames[i], allLtrees[i], 0o755, parentLt],
           );
         }
       }
@@ -498,9 +515,9 @@ export class PgFileSystem {
       const name = fileName(path);
       const lt = pathToLtree(path, this.workspaceId);
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, mode)
-         VALUES ($1, $2, $3, 'directory', $4::ltree, $5)`,
-        [this.workspaceId, parent.id, name, lt, 0o755],
+        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, mode)
+         VALUES ($1, $2, $3, $4, 'directory', $5::ltree, $6)`,
+        [this.workspaceId, this.version, parent.id, name, lt, 0o755],
       );
     }
   }
@@ -519,9 +536,9 @@ export class PgFileSystem {
 
     const result = await tx.query<{ name: string }>(
       `SELECT name FROM fs_nodes
-       WHERE workspace_id = $1 AND parent_id = $2
+       WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
        ORDER BY name`,
-      [this.workspaceId, node.id],
+      [this.workspaceId, this.version, node.id],
     );
     return result.rows.map((r) => r.name);
   }
@@ -745,9 +762,9 @@ export class PgFileSystem {
       const result = await tx.query<{ exists: number }>(
         `SELECT 1 AS exists
          FROM fs_nodes
-         WHERE workspace_id = $1 AND path = $2::ltree
+         WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
          LIMIT 1`,
-        [this.workspaceId, lt],
+        [this.workspaceId, this.version, lt],
       );
       return result.rows.length > 0;
     });
@@ -844,9 +861,9 @@ export class PgFileSystem {
 
       const result = await tx.query<{ name: string }>(
         `SELECT name FROM fs_nodes
-         WHERE workspace_id = $1 AND parent_id = $2
+         WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
          ORDER BY name`,
-        [this.workspaceId, node.id],
+        [this.workspaceId, this.version, node.id],
       );
       return result.rows.map((row) => row.name);
     });
@@ -868,9 +885,9 @@ export class PgFileSystem {
       const result = await tx.query<{ name: string; node_type: string }>(
         `SELECT name, node_type
          FROM fs_nodes
-         WHERE workspace_id = $1 AND parent_id = $2
+         WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
          ORDER BY name`,
-        [this.workspaceId, node.id],
+        [this.workspaceId, this.version, node.id],
       );
       return result.rows.map((r) => ({
         name: r.name,
@@ -892,9 +909,9 @@ export class PgFileSystem {
       const result = await tx.query<DirentStatRow>(
         `SELECT name, node_type, mode, size_bytes, mtime, symlink_target
          FROM fs_nodes
-         WHERE workspace_id = $1 AND parent_id = $2
+         WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
          ORDER BY name`,
-        [this.workspaceId, node.id],
+        [this.workspaceId, this.version, node.id],
       );
       return result.rows.map((row) => this.mapDirentStatRow(row));
     });
@@ -912,13 +929,14 @@ export class PgFileSystem {
       const rootLtree = pathToLtree(rootPath, this.workspaceId);
       const result = await tx.query<WalkRow>(
         `SELECT path::text, name, node_type, mode, size_bytes, mtime, symlink_target,
-                nlevel(path) - nlevel($2::ltree) AS depth
+                nlevel(path) - nlevel($3::ltree) AS depth
          FROM fs_nodes
          WHERE workspace_id = $1
-           AND path <@ $2::ltree
-           AND path != $2::ltree
+           AND version = $2
+           AND path <@ $3::ltree
+           AND path != $3::ltree
          ORDER BY path`,
-        [this.workspaceId, rootLtree],
+        [this.workspaceId, this.version, rootLtree],
       );
 
       return result.rows.map((row) => this.mapWalkRow(row));
@@ -941,9 +959,9 @@ export class PgFileSystem {
         if (!options?.recursive) {
           const children = await tx.query(
             `SELECT 1 FROM fs_nodes
-             WHERE workspace_id = $1 AND parent_id = $2
+             WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
              LIMIT 1`,
-            [this.workspaceId, node.id],
+            [this.workspaceId, this.version, node.id],
           );
           if (children.rows.length > 0) {
             throw new FsError(
@@ -960,9 +978,9 @@ export class PgFileSystem {
         const subtree = await tx.query<{ id: number; depth: number }>(
           `SELECT id, nlevel(path) AS depth
            FROM fs_nodes
-           WHERE workspace_id = $1 AND path <@ $2::ltree
+           WHERE workspace_id = $1 AND version = $2 AND path <@ $3::ltree
            ORDER BY depth DESC, path DESC`,
-          [this.workspaceId, lt],
+          [this.workspaceId, this.version, lt],
         );
 
         let currentDepth: number | null = null;
@@ -1058,9 +1076,9 @@ export class PgFileSystem {
         if (destNode.node_type === "directory") {
           const children = await tx.query(
             `SELECT 1 FROM fs_nodes
-             WHERE workspace_id = $1 AND parent_id = $2
+             WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
              LIMIT 1`,
-            [this.workspaceId, destNode.id],
+            [this.workspaceId, this.version, destNode.id],
           );
           if (children.rows.length > 0) {
             throw new FsError("ENOTEMPTY", "directory not empty, mv", dest);
@@ -1080,10 +1098,10 @@ export class PgFileSystem {
       if (srcNode.node_type === "directory") {
         await tx.query(
           `SELECT id FROM fs_nodes
-           WHERE workspace_id = $1 AND path <@ $2::ltree
+           WHERE workspace_id = $1 AND version = $2 AND path <@ $3::ltree
            ORDER BY path
            FOR UPDATE`,
-          [this.workspaceId, oldLtree],
+          [this.workspaceId, this.version, oldLtree],
         );
       }
 
@@ -1099,9 +1117,10 @@ export class PgFileSystem {
           `UPDATE fs_nodes
            SET path = ($1::ltree || subpath(path, nlevel($2::ltree)))
            WHERE workspace_id = $3
+             AND version = $4
              AND path <@ $2::ltree
              AND path != $2::ltree`,
-          [newLtree, oldLtree, this.workspaceId],
+          [newLtree, oldLtree, this.workspaceId, this.version],
         );
 
         await tx.query(
@@ -1109,11 +1128,13 @@ export class PgFileSystem {
            SET parent_id = parent.id
            FROM fs_nodes AS parent
            WHERE child.workspace_id = $1
+             AND child.version = $2
              AND parent.workspace_id = $1
-             AND child.path <@ $2::ltree
-             AND child.path != $2::ltree
+             AND parent.version = $2
+             AND child.path <@ $3::ltree
+             AND child.path != $3::ltree
              AND parent.path = subltree(child.path, 0, nlevel(child.path) - 1)`,
-          [this.workspaceId, newLtree],
+          [this.workspaceId, this.version, newLtree],
         );
       }
     });
@@ -1180,9 +1201,9 @@ export class PgFileSystem {
       const sizeBytes = new TextEncoder().encode(target).byteLength;
 
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, parent_id, name, node_type, path, symlink_target, mode, size_bytes)
-         VALUES ($1, $2, $3, 'symlink', $4::ltree, $5, $6, $7)`,
-        [this.workspaceId, parent.id, name, lt, target, 0o777, sizeBytes],
+        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, symlink_target, mode, size_bytes)
+         VALUES ($1, $2, $3, $4, 'symlink', $5::ltree, $6, $7, $8)`,
+        [this.workspaceId, this.version, parent.id, name, lt, target, 0o777, sizeBytes],
       );
     });
   }
@@ -1256,7 +1277,7 @@ export class PgFileSystem {
     this.guardRead(scopePath);
     const internalScope = this.toInternalPath(scopePath);
     return this.withWorkspace(async (tx) => {
-      const results = await fullTextSearch(tx, this.workspaceId, query, {
+      const results = await fullTextSearch(tx, this.workspaceId, this.version, query, {
         ...opts,
         path: internalScope,
       });
@@ -1275,7 +1296,7 @@ export class PgFileSystem {
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
     return this.withWorkspace(async (tx) => {
-      const results = await semanticSearch(tx, this.workspaceId, embedding, {
+      const results = await semanticSearch(tx, this.workspaceId, this.version, embedding, {
         ...opts,
         path: internalScope,
       });
@@ -1299,7 +1320,7 @@ export class PgFileSystem {
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
     return this.withWorkspace(async (tx) => {
-      const results = await hybridSearch(tx, this.workspaceId, query, embedding, {
+      const results = await hybridSearch(tx, this.workspaceId, this.version, query, embedding, {
         ...opts,
         path: internalScope,
       });
@@ -1325,13 +1346,14 @@ export class PgFileSystem {
       const scopeLtree = pathToLtree(internalScope, this.workspaceId);
       const where = [
         `workspace_id = $1`,
-        queryPlan.exact ? `path = $2::ltree` : `path <@ $2::ltree`,
+        `version = $2`,
+        queryPlan.exact ? `path = $3::ltree` : `path <@ $3::ltree`,
         `node_type = 'file'`,
       ];
-      const params: (string | number)[] = [this.workspaceId, scopeLtree];
+      const params: (string | number)[] = [this.workspaceId, this.version, scopeLtree];
 
       if (!queryPlan.exact && queryPlan.fixedDepth !== null) {
-        where.push(`nlevel(path) = nlevel($2::ltree) + ${queryPlan.fixedDepth}`);
+        where.push(`nlevel(path) = nlevel($3::ltree) + ${queryPlan.fixedDepth}`);
       }
 
       if (queryPlan.basename !== null) {
@@ -1360,12 +1382,138 @@ export class PgFileSystem {
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const rootLtree = pathToLtree("/", this.workspaceId);
-      await tx.query(
-        `DELETE FROM fs_nodes WHERE workspace_id = $1 AND path <@ $2::ltree`,
-        [this.workspaceId, rootLtree],
+      const subtree = await tx.query<{ id: number; depth: number }>(
+        `SELECT id, nlevel(path) AS depth
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND version = $2 AND path <@ $3::ltree
+         ORDER BY depth DESC, path DESC`,
+        [this.workspaceId, this.version, rootLtree],
       );
+      await deleteRowsDepthFirst(tx, this.workspaceId, subtree.rows);
     });
   }
+
+  // -- Public API: Versioning -------------------------------------------------
+
+  async fork(newVersion: string): Promise<PgFileSystem> {
+    if (!newVersion || newVersion.length === 0) {
+      throw new Error("fork: newVersion must be a non-empty string");
+    }
+    if (newVersion === this.version) {
+      throw new Error(`fork: newVersion must differ from current version '${this.version}'`);
+    }
+
+    await this.withWorkspace(async (tx) => {
+      const existing = await tx.query(
+        `SELECT 1 FROM fs_nodes
+         WHERE workspace_id = $1 AND version = $2
+         LIMIT 1`,
+        [this.workspaceId, newVersion],
+      );
+      if (existing.rows.length > 0) {
+        throw new Error(`fork: version '${newVersion}' already exists`);
+      }
+
+      const embeddingCol = await hasEmbeddingColumn(tx);
+      const embeddingInsert = embeddingCol ? ", embedding" : "";
+      const embeddingSelect = embeddingCol ? ", embedding" : "";
+
+      await tx.query(
+        `INSERT INTO fs_nodes
+           (workspace_id, version, name, node_type, path, content, binary_data,
+            symlink_target, mode, size_bytes, mtime, created_at${embeddingInsert})
+         SELECT workspace_id, $3 AS version, name, node_type, path, content, binary_data,
+                symlink_target, mode, size_bytes, mtime, created_at${embeddingSelect}
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND version = $2`,
+        [this.workspaceId, this.version, newVersion],
+      );
+
+      await tx.query(
+        `UPDATE fs_nodes AS child
+         SET parent_id = parent.id
+         FROM fs_nodes AS parent
+         WHERE child.workspace_id = $1 AND child.version = $2
+           AND parent.workspace_id = $1 AND parent.version = $2
+           AND nlevel(child.path) > 1
+           AND parent.path = subltree(child.path, 0, nlevel(child.path) - 1)`,
+        [this.workspaceId, newVersion],
+      );
+    });
+
+    return new PgFileSystem({ ...this.baseOptions, db: this.rawDb, version: newVersion });
+  }
+
+  async listVersions(): Promise<string[]> {
+    return this.withWorkspace(async (tx) => {
+      const result = await tx.query<{ version: string }>(
+        `SELECT DISTINCT version FROM fs_nodes
+         WHERE workspace_id = $1
+         ORDER BY version`,
+        [this.workspaceId],
+      );
+      return result.rows.map((r) => r.version);
+    });
+  }
+
+  async deleteVersion(version: string): Promise<void> {
+    if (version === this.version) {
+      throw new Error(
+        `deleteVersion: cannot delete current version '${version}'`,
+      );
+    }
+    await this.withWorkspace(async (tx) => {
+      const subtree = await tx.query<{ id: number; depth: number }>(
+        `SELECT id, nlevel(path) AS depth
+         FROM fs_nodes
+         WHERE workspace_id = $1 AND version = $2
+         ORDER BY depth DESC, path DESC`,
+        [this.workspaceId, version],
+      );
+      await deleteRowsDepthFirst(tx, this.workspaceId, subtree.rows);
+    });
+  }
+}
+
+async function deleteRowsDepthFirst(
+  tx: SqlClient,
+  workspaceId: string,
+  rows: { id: number; depth: number }[],
+): Promise<void> {
+  let currentDepth: number | null = null;
+  let idsAtDepth: number[] = [];
+  for (const row of rows) {
+    if (currentDepth === null) {
+      currentDepth = row.depth;
+    }
+    if (row.depth !== currentDepth) {
+      await tx.query(
+        `DELETE FROM fs_nodes
+         WHERE workspace_id = $1 AND id = ANY($2::int[])`,
+        [workspaceId, idsAtDepth],
+      );
+      idsAtDepth = [];
+      currentDepth = row.depth;
+    }
+    idsAtDepth.push(row.id);
+  }
+  if (idsAtDepth.length > 0) {
+    await tx.query(
+      `DELETE FROM fs_nodes
+       WHERE workspace_id = $1 AND id = ANY($2::int[])`,
+      [workspaceId, idsAtDepth],
+    );
+  }
+}
+
+async function hasEmbeddingColumn(tx: SqlClient): Promise<boolean> {
+  const result = await tx.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'fs_nodes' AND column_name = 'embedding'
+     ) AS exists`,
+  );
+  return result.rows[0]?.exists ?? false;
 }
 
 function globToRegex(pattern: string): RegExp {

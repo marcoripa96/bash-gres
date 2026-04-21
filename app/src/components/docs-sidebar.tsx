@@ -23,6 +23,7 @@ const NAV = [
     heading: "Features",
     items: [
       { href: "/docs/filesystem", label: "Filesystem" },
+      { href: "/docs/versioning", label: "Versioning" },
       { href: "/docs/search", label: "Search" },
       { href: "/docs/bash", label: "Bash" },
     ],
