@@ -4,8 +4,10 @@ import { CopyButton } from "./copy-button";
 import { AsciiHeader } from "./ascii-header";
 import { Magnetic } from "./magnetic";
 import { Marquee } from "./marquee";
+import { getPackageVersion } from "@/lib/version";
 
 export function Hero() {
+  const version = getPackageVersion();
   return (
     <section className="pt-12 pb-0 lg:pt-20">
       <div className="max-w-[768px] mx-auto px-6 lg:px-8">
@@ -26,6 +28,14 @@ export function Hero() {
           </a>
         </nav>
         <AsciiHeader />
+        <a
+          href="https://www.npmjs.com/package/bash-gres"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-3 inline-block font-mono text-[10px] sm:text-xs tracking-tight text-muted-foreground hover:text-foreground transition-colors border border-border/60 rounded-full px-2 py-0.5"
+        >
+          v{version}
+        </a>
         <p className="mt-4 text-sm text-muted-foreground leading-relaxed max-w-[48ch]">
           PostgreSQL-backed virtual filesystem with a bash interface.
         </p>

@@ -37,20 +37,32 @@ const NAV = [
   },
 ];
 
-export function DocsSidebar() {
+export function DocsSidebar({ version }: { version?: string }) {
   const pathname = usePathname();
 
   return (
     <aside className="w-56 shrink-0 hidden lg:block">
       <div className="sticky top-8 space-y-6">
-        <Link
-          href="/"
-          className="block text-muted hover:text-foreground transition-colors"
-        >
-          <pre className="font-mono text-[4px] leading-[1.1] select-none">
-            {MINI_ASCII}
-          </pre>
-        </Link>
+        <div>
+          <Link
+            href="/"
+            className="block text-muted hover:text-foreground transition-colors"
+          >
+            <pre className="font-mono text-[4px] leading-[1.1] select-none">
+              {MINI_ASCII}
+            </pre>
+          </Link>
+          {version && (
+            <a
+              href="https://www.npmjs.com/package/bash-gres"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-block font-mono text-[10px] tracking-tight text-muted-foreground hover:text-foreground transition-colors border border-border/60 rounded-full px-2 py-0.5"
+            >
+              v{version}
+            </a>
+          )}
+        </div>
         <nav className="space-y-5">
           {NAV.map((section) => (
             <div key={section.heading}>
