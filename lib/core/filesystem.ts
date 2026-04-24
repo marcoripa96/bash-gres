@@ -22,6 +22,7 @@ import {
   fileName,
 } from "./path-encoding.js";
 import { fullTextSearch, semanticSearch, hybridSearch, validateEmbedding } from "./search.js";
+import { runTrusted } from "./defense-scope.js";
 
 interface FsRow {
   id: number;
@@ -135,15 +136,17 @@ export class PgFileSystem {
   // -- Transaction wrapper (sets RLS context + timeout) -----------------------
 
   private withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
-    return this.client.transaction(async (tx) => {
-      await tx.query(
-        `SELECT
-           set_config('app.workspace_id', $1, true),
-           set_config('statement_timeout', $2, true)`,
-        [this.workspaceId, String(this.statementTimeoutMs)],
-      );
-      return fn(tx);
-    }).catch((e) => {
+    return runTrusted(() =>
+      this.client.transaction(async (tx) => {
+        await tx.query(
+          `SELECT
+             set_config('app.workspace_id', $1, true),
+             set_config('statement_timeout', $2, true)`,
+          [this.workspaceId, String(this.statementTimeoutMs)],
+        );
+        return fn(tx);
+      }),
+    ).catch((e) => {
       if (e instanceof SqlError && e.code === "25006") {
         throw new FsError("EPERM", "read-only file system", "/");
       }

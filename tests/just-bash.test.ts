@@ -125,4 +125,17 @@ describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
     const result = await bash.exec("stat /tmp/ch.txt");
     expect(result.stdout).toContain("755");
   });
+
+  // Regression: just-bash 2.14 enables Defense-in-Depth by default, which
+  // patches process.env + setTimeout and rejects the reads node-postgres
+  // makes on every query. PgFileSystem wraps SQL calls in a trusted scope
+  // so bash commands that trigger SQL round-trips keep working.
+  it("works with just-bash Defense-in-Depth enabled (default)", async () => {
+    const didBash = new Bash({ fs: pgFs, defenseInDepth: true });
+    await didBash.exec("echo guarded > /tmp/did.txt");
+    const result = await didBash.exec("cat /tmp/did.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("guarded\n");
+  });
 });
