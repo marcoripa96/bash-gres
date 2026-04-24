@@ -126,11 +126,14 @@ describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
     expect(result.stdout).toContain("755");
   });
 
-  // Regression: just-bash 2.14 enables Defense-in-Depth by default, which
-  // patches process.env + setTimeout and rejects the reads node-postgres
-  // makes on every query. PgFileSystem wraps SQL calls in a trusted scope
-  // so bash commands that trigger SQL round-trips keep working.
-  it("works with just-bash Defense-in-Depth enabled (default)", async () => {
+  // Regression: just-bash 2.14 enables Defense-in-Depth by default. DiD
+  // patches process.env and setTimeout and throws if reads happen outside
+  // a trusted scope. A bash command that triggers SQL round-trips (write
+  // then read via pipe) must still work end-to-end when DiD is explicitly
+  // enabled. This passes as long as consumers share a single just-bash
+  // module instance with bash-gres (ESM throughout); a CJS+ESM mix would
+  // produce duplicate DefenseInDepthBox singletons and fail.
+  it("works with just-bash Defense-in-Depth enabled", async () => {
     const didBash = new Bash({ fs: pgFs, defenseInDepth: true });
     await didBash.exec("echo guarded > /tmp/did.txt");
     const result = await didBash.exec("cat /tmp/did.txt");

@@ -1,5 +1,4 @@
 import type { SqlClient, SetupOptions } from "./types.js";
-import { runTrusted } from "./defense-scope.js";
 
 const TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS fs_nodes (
@@ -117,31 +116,29 @@ export async function setup(
     );
   }
 
-  await runTrusted(async () => {
-    if (!skipExtensions) {
-      await client.query("CREATE EXTENSION IF NOT EXISTS ltree");
-      if (enableFullTextSearch) {
-        await client.query("CREATE EXTENSION IF NOT EXISTS pg_textsearch");
-      }
-      if (enableVectorSearch) {
-        await client.query("CREATE EXTENSION IF NOT EXISTS vector");
-      }
-    }
-
-    await client.query(TABLE_DDL);
-    await client.query(MIGRATE_DDL);
-    await client.query(INDEXES_DDL);
-
+  if (!skipExtensions) {
+    await client.query("CREATE EXTENSION IF NOT EXISTS ltree");
     if (enableFullTextSearch) {
-      await client.query(FTS_INDEX_DDL);
+      await client.query("CREATE EXTENSION IF NOT EXISTS pg_textsearch");
     }
+    if (enableVectorSearch) {
+      await client.query("CREATE EXTENSION IF NOT EXISTS vector");
+    }
+  }
 
-    if (enableRLS) {
-      await client.query(RLS_DDL);
-    }
+  await client.query(TABLE_DDL);
+  await client.query(MIGRATE_DDL);
+  await client.query(INDEXES_DDL);
 
-    if (enableVectorSearch && embeddingDimensions) {
-      await client.query(vectorDDL(embeddingDimensions));
-    }
-  });
+  if (enableFullTextSearch) {
+    await client.query(FTS_INDEX_DDL);
+  }
+
+  if (enableRLS) {
+    await client.query(RLS_DDL);
+  }
+
+  if (enableVectorSearch && embeddingDimensions) {
+    await client.query(vectorDDL(embeddingDimensions));
+  }
 }
