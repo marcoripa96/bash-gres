@@ -1005,7 +1005,7 @@ export class PgFileSystem {
     versionId: number,
     path: string,
     content: string | Uint8Array,
-    precomputedEmbedding?: number[] | null,
+    embedding: number[] | null = null,
   ): Promise<void> {
     this.validateFileSize(content);
     this.validatePathDepth(path);
@@ -1036,18 +1036,6 @@ export class PgFileSystem {
     const sizeBytes = bytes.byteLength;
     const hash = sha256(bytes);
 
-    let embedding: number[] | null = null;
-    if (precomputedEmbedding !== undefined) {
-      embedding = precomputedEmbedding;
-    } else if (
-      isText &&
-      this.embed &&
-      content.length > 0 &&
-      (await this.blobsHasEmbedding(tx))
-    ) {
-      embedding = await this.maybeEmbed(tx, hash, content);
-    }
-
     await this.upsertBlob(
       tx,
       hash,
@@ -1068,6 +1056,20 @@ export class PgFileSystem {
     );
   }
 
+  private async prepareEmbedding(
+    content: string | Uint8Array,
+  ): Promise<number[] | null> {
+    if (typeof content !== "string" || content.length === 0 || !this.embed) {
+      return null;
+    }
+    if (!(await this.withWorkspace((tx) => this.blobsHasEmbedding(tx)))) {
+      return null;
+    }
+    const embedding = await this.embed(content);
+    validateEmbedding(embedding, this.embeddingDimensions);
+    return embedding;
+  }
+
   private async blobsHasEmbedding(tx: SqlClient): Promise<boolean> {
     if (this.blobsHasEmbeddingCache !== null)
       return this.blobsHasEmbeddingCache;
@@ -1081,21 +1083,31 @@ export class PgFileSystem {
     return this.blobsHasEmbeddingCache;
   }
 
-  private async maybeEmbed(
+  private async getBlobEmbedding(
     tx: SqlClient,
     hash: Uint8Array,
-    content: string,
   ): Promise<number[] | null> {
-    if (!this.embed) return null;
-    const existing = await tx.query<{ has_embedding: boolean }>(
-      `SELECT (embedding IS NOT NULL) AS has_embedding
+    if (!(await this.blobsHasEmbedding(tx))) return null;
+    const result = await tx.query<{ embedding: string | null }>(
+      `SELECT embedding::text AS embedding
        FROM fs_blobs
        WHERE workspace_id = $1 AND hash = $2
        LIMIT 1`,
       [this.workspaceId, hash],
     );
-    if (existing.rows[0]?.has_embedding) return null;
-    const embedding = await this.embed(content);
+    const embedding = result.rows[0]?.embedding;
+    return embedding ? this.parseEmbeddingText(embedding) : null;
+  }
+
+  private parseEmbeddingText(text: string): number[] {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+      throw new Error(`Invalid vector value returned by database: ${text}`);
+    }
+    const body = trimmed.slice(1, -1);
+    const embedding = body.length === 0
+      ? []
+      : body.split(",").map((value) => Number(value.trim()));
     validateEmbedding(embedding, this.embeddingDimensions);
     return embedding;
   }
@@ -1462,13 +1474,17 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
+    this.validateFileSize(content);
+    this.validatePathDepth(internal);
+    const embedding = await this.prepareEmbedding(content);
+
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
       if (parent !== "/") {
         await this.internalMkdir(tx, versionId, parent, { recursive: true });
       }
-      await this.internalWriteFile(tx, versionId, internal, content);
+      await this.internalWriteFile(tx, versionId, internal, content, embedding);
     });
   }
 
@@ -1478,6 +1494,17 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
+    this.validateFileSize(content);
+    this.validatePathDepth(internal);
+
+    // Pre-embed outside any transaction so we never hold a connection idle
+    // during the embedding RPC. Used only when this call creates a new file
+    // (in which case appendFile is equivalent to writeFile). When appending
+    // to an existing file we keep the existing embedding rather than
+    // re-embed merged content; callers needing a fresh embedding should
+    // writeFile instead.
+    const newFileEmbedding = await this.prepareEmbedding(content);
+
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
@@ -1486,7 +1513,13 @@ export class PgFileSystem {
       }
       const existing = await this.resolveEntry(tx, internal);
       if (!existing) {
-        await this.internalWriteFile(tx, versionId, internal, content);
+        await this.internalWriteFile(
+          tx,
+          versionId,
+          internal,
+          content,
+          newFileEmbedding,
+        );
         return;
       }
       if (existing.node_type === "directory")
@@ -1527,10 +1560,19 @@ export class PgFileSystem {
         );
         merged.set(new Uint8Array(existingBytes), 0);
         merged.set(new Uint8Array(appendBytes), existingBytes.byteLength);
-        await this.internalWriteFile(tx, versionId, internal, merged);
+        await this.internalWriteFile(tx, versionId, internal, merged, null);
       } else {
         const merged = (existingText ?? "") + (content as string);
-        await this.internalWriteFile(tx, versionId, internal, merged);
+        const existingEmbedding = existing.blob_hash
+          ? await this.getBlobEmbedding(tx, existing.blob_hash)
+          : null;
+        await this.internalWriteFile(
+          tx,
+          versionId,
+          internal,
+          merged,
+          existingEmbedding,
+        );
       }
     });
   }
