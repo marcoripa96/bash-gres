@@ -34,7 +34,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "bench": "tsc -p tsconfig.bench.json && node dist-bench/bench/perf.js",
+    "bench": "tsx bench/run.ts",
     "prepublishOnly": "tsc"
   },
   "keywords": [
@@ -78,6 +78,7 @@
     "pg": "^8.20.0",
     "postgres": "^3.4.8",
     "testcontainers": "^10.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

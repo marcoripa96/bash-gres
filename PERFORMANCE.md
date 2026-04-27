@@ -308,6 +308,57 @@ exposes async iteration via `.cursor()`. We can expose a streaming variant.
 
 ---
 
+## Measurements
+
+`npm run bench` runs the workload defined in `bench/run.ts` against a live
+postgres on `$TEST_DATABASE_URL`. Numbers below are median wall-clock
+milliseconds and the median count of SQL statements issued *inside*
+`withWorkspace` (one round-trip each).
+
+Hardware: localhost docker postgres, pgvector/pgvector:pg18, 200 iterations
+unless the scenario caps lower. Run `BENCH_ITERATIONS=N npm run bench` to
+override.
+
+### Baseline (commit `75c993c`, pre-perf-work)
+
+```
+scenario                  n    median ms  p95 ms  p99 ms  queries
+stat (existing file)      200  0.55       0.86    1.05    2
+writeFile 1KB (no embed)  200  2.81       3.79    4.28    6
+readFile 1KB              200  0.44       0.71    1.23    2
+mv 1MB file               50   20.75      23.15   23.62   11
+mkdir -p depth 8          200  4.92       6.18    7.05    10
+cp -r 50-node tree        20   62.47      79.34   79.34   261
+readdir 100-entry dir     200  0.74       0.94    1.12    3
+walk 200-node tree        100  2.33       3.16    7.49    3
+```
+
+### After #1 + #2
+
+```
+scenario                  n    median ms  p95 ms  p99 ms  queries
+stat (existing file)      200  0.45       0.74    1.08    2
+writeFile 1KB (no embed)  200  2.68       3.30    4.04    6
+readFile 1KB              200  0.44       0.56    1.11    2
+mv 1MB file               50   16.31      20.77   22.62   11
+mkdir -p depth 8          200  5.11       7.30    9.41    10
+cp -r 50-node tree        20   59.96      65.96   65.96   261
+readdir 100-entry dir     200  0.66       0.90    2.51    3
+walk 200-node tree        100  2.42       2.97    4.27    3
+```
+
+Headline change: `mv 1MB file` 20.75 ms → 16.31 ms (**-21%**). The win
+comes from #2 dropping the SELECT * fetch on the source row; the file's
+1 MB of bytes used to flow through the wire and Node's heap, now they
+don't. Other scenarios are within noise of the baseline since #1's win
+shows up only when the embedder is actually configured (not part of the
+default bench), and #2's win on non-`mv` paths is bandwidth, not
+round-trips.
+
+`stat`, `readFile`, `readdir`, and `walk` all still issue an extra
+`set_config` round-trip — see #3, which is expected to drop them by one
+query each.
+
 ## Out of scope
 
 These are real wins but blocked or contentious — tracked in `FOLLOWUPS.md`:
