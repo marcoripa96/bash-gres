@@ -99,6 +99,20 @@ export interface ReadFileRangeOptions {
   limit?: number;
 }
 
+export interface ReadFileLinesOptions {
+  /** 1-indexed line number to start from. Default 1. */
+  offset?: number;
+  /** Maximum number of lines to return. Default: read to end. */
+  limit?: number;
+}
+
+export interface ReadFileLinesResult {
+  /** The requested slice of lines, joined by `\n`. No trailing newline. */
+  content: string;
+  /** Total number of lines in the file (excludes the empty element after a trailing newline). */
+  total: number;
+}
+
 export interface SetupOptions {
   enableRLS?: boolean;
   enableFullTextSearch?: boolean;

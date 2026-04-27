@@ -15,6 +15,8 @@ export {
   type RmOptions,
   type CpOptions,
   type ReadFileRangeOptions,
+  type ReadFileLinesOptions,
+  type ReadFileLinesResult,
   type SetupOptions,
   type FsPermissions,
   type PgFileSystemOptions,

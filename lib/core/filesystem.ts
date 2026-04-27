@@ -10,6 +10,8 @@ import type {
   RmOptions,
   CpOptions,
   ReadFileRangeOptions,
+  ReadFileLinesOptions,
+  ReadFileLinesResult,
   SearchResult,
 } from "./types.js";
 import { FsError, SqlError } from "./types.js";
@@ -661,6 +663,93 @@ export class PgFileSystem {
         return new TextDecoder().decode(chunk.chunk_binary);
       }
       return "";
+    });
+  }
+
+  async readFileLines(
+    path: string,
+    options?: ReadFileLinesOptions,
+  ): Promise<ReadFileLinesResult> {
+    const internal = this.guardRead(path);
+
+    return this.withWorkspace(async (tx) => {
+      const node = await this.resolveSymlinkMeta(tx, internal);
+      if (node.node_type === "directory")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, read",
+          path,
+        );
+
+      const start = options?.offset ?? 1;
+      if (start < 1)
+        throw new FsError(
+          "EINVAL",
+          `readFileLines: offset must be >= 1 (got ${start})`,
+          path,
+        );
+      const limit = options?.limit;
+      if (limit !== undefined && limit < 1)
+        throw new FsError(
+          "EINVAL",
+          `readFileLines: limit must be >= 1 (got ${limit})`,
+          path,
+        );
+      const end = limit !== undefined ? start + limit - 1 : null;
+
+      // Postgres array slicing `arr[a:b]` is 1-indexed and inclusive on both ends.
+      // `string_to_array(content, E'\n')` produces a trailing empty element when the
+      // file ends with `\n`; we subtract one from `total` to match `wc -l` semantics.
+      const sliceExpr = end !== null ? "lines[$3:$4]" : "lines[$3:]";
+      const params: (string | number)[] = [
+        this.workspaceId,
+        node.id,
+        start,
+      ];
+      if (end !== null) params.push(end);
+
+      const result = await tx.query<{
+        chunk: string | null;
+        total: number | null;
+        is_binary: boolean;
+      }>(
+        // `string_to_array(content, E'\n')` produces a trailing empty element
+        // when the file ends with `\n`; we trim it so `wc -l` semantics hold and
+        // a default-slice read doesn't reintroduce a trailing newline.
+        `WITH raw AS (
+           SELECT string_to_array(content, E'\n') AS arr,
+                  (content LIKE '%' || E'\n') AS has_trail,
+                  (content IS NULL AND binary_data IS NOT NULL) AS is_binary
+           FROM fs_nodes
+           WHERE workspace_id = $1 AND id = $2
+         ),
+         parts AS (
+           SELECT
+             CASE
+               WHEN has_trail AND array_length(arr, 1) IS NOT NULL
+                 THEN arr[1:array_length(arr, 1) - 1]
+               ELSE arr
+             END AS lines,
+             is_binary
+           FROM raw
+         )
+         SELECT array_to_string(${sliceExpr}, E'\n') AS chunk,
+                coalesce(array_length(lines, 1), 0) AS total,
+                is_binary
+         FROM parts`,
+        params,
+      );
+
+      const row = result.rows[0];
+      if (!row) return { content: "", total: 0 };
+      if (row.is_binary) {
+        throw new FsError(
+          "EINVAL",
+          "readFileLines is text-only; use readFileRange for binary files",
+          path,
+        );
+      }
+      return { content: row.chunk ?? "", total: row.total ?? 0 };
     });
   }
 

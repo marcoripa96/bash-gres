@@ -85,11 +85,19 @@ await fs.appendFile("/docs/guide.md", "\\nMore content...")
 // Read entire file as string
 const content = await fs.readFile("/docs/guide.md")
 
-// Read a range (useful for large files)
+// Read a byte range (useful for large files)
 const chunk = await fs.readFileRange("/docs/guide.md", {
   offset: 0,
   limit: 1024,
 })
+
+// Read a line range (text files only — slicing happens in Postgres)
+const { content: head, total } = await fs.readFileLines("/docs/guide.md", {
+  offset: 1,
+  limit: 50,
+})
+// content: lines 1-50 joined by "\\n", no trailing newline
+// total:   total line count of the file (wc -l semantics)
 
 // Read as binary
 const buffer = await fs.readFileBuffer("/docs/image.png")`}

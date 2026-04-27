@@ -73,6 +73,99 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
     });
   });
 
+  describe("readFileLines", () => {
+    it("returns the full file when no offset/limit (no trailing newline)", async () => {
+      await fs.writeFile("/notes.md", "line1\nline2\nline3");
+      const r = await fs.readFileLines("/notes.md");
+      expect(r.content).toBe("line1\nline2\nline3");
+      expect(r.total).toBe(3);
+    });
+
+    it("counts trailing newline correctly (wc -l semantics)", async () => {
+      await fs.writeFile("/notes.md", "a\nb\nc\n");
+      const r = await fs.readFileLines("/notes.md");
+      expect(r.content).toBe("a\nb\nc");
+      expect(r.total).toBe(3);
+    });
+
+    it("slices via offset + limit (1-indexed, inclusive)", async () => {
+      await fs.writeFile(
+        "/long.md",
+        Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join("\n"),
+      );
+      const r = await fs.readFileLines("/long.md", { offset: 3, limit: 4 });
+      expect(r.content).toBe("line3\nline4\nline5\nline6");
+      expect(r.total).toBe(10);
+    });
+
+    it("offset without limit reads to end", async () => {
+      await fs.writeFile("/long.md", "a\nb\nc\nd\ne");
+      const r = await fs.readFileLines("/long.md", { offset: 4 });
+      expect(r.content).toBe("d\ne");
+      expect(r.total).toBe(5);
+    });
+
+    it("limit beyond file end clamps to remaining lines", async () => {
+      await fs.writeFile("/short.md", "a\nb\nc");
+      const r = await fs.readFileLines("/short.md", { offset: 2, limit: 99 });
+      expect(r.content).toBe("b\nc");
+      expect(r.total).toBe(3);
+    });
+
+    it("offset past end returns empty content with correct total", async () => {
+      await fs.writeFile("/short.md", "a\nb\nc");
+      const r = await fs.readFileLines("/short.md", { offset: 99 });
+      expect(r.content).toBe("");
+      expect(r.total).toBe(3);
+    });
+
+    it("preserves blank lines inside the slice", async () => {
+      await fs.writeFile("/spaced.md", "a\n\nb\n\nc");
+      const r = await fs.readFileLines("/spaced.md", { offset: 1, limit: 4 });
+      expect(r.content).toBe("a\n\nb\n");
+      expect(r.total).toBe(5);
+    });
+
+    it("empty file reports zero lines", async () => {
+      await fs.writeFile("/empty.md", "");
+      const r = await fs.readFileLines("/empty.md");
+      expect(r.content).toBe("");
+      expect(r.total).toBe(0);
+    });
+
+    it("follows symlinks", async () => {
+      await fs.writeFile("/target.md", "x\ny\nz");
+      await fs.symlink("/target.md", "/alias.md");
+      const r = await fs.readFileLines("/alias.md", { offset: 2, limit: 1 });
+      expect(r.content).toBe("y");
+      expect(r.total).toBe(3);
+    });
+
+    it("rejects binary-stored files with EINVAL", async () => {
+      await fs.writeFile("/img.bin", new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+      await expect(fs.readFileLines("/img.bin")).rejects.toThrow("EINVAL");
+    });
+
+    it("rejects directories with EISDIR", async () => {
+      await fs.mkdir("/dir");
+      await expect(fs.readFileLines("/dir")).rejects.toThrow("EISDIR");
+    });
+
+    it("rejects offset < 1", async () => {
+      await fs.writeFile("/a.md", "x");
+      await expect(
+        fs.readFileLines("/a.md", { offset: 0 }),
+      ).rejects.toThrow("EINVAL");
+    });
+
+    it("rejects limit < 1", async () => {
+      await fs.writeFile("/a.md", "x");
+      await expect(
+        fs.readFileLines("/a.md", { limit: 0 }),
+      ).rejects.toThrow("EINVAL");
+    });
+  });
+
   describe("readFileBuffer", () => {
     it("reads text as buffer", async () => {
       await fs.writeFile("/hello.txt", "world");

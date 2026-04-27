@@ -87,6 +87,10 @@ await fs.mkdir("/docs/images", { recursive: true })
 const content = await fs.readFile("/docs/guide.md")
 const entries = await fs.readdir("/docs")
 
+// Slice large files server-side
+const bytes = await fs.readFileRange("/log.txt", { offset: 0, limit: 1024 })
+const { content: head, total } = await fs.readFileLines("/log.txt", { offset: 1, limit: 50 })
+
 await fs.cp("/docs", "/backup", { recursive: true })
 await fs.mv("/backup/guide.md", "/archive/guide.md")
 await fs.rm("/archive", { recursive: true, force: true })
