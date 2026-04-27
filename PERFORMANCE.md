@@ -310,54 +310,50 @@ exposes async iteration via `.cursor()`. We can expose a streaming variant.
 
 ## Measurements
 
-`npm run bench` runs the workload defined in `bench/run.ts` against a live
-postgres on `$TEST_DATABASE_URL`. Numbers below are median wall-clock
-milliseconds and the median count of SQL statements issued *inside*
-`withWorkspace` (one round-trip each).
+### Bench protocol
 
-Hardware: localhost docker postgres, pgvector/pgvector:pg18, 200 iterations
-unless the scenario caps lower. Run `BENCH_ITERATIONS=N npm run bench` to
-override.
+`npm run bench` runs `bench/run.ts` once and prints median / p95 / p99
+plus the median count of SQL statements issued *inside* `withWorkspace`.
+A single run is too noisy for ±5% deltas, so for landed work we use
+`bench/multi.sh <runs> <script>`, which runs the bench N times (default
+5) and reports **median-of-medians** plus the **min/max-of-medians**
+spread. We only claim a win when the delta exceeds the larger spread.
 
-### Baseline (commit `75c993c`, pre-perf-work)
+Hardware: localhost docker postgres, `pgvector/pgvector:pg18`,
+postgres.js adapter, 200 iterations per scenario per run unless the
+scenario caps lower (`mv` 50, `cp -r` 20, `walk` 100).
 
-```
-scenario                  n    median ms  p95 ms  p99 ms  queries
-stat (existing file)      200  0.55       0.86    1.05    2
-writeFile 1KB (no embed)  200  2.81       3.79    4.28    6
-readFile 1KB              200  0.44       0.71    1.23    2
-mv 1MB file               50   20.75      23.15   23.62   11
-mkdir -p depth 8          200  4.92       6.18    7.05    10
-cp -r 50-node tree        20   62.47      79.34   79.34   261
-readdir 100-entry dir     200  0.74       0.94    1.12    3
-walk 200-node tree        100  2.33       3.16    7.49    3
-```
-
-### After #1 + #2
+### Baseline vs. after #1 + #2 (5 runs each)
 
 ```
-scenario                  n    median ms  p95 ms  p99 ms  queries
-stat (existing file)      200  0.45       0.74    1.08    2
-writeFile 1KB (no embed)  200  2.68       3.30    4.04    6
-readFile 1KB              200  0.44       0.56    1.11    2
-mv 1MB file               50   16.31      20.77   22.62   11
-mkdir -p depth 8          200  5.11       7.30    9.41    10
-cp -r 50-node tree        20   59.96      65.96   65.96   261
-readdir 100-entry dir     200  0.66       0.90    2.51    3
-walk 200-node tree        100  2.42       2.97    4.27    3
+scenario                     baseline mom   after mom    Δ      spread (after)
+stat (existing file)               0.50         0.50    0%       12%   noise
+writeFile 1KB (no embed)           2.96         2.95    0%        8%   noise
+readFile 1KB                       0.47         0.45   -4%       18%   within noise
+mv 1MB file                       18.96        17.30   -9%        2%   real win
+mkdir -p depth 8                   5.25         5.13   -2%        6%   noise
+cp -r 50-node tree                66.55        66.76    0%       10%   noise
+readdir 100-entry dir              0.71         0.75   +6%        7%   noise
+walk 200-node tree                 2.19         2.67  +22%       28%   within noise
 ```
 
-Headline change: `mv 1MB file` 20.75 ms → 16.31 ms (**-21%**). The win
-comes from #2 dropping the SELECT * fetch on the source row; the file's
-1 MB of bytes used to flow through the wire and Node's heap, now they
-don't. Other scenarios are within noise of the baseline since #1's win
-shows up only when the embedder is actually configured (not part of the
-default bench), and #2's win on non-`mv` paths is bandwidth, not
-round-trips.
+`mom` = median-of-medians across 5 runs; spread = (max − min) / mom.
 
-`stat`, `readFile`, `readdir`, and `walk` all still issue an extra
-`set_config` round-trip — see #3, which is expected to drop them by one
-query each.
+**Real win: `mv 1MB file` −9%** (tight 2% spread). #2's SELECT-*-elimination
+on the source row removes ~1 MB of TOASTed payload from each move on the
+wire / through Node's heap.
+
+Everything else is within run-to-run noise. As expected:
+
+- #1's win shows up only when an embedder is configured; the bench
+  doesn't configure one, so writeFile is unchanged here.
+- #2's other wins (symlink chain bandwidth, fast-path readFile) don't
+  produce wall-clock signal at the scenario sizes we use — they need
+  longer chains or larger files than the bench currently exercises.
+
+`stat`, `readFile`, `readdir`, `walk` still issue one extra `set_config`
+round-trip — that's exactly what #3 targets. Expected to drop these by
+one statement each.
 
 ## Out of scope
 
