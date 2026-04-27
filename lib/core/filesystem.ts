@@ -519,7 +519,9 @@ export class PgFileSystem {
               e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
        FROM version_ancestors a
        INNER JOIN LATERAL (
-         SELECT * FROM fs_entries
+         SELECT workspace_id, version_id, path, blob_hash, node_type,
+                symlink_target, mode, size_bytes, mtime, created_at
+         FROM fs_entries
          WHERE workspace_id = $1
            AND version_id = a.ancestor_id
            AND path = $2::ltree
@@ -602,7 +604,8 @@ export class PgFileSystem {
            AND nlevel(e.path) = nlevel($3::ltree) + 1
          ORDER BY e.path, a.depth ASC
        )
-       SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
+       SELECT path, node_type, blob_hash, symlink_target, mode, size_bytes, mtime
+       FROM visible WHERE node_type != $4 ORDER BY path`,
       [this.workspaceId, versionId, lt, TOMBSTONE],
     );
     return r.rows;
@@ -691,7 +694,9 @@ export class PgFileSystem {
            ${filter}
          ORDER BY e.path, a.depth ASC
        )
-       SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
+       SELECT path, node_type, blob_hash, symlink_target, mode, size_bytes,
+              mtime, depth_in_subtree
+       FROM visible WHERE node_type != $4 ORDER BY path`,
       [this.workspaceId, versionId, lt, TOMBSTONE],
     );
     return r.rows;
