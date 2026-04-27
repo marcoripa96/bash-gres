@@ -154,4 +154,30 @@ describe.each(TEST_ADAPTERS)("perf: symlink chain reads metadata [%s]", (_name, 
     expect(blobReads[0]).toMatch(/\bcontent\b/);
     expect(blobReads[0]).toMatch(/\bbinary_data\b/);
   });
+
+  it("readFile of a non-symlink resolves metadata once and content once", async () => {
+    const seedFs = new PgFileSystem({
+      db: inner,
+      workspaceId: PERF_SYMLINK_WORKSPACE,
+    });
+    await seedFs.init();
+    await seedFs.writeFile("/regular.txt", "data");
+
+    const rec = recording(inner);
+    const fs = new PgFileSystem({
+      db: rec.client,
+      workspaceId: PERF_SYMLINK_WORKSPACE,
+    });
+
+    rec.queries.length = 0;
+    expect(await fs.readFile("/regular.txt")).toBe("data");
+
+    const entryReads = rec.queries.filter((q) => /\bFROM\s+fs_entries\b/i.test(q));
+    const blobReads = rec.queries.filter((q) => /\bFROM\s+fs_blobs\b/i.test(q));
+    expect(entryReads.length).toBe(1);
+    expect(blobReads.length).toBe(1);
+    expect(entryReads[0]).not.toMatch(/\bcontent\b/);
+    expect(entryReads[0]).not.toMatch(/\bbinary_data\b/);
+    expect(entryReads[0]).not.toMatch(/\bembedding\b/);
+  });
 });
