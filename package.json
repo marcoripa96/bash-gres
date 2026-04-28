@@ -1,6 +1,6 @@
 {
   "name": "bash-gres",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "PostgreSQL-backed virtual filesystem with bash command interface",
   "type": "module",
   "exports": {
