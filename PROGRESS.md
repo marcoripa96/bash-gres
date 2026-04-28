@@ -68,12 +68,20 @@ Notes: deferred items have unambiguous design but will be authored alongside the
 
 ## Phase 6 - `merge()`
 
-- [ ] LCA query
-- [ ] Three-way classification + conflict matrix
-- [ ] Strategies: `fail`, `ours`, `theirs`
-- [ ] `paths`, `pathScope`, `dryRun`
-- [ ] Directory-deletion expansion to descendants
-- [ ] Tests: full conflict matrix per acceptance list
+- [x] LCA query (`findLCA()` — closest common ancestor by `depth_a + depth_b ASC`); ancestor fast-path: when `LCA == source`, source is already inherited by current via the live overlay, so the merge is a no-op.
+- [x] Three-way classification entirely in TS over base/ours/theirs visible-entry maps. Single-rule collapse of the proposal's matrix using null-aware `entryShapeEqual`: `ours==theirs` → skip; else `base==ours` → apply theirs; else `base==theirs` → skip; else conflict. This handles every row in the spec including delete/add/modify combinations.
+- [x] Strategies: `fail` (default; conflicts returned, applied/skipped both empty), `ours` (keep destination, conflict path goes in `skipped`), `theirs` (apply source, conflict path goes in `applied`). All three populate `conflicts` for transparency.
+- [x] `paths` (each entry matches itself or any descendant — directory paths pull in their visible subtree across all sides), `pathScope` (subtree restriction; rejected if not a visible directory in destination), `dryRun` (returns the same result without writing).
+- [x] Directory-deletion expansion is automatic: `oursMap` contributes every visible descendant to the candidate set, so `rm -r` in source produces a tombstone per visible path in destination.
+- [x] Deferred Phase 1 helpers built alongside their first consumer:
+  - `fetchVisibleEntryMap(tx, versionId, scopeLtree)` — `DISTINCT ON (path)` over `fs_entries` joined to `version_ancestors`, tombstones filtered out, returned as `Map<internalPath, InternalEntryShape>` with `mtime` for conflict reports.
+  - `findLCA(tx, idA, idB)` — self-join on `version_ancestors` ranked by combined depth.
+  - `globalVisibleCount(tx, versionId)` — visible (non-tombstone) count across the entire workspace.
+  - Parent-directory expansion for non-null file/symlink writes: walks up from each write, copying missing directory shapes from theirs/ours/base; reports the implicit parents in `applied`. The scope check ensures `internalScope` is a visible directory before classification, so the walk always terminates without escaping scope.
+  - Batch node-count validation: one global count + signed delta over the apply set, checked against `maxFiles` before any write.
+- [x] `InternalEntryShape` extended with `mtime` for the read side; `writeEntryShape()` ignores it (the write path stamps `now()`). `toPublicEntryShape()` converts the internal shape (raw `Uint8Array` blob hash) into the public `EntryShape` (hex blob hash) for `ConflictEntry`.
+- [x] Tests in `tests/merge.test.ts` (20 cases × 3 adapters = 60): clean add / clean modify / clean delete / ours-only skipped / both-equal skipped / fail conflict no writes / ours conflict reported and skipped / theirs conflict reported and applied / delete-vs-modify conflict / directory deletion subtree tombstones / dryRun matches real result and leaves destination untouched / paths file filter / paths directory pulls subtree / pathScope subtree filter / paths implicit parent dir creation from source / pathScope rejects non-directory destination / ancestor source fast-path no-op / empty source rejected / self-merge rejected / unknown source rejected
+- Full suite green: 723/723
 
 ## Phase 7 - `cherryPick()` & `revert()`
 

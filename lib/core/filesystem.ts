@@ -19,6 +19,9 @@ import type {
   VersionDiffEntry,
   RenameVersionResult,
   PromoteResult,
+  MergeStrategy,
+  MergeResult,
+  ConflictEntry,
 } from "./types.js";
 import { FsError, SqlError } from "./types.js";
 import { readonlySqlClient } from "./readonly.js";
@@ -77,7 +80,8 @@ interface SubtreeRow extends DirChildRow {
  * (diff/merge/cherry-pick/revert/detach) to apply pre-fetched rows back into
  * `fs_entries` without re-reading or re-hashing content. Mirrors the public
  * `EntryShape` from `types.ts`, but holds a raw `Uint8Array` blob hash for
- * direct binding to PostgreSQL.
+ * direct binding to PostgreSQL. `mtime` is the source row's mtime; the write
+ * path stamps `now()` regardless and ignores this field.
  */
 interface InternalEntryShape {
   type: "file" | "directory" | "symlink";
@@ -85,6 +89,7 @@ interface InternalEntryShape {
   symlinkTarget: string | null;
   mode: number;
   sizeBytes: number;
+  mtime: Date;
 }
 
 const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -355,6 +360,56 @@ export class PgFileSystem {
     }
   }
 
+  /**
+   * Find the lowest common ancestor (in the version graph) of `idA` and `idB`,
+   * or `null` if they have no common ancestor. "Lowest" = smallest sum of
+   * depths across the two ancestor chains, which is the version closest to
+   * both endpoints. Used by `merge()` for three-way classification.
+   */
+  private async findLCA(
+    tx: SqlClient,
+    idA: number,
+    idB: number,
+  ): Promise<number | null> {
+    const r = await tx.query<{ ancestor_id: number }>(
+      `SELECT a1.ancestor_id
+       FROM version_ancestors a1
+       JOIN version_ancestors a2
+         ON a2.workspace_id = a1.workspace_id
+        AND a2.ancestor_id = a1.ancestor_id
+       WHERE a1.workspace_id = $1
+         AND a1.descendant_id = $2
+         AND a2.descendant_id = $3
+       ORDER BY a1.depth + a2.depth ASC
+       LIMIT 1`,
+      [this.workspaceId, idA, idB],
+    );
+    return r.rows.length > 0 ? Number(r.rows[0]!.ancestor_id) : null;
+  }
+
+  /**
+   * Count of visible (non-tombstone) entries across the entire workspace at
+   * `versionId`. Used by batch operations to validate `maxFiles` once before
+   * committing many writes, instead of re-checking after every write.
+   */
+  private async globalVisibleCount(
+    tx: SqlClient,
+    versionId: number,
+  ): Promise<number> {
+    const r = await tx.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM (
+         SELECT DISTINCT ON (e.path) e.node_type
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1 AND a.descendant_id = $2
+         ORDER BY e.path, a.depth ASC
+       ) v WHERE node_type != $3`,
+      [this.workspaceId, versionId, TOMBSTONE],
+    );
+    return Number(r.rows[0]?.count ?? 0);
+  }
+
   // -- Visibility resolution --------------------------------------------------
 
   /**
@@ -460,6 +515,61 @@ export class PgFileSystem {
       [this.workspaceId, versionId, lt, TOMBSTONE],
     );
     return r.rows;
+  }
+
+  /**
+   * Fetch every visible (non-tombstone) entry under `scopeLtree` for
+   * `versionId`, keyed by internal POSIX path. Used by batch primitives
+   * (merge/cherryPick/revert) to do classification entirely in TypeScript
+   * once each side's tree is in memory.
+   */
+  private async fetchVisibleEntryMap(
+    tx: SqlClient,
+    versionId: number,
+    scopeLtree: string,
+  ): Promise<Map<string, InternalEntryShape>> {
+    const r = await tx.query<{
+      path: string;
+      node_type: string;
+      blob_hash: Uint8Array | null;
+      symlink_target: string | null;
+      mode: number;
+      size_bytes: number | string;
+      mtime: Date;
+    }>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path::text AS path,
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes,
+           e.mtime
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT path, node_type, blob_hash, symlink_target, mode, size_bytes, mtime
+       FROM visible WHERE node_type != $4`,
+      [this.workspaceId, versionId, scopeLtree, TOMBSTONE],
+    );
+    const map = new Map<string, InternalEntryShape>();
+    for (const row of r.rows) {
+      map.set(ltreeToPath(row.path), {
+        type: row.node_type as NodeType,
+        blobHash: row.blob_hash,
+        symlinkTarget: row.symlink_target,
+        mode: row.mode,
+        sizeBytes: Number(row.size_bytes),
+        mtime: new Date(row.mtime),
+      });
+    }
+    return map;
   }
 
   private async listVisibleSubtree(
@@ -2551,6 +2661,285 @@ export class PgFileSystem {
     });
   }
 
+  /**
+   * Apply path-level changes from `source` into the current version using a
+   * three-way comparison against the LCA. Equality is over `node_type`,
+   * `blob_hash`, `mode`, and `symlink_target` (mtime/size_bytes ignored).
+   *
+   * Classification (one rule covers the whole conflict matrix):
+   *
+   *   - `ours == theirs` (semantically): skip (no-op).
+   *   - else `base == ours`: only theirs changed -> apply theirs.
+   *   - else `base == theirs`: only ours changed -> keep ours.
+   *   - else: conflict.
+   *
+   * `null` (deleted / never-existed) compares like any other value, so the
+   * deletion rows in the proposal's matrix collapse cleanly: `(- - X)` ->
+   * `base == ours` -> apply (add); `(X X -)` -> `base == ours` -> apply
+   * tombstone; `(X - X)` -> `base == theirs` -> skip; etc.
+   *
+   * Strategies on conflict:
+   *
+   *   - `fail` (default): no writes; conflicts returned, applied/skipped both
+   *     empty.
+   *   - `ours`: keep destination, conflicts still reported, path goes in
+   *     `skipped`.
+   *   - `theirs`: apply source, conflicts still reported (so callers can see
+   *     the override), path goes in `applied`.
+   *
+   * Filters: `paths` matches each entry as either an exact path or a path
+   * prefix (so a directory entry pulls in its descendants visible in any of
+   * base/ours/theirs); `pathScope` restricts to one subtree; supplying both
+   * intersects them. `dryRun: true` returns the same `MergeResult` without
+   * writing.
+   *
+   * Source and base are read-only. Only the current destination version
+   * receives `fs_entries` writes; `parent_version_id` and `version_ancestors`
+   * are never modified.
+   *
+   * Implicit parent directories: when an applied non-null file or symlink
+   * lands under a path whose ancestors are not visible in the destination,
+   * those ancestors are copied from the source view (theirs preferred, then
+   * ours, then base) and reported in `applied`.
+   */
+  async merge(
+    source: string,
+    opts?: {
+      strategy?: MergeStrategy;
+      paths?: string[];
+      pathScope?: string;
+      dryRun?: boolean;
+    },
+  ): Promise<MergeResult> {
+    if (!source || source.length === 0) {
+      throw new Error("merge: source must be a non-empty version label");
+    }
+    if (source === this.versionLabel) {
+      throw new Error(
+        `merge: source must differ from current version '${this.versionLabel}'`,
+      );
+    }
+    const strategy: MergeStrategy = opts?.strategy ?? "fail";
+    const dryRun = opts?.dryRun ?? false;
+
+    const scopeUser = opts?.pathScope ? normalizePath(opts.pathScope) : "/";
+    this.guardRead(scopeUser);
+    const internalScope = this.toInternalPath(scopeUser);
+
+    const pathFilters: string[] = [];
+    if (opts?.paths && opts.paths.length > 0) {
+      for (const p of opts.paths) {
+        this.guardRead(p);
+        pathFilters.push(this.toInternalPath(normalizePath(p)));
+      }
+    }
+
+    return this.withWorkspace(async (tx) => {
+      const ourId = await this.getCurrentVersionId(tx);
+      const theirId = await this.requireVersionIdByLabel(tx, source);
+      const scopeLtree = pathToLtree(internalScope, this.workspaceId);
+
+      // LCA & ancestor fast-path. If source is itself an ancestor of current,
+      // current already includes it via the live overlay, so there is nothing
+      // to apply. (If current is an ancestor of source, we still want to
+      // fast-forward, so we don't short-circuit on lcaId === ourId.)
+      const lcaId = await this.findLCA(tx, ourId, theirId);
+      if (lcaId === theirId) {
+        return { applied: [], conflicts: [], skipped: [] };
+      }
+
+      const oursMap = await this.fetchVisibleEntryMap(tx, ourId, scopeLtree);
+      const theirsMap = await this.fetchVisibleEntryMap(tx, theirId, scopeLtree);
+      const baseMap =
+        lcaId !== null
+          ? await this.fetchVisibleEntryMap(tx, lcaId, scopeLtree)
+          : new Map<string, InternalEntryShape>();
+
+      // Validate scope visibility in destination — parent-dir expansion needs
+      // a known-good directory at the scope boundary so it never escapes.
+      // Root scope ("/") is always visible after init().
+      if (internalScope !== "/") {
+        const scopeOurs = oursMap.get(internalScope);
+        if (!scopeOurs || scopeOurs.type !== "directory") {
+          throw new FsError(
+            "ENOTDIR",
+            "merge: pathScope is not a visible directory in destination",
+            this.toUserPath(internalScope),
+          );
+        }
+      }
+
+      // Candidate paths = union of all three maps, restricted by `paths`
+      // filter when provided. A user-supplied filter `f` matches candidate
+      // `c` iff `c === f` or `c` is a strict descendant of `f`. This treats
+      // directory-shaped filters as "the directory plus its visible subtree"
+      // without first deciding whether `f` is actually a directory in any
+      // particular side.
+      const candidatePaths = new Set<string>();
+      for (const p of oursMap.keys()) candidatePaths.add(p);
+      for (const p of theirsMap.keys()) candidatePaths.add(p);
+      for (const p of baseMap.keys()) candidatePaths.add(p);
+
+      let candidates: string[];
+      if (pathFilters.length > 0) {
+        candidates = [...candidatePaths].filter((c) =>
+          pathFilters.some((f) =>
+            c === f ||
+            (f === "/" ? c.startsWith("/") : c.startsWith(f + "/")),
+          ),
+        );
+      } else {
+        candidates = [...candidatePaths];
+      }
+      candidates.sort();
+
+      const applied: string[] = [];
+      const skipped: string[] = [];
+      const conflicts: ConflictEntry[] = [];
+      const writes: Array<{
+        internalPath: string;
+        shape: InternalEntryShape | null;
+      }> = [];
+      const writePathSet = new Set<string>();
+
+      for (const internalPath of candidates) {
+        const ours = oursMap.get(internalPath) ?? null;
+        const theirs = theirsMap.get(internalPath) ?? null;
+        const base = baseMap.get(internalPath) ?? null;
+        const userPath = this.toUserPath(internalPath);
+
+        if (entryShapeEqual(ours, theirs)) {
+          skipped.push(userPath);
+          continue;
+        }
+        if (entryShapeEqual(base, ours)) {
+          writes.push({ internalPath, shape: theirs });
+          writePathSet.add(internalPath);
+          applied.push(userPath);
+          continue;
+        }
+        if (entryShapeEqual(base, theirs)) {
+          skipped.push(userPath);
+          continue;
+        }
+
+        const conflict: ConflictEntry = {
+          path: userPath,
+          base: toPublicEntryShape(base),
+          ours: toPublicEntryShape(ours),
+          theirs: toPublicEntryShape(theirs),
+        };
+
+        if (strategy === "fail") {
+          conflicts.push(conflict);
+        } else if (strategy === "ours") {
+          conflicts.push(conflict);
+          skipped.push(userPath);
+        } else {
+          conflicts.push(conflict);
+          writes.push({ internalPath, shape: theirs });
+          writePathSet.add(internalPath);
+          applied.push(userPath);
+        }
+      }
+
+      if (strategy === "fail" && conflicts.length > 0) {
+        return { applied: [], conflicts, skipped: [] };
+      }
+
+      // Post-apply visible map (within scope) for parent expansion.
+      const post = new Map(oursMap);
+      for (const w of writes) {
+        if (w.shape === null) post.delete(w.internalPath);
+        else post.set(w.internalPath, w.shape);
+      }
+
+      // Parent-directory expansion for non-null file/symlink writes. The
+      // scope check above guarantees a visible directory at `internalScope`,
+      // so this walk always terminates: either we hit a visible directory in
+      // post (oursMap or a write we just queued), or we reach scope itself
+      // which is guaranteed visible.
+      const initialWrites = writes.slice();
+      for (const w of initialWrites) {
+        if (w.shape === null) continue;
+        if (w.shape.type !== "file" && w.shape.type !== "symlink") continue;
+        let p = parentPath(w.internalPath);
+        while (true) {
+          const v = post.get(p);
+          if (v?.type === "directory") break;
+          if (v) {
+            throw new FsError(
+              "ENOTDIR",
+              "merge: parent path is not a directory",
+              this.toUserPath(p),
+            );
+          }
+          if (p === "/") {
+            // Root must always exist after init(). If we ever reach here it
+            // means the workspace is corrupt.
+            throw new Error(
+              "merge: root directory not visible in destination",
+            );
+          }
+          const srcDir =
+            theirsMap.get(p) ?? oursMap.get(p) ?? baseMap.get(p);
+          if (!srcDir || srcDir.type !== "directory") {
+            throw new Error(
+              `merge: cannot create implicit parent directory '${this.toUserPath(p)}': source view has no directory at this path`,
+            );
+          }
+          if (!writePathSet.has(p)) {
+            writes.push({ internalPath: p, shape: srcDir });
+            writePathSet.add(p);
+            applied.push(this.toUserPath(p));
+          }
+          post.set(p, srcDir);
+          p = parentPath(p);
+        }
+      }
+
+      // Batch node-count validation: query the global visible count once,
+      // compute the net delta, and check `maxFiles` before any writes happen.
+      // Existing single-path writes still call `validateNodeCount()` on their
+      // own; merge sidesteps that loop because it knows the full apply set
+      // up-front.
+      if (writes.length > 0) {
+        const currentCount = await this.globalVisibleCount(tx, ourId);
+        let delta = 0;
+        for (const w of writes) {
+          const wasVisible = oursMap.has(w.internalPath);
+          const willBeVisible = w.shape !== null;
+          if (wasVisible && !willBeVisible) delta -= 1;
+          else if (!wasVisible && willBeVisible) delta += 1;
+        }
+        if (currentCount + delta > this.maxFiles) {
+          throw new Error(
+            `Node limit reached: ${this.maxFiles} nodes per workspace`,
+          );
+        }
+      }
+
+      applied.sort();
+      skipped.sort();
+
+      if (dryRun || writes.length === 0) {
+        return { applied, conflicts, skipped };
+      }
+
+      await this.lockVersions(tx, [ourId]);
+      writes.sort((a, b) =>
+        a.internalPath < b.internalPath ? -1
+        : a.internalPath > b.internalPath ? 1
+        : 0,
+      );
+      for (const w of writes) {
+        await this.writeEntryShape(tx, ourId, w.internalPath, w.shape);
+      }
+
+      return { applied, conflicts, skipped };
+    });
+  }
+
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
@@ -2636,6 +3025,25 @@ function blobHashEqual(
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+/**
+ * Convert an `InternalEntryShape` (with raw `Uint8Array` blob hash) into the
+ * public `EntryShape` (with hex-encoded blob hash). Used for `merge()` /
+ * `cherryPick()` / `revert()` conflict reports.
+ */
+function toPublicEntryShape(
+  s: InternalEntryShape | null,
+): EntryShape | null {
+  if (s === null) return null;
+  return {
+    type: s.type,
+    blobHash: s.blobHash ? Buffer.from(s.blobHash).toString("hex") : null,
+    symlinkTarget: s.symlinkTarget,
+    mode: s.mode,
+    size: s.sizeBytes,
+    mtime: s.mtime,
+  };
 }
 
 function mapDiffSide(
