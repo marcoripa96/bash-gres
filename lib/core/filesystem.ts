@@ -2940,6 +2940,329 @@ export class PgFileSystem {
     });
   }
 
+  /**
+   * Copy selected visible paths from `source` into the current version.
+   * Source-wins, two-way: there is no LCA, no conflict reporting; for each
+   * selected path either source's shape replaces destination's or — when the
+   * path exists in destination but not source — a tombstone is written.
+   *
+   * Each entry in `paths` is a user path. A directory match (in either side)
+   * pulls in the entire visible subtree. Equal paths are reported in
+   * `skipped`. `conflicts` is always empty.
+   *
+   * Implicit parent directories: when an applied non-null file or symlink
+   * lands under a path whose ancestors are not visible in the destination,
+   * those ancestors are copied from the source view (theirs preferred, then
+   * ours) and reported in `applied`.
+   */
+  async cherryPick(
+    source: string,
+    paths: string[],
+  ): Promise<MergeResult> {
+    if (!source || source.length === 0) {
+      throw new Error("cherryPick: source must be a non-empty version label");
+    }
+    if (source === this.versionLabel) {
+      throw new Error(
+        `cherryPick: source must differ from current version '${this.versionLabel}'`,
+      );
+    }
+    if (!paths || paths.length === 0) {
+      throw new Error("cherryPick: paths must be a non-empty array");
+    }
+
+    const pathFilters: string[] = [];
+    for (const p of paths) {
+      this.guardRead(p);
+      pathFilters.push(this.toInternalPath(normalizePath(p)));
+    }
+
+    return this.withWorkspace(async (tx) => {
+      const ourId = await this.getCurrentVersionId(tx);
+      const theirId = await this.requireVersionIdByLabel(tx, source);
+      const rootLtree = pathToLtree("/", this.workspaceId);
+
+      const oursMap = await this.fetchVisibleEntryMap(tx, ourId, rootLtree);
+      const theirsMap = await this.fetchVisibleEntryMap(tx, theirId, rootLtree);
+
+      // Candidate paths = union(ours, theirs) restricted to filter. Filter `f`
+      // matches `c` iff `c === f` or `c` is a strict descendant of `f`.
+      const candidatePaths = new Set<string>();
+      for (const p of oursMap.keys()) candidatePaths.add(p);
+      for (const p of theirsMap.keys()) candidatePaths.add(p);
+
+      const candidates = [...candidatePaths]
+        .filter((c) =>
+          pathFilters.some((f) =>
+            c === f ||
+            (f === "/" ? c.startsWith("/") : c.startsWith(f + "/")),
+          ),
+        )
+        .sort();
+
+      const applied: string[] = [];
+      const skipped: string[] = [];
+      const writes: Array<{
+        internalPath: string;
+        shape: InternalEntryShape | null;
+      }> = [];
+      const writePathSet = new Set<string>();
+
+      for (const internalPath of candidates) {
+        const ours = oursMap.get(internalPath) ?? null;
+        const theirs = theirsMap.get(internalPath) ?? null;
+        const userPath = this.toUserPath(internalPath);
+
+        if (entryShapeEqual(ours, theirs)) {
+          skipped.push(userPath);
+          continue;
+        }
+        // Source wins. `theirs === null` becomes a tombstone.
+        writes.push({ internalPath, shape: theirs });
+        writePathSet.add(internalPath);
+        applied.push(userPath);
+      }
+
+      this.expandParentDirectories(
+        writes,
+        writePathSet,
+        applied,
+        oursMap,
+        [theirsMap, oursMap],
+        "cherryPick",
+      );
+
+      await this.validateBatchNodeCount(tx, ourId, writes, oursMap);
+
+      applied.sort();
+      skipped.sort();
+
+      if (writes.length === 0) {
+        return { applied, conflicts: [], skipped };
+      }
+
+      await this.lockVersions(tx, [ourId]);
+      writes.sort((a, b) =>
+        a.internalPath < b.internalPath ? -1
+        : a.internalPath > b.internalPath ? 1
+        : 0,
+      );
+      for (const w of writes) {
+        await this.writeEntryShape(tx, ourId, w.internalPath, w.shape);
+      }
+
+      return { applied, conflicts: [], skipped };
+    });
+  }
+
+  /**
+   * Restore the current version's selected visible tree to match `target`.
+   * For every in-scope path:
+   *   - visible in target → write target's entry shape to current.
+   *   - visible only in current → write a tombstone.
+   * No LCA, no conflicts. Returns a `MergeResult` for observability;
+   * `conflicts` is always empty.
+   *
+   * `paths` and `pathScope` filter the operation as in `merge()`. `pathScope`
+   * does NOT need to be visible in destination — revert is the natural way to
+   * bring back a deleted subtree, so the scope is treated as a fetch boundary
+   * and parent expansion materializes parents from target as needed.
+   */
+  async revert(
+    target: string,
+    opts?: { paths?: string[]; pathScope?: string },
+  ): Promise<MergeResult> {
+    if (!target || target.length === 0) {
+      throw new Error("revert: target must be a non-empty version label");
+    }
+    if (target === this.versionLabel) {
+      throw new Error(
+        `revert: target must differ from current version '${this.versionLabel}'`,
+      );
+    }
+
+    const scopeUser = opts?.pathScope ? normalizePath(opts.pathScope) : "/";
+    this.guardRead(scopeUser);
+    const internalScope = this.toInternalPath(scopeUser);
+
+    const pathFilters: string[] = [];
+    if (opts?.paths && opts.paths.length > 0) {
+      for (const p of opts.paths) {
+        this.guardRead(p);
+        pathFilters.push(this.toInternalPath(normalizePath(p)));
+      }
+    }
+
+    return this.withWorkspace(async (tx) => {
+      const ourId = await this.getCurrentVersionId(tx);
+      const theirId = await this.requireVersionIdByLabel(tx, target);
+      const scopeLtree = pathToLtree(internalScope, this.workspaceId);
+
+      const oursMap = await this.fetchVisibleEntryMap(tx, ourId, scopeLtree);
+      const theirsMap = await this.fetchVisibleEntryMap(tx, theirId, scopeLtree);
+
+      const candidatePaths = new Set<string>();
+      for (const p of oursMap.keys()) candidatePaths.add(p);
+      for (const p of theirsMap.keys()) candidatePaths.add(p);
+
+      let candidates: string[];
+      if (pathFilters.length > 0) {
+        candidates = [...candidatePaths].filter((c) =>
+          pathFilters.some((f) =>
+            c === f ||
+            (f === "/" ? c.startsWith("/") : c.startsWith(f + "/")),
+          ),
+        );
+      } else {
+        candidates = [...candidatePaths];
+      }
+      candidates.sort();
+
+      const applied: string[] = [];
+      const skipped: string[] = [];
+      const writes: Array<{
+        internalPath: string;
+        shape: InternalEntryShape | null;
+      }> = [];
+      const writePathSet = new Set<string>();
+
+      for (const internalPath of candidates) {
+        const ours = oursMap.get(internalPath) ?? null;
+        const theirs = theirsMap.get(internalPath) ?? null;
+        const userPath = this.toUserPath(internalPath);
+
+        if (entryShapeEqual(ours, theirs)) {
+          skipped.push(userPath);
+          continue;
+        }
+        writes.push({ internalPath, shape: theirs });
+        writePathSet.add(internalPath);
+        applied.push(userPath);
+      }
+
+      this.expandParentDirectories(
+        writes,
+        writePathSet,
+        applied,
+        oursMap,
+        [theirsMap, oursMap],
+        "revert",
+      );
+
+      await this.validateBatchNodeCount(tx, ourId, writes, oursMap);
+
+      applied.sort();
+      skipped.sort();
+
+      if (writes.length === 0) {
+        return { applied, conflicts: [], skipped };
+      }
+
+      await this.lockVersions(tx, [ourId]);
+      writes.sort((a, b) =>
+        a.internalPath < b.internalPath ? -1
+        : a.internalPath > b.internalPath ? 1
+        : 0,
+      );
+      for (const w of writes) {
+        await this.writeEntryShape(tx, ourId, w.internalPath, w.shape);
+      }
+
+      return { applied, conflicts: [], skipped };
+    });
+  }
+
+  /**
+   * Walk parent paths up from each non-null file/symlink write. If a parent
+   * is missing in the post-apply view, copy it from the first source map that
+   * has a directory at that path (`sources` checked in order). Mutates
+   * `writes`, `writePathSet`, and `applied` in place. Used by `cherryPick()`
+   * and `revert()`; `merge()` inlines the same logic with a base map.
+   */
+  private expandParentDirectories(
+    writes: Array<{ internalPath: string; shape: InternalEntryShape | null }>,
+    writePathSet: Set<string>,
+    applied: string[],
+    oursMap: Map<string, InternalEntryShape>,
+    sources: Array<Map<string, InternalEntryShape>>,
+    op: string,
+  ): void {
+    const post = new Map(oursMap);
+    for (const w of writes) {
+      if (w.shape === null) post.delete(w.internalPath);
+      else post.set(w.internalPath, w.shape);
+    }
+    const initialWrites = writes.slice();
+    for (const w of initialWrites) {
+      if (w.shape === null) continue;
+      if (w.shape.type !== "file" && w.shape.type !== "symlink") continue;
+      let p = parentPath(w.internalPath);
+      while (true) {
+        const v = post.get(p);
+        if (v?.type === "directory") break;
+        if (v) {
+          throw new FsError(
+            "ENOTDIR",
+            `${op}: parent path is not a directory`,
+            this.toUserPath(p),
+          );
+        }
+        if (p === "/") {
+          throw new Error(
+            `${op}: root directory not visible in destination`,
+          );
+        }
+        let srcDir: InternalEntryShape | undefined;
+        for (const m of sources) {
+          const v2 = m.get(p);
+          if (v2 && v2.type === "directory") {
+            srcDir = v2;
+            break;
+          }
+        }
+        if (!srcDir) {
+          throw new Error(
+            `${op}: cannot create implicit parent directory '${this.toUserPath(p)}': source view has no directory at this path`,
+          );
+        }
+        if (!writePathSet.has(p)) {
+          writes.push({ internalPath: p, shape: srcDir });
+          writePathSet.add(p);
+          applied.push(this.toUserPath(p));
+        }
+        post.set(p, srcDir);
+        p = parentPath(p);
+      }
+    }
+  }
+
+  /**
+   * Batch node-count check for `cherryPick()` / `revert()`: queries the
+   * workspace's visible count once and compares it against `maxFiles` after
+   * applying the planned write delta. Throws before any write happens.
+   */
+  private async validateBatchNodeCount(
+    tx: SqlClient,
+    versionId: number,
+    writes: Array<{ internalPath: string; shape: InternalEntryShape | null }>,
+    oursMap: Map<string, InternalEntryShape>,
+  ): Promise<void> {
+    if (writes.length === 0) return;
+    const currentCount = await this.globalVisibleCount(tx, versionId);
+    let delta = 0;
+    for (const w of writes) {
+      const wasVisible = oursMap.has(w.internalPath);
+      const willBeVisible = w.shape !== null;
+      if (wasVisible && !willBeVisible) delta -= 1;
+      else if (!wasVisible && willBeVisible) delta += 1;
+    }
+    if (currentCount + delta > this.maxFiles) {
+      throw new Error(
+        `Node limit reached: ${this.maxFiles} nodes per workspace`,
+      );
+    }
+  }
+
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);

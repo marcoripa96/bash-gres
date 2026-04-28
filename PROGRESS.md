@@ -85,6 +85,9 @@ Notes: deferred items have unambiguous design but will be authored alongside the
 
 ## Phase 7 - `cherryPick()` & `revert()`
 
-- [ ] Implement `cherryPick(source, paths)` (source-wins two-way)
-- [ ] Implement `revert(target, opts)` (rollback restore)
-- [ ] Tests: file / directory / missing / parent expansion / equal-skip / empty-paths
+- [x] Implement `cherryPick(source, paths)` (source-wins two-way). No LCA, no conflict reporting; for each candidate path either source's shape replaces destination's, or — when the path exists in destination but not source — a tombstone is written. Equal paths go to `skipped`. `paths` is required (non-empty); each entry is a user path; a directory match in either side pulls in the visible subtree of both.
+- [x] Implement `revert(target, opts)` (rollback restore). Same two-way apply machinery; `paths` and `pathScope` filter as in `merge()`, but `pathScope` is treated as a fetch boundary rather than a hard "must be visible in destination" precondition — restoring a previously deleted subtree is a first-class use case. Returns `MergeResult` (with `conflicts: []`) for observability instead of `void`; resolves the corresponding open question in VERSIONING_PRIMITIVES.md.
+- [x] Factored shared apply machinery into private helpers used by both: `expandParentDirectories()` walks parents up from each non-null file/symlink write, copying missing dirs from the first source map that has a directory at that path (theirs preferred, then ours); `validateBatchNodeCount()` checks `maxFiles` once against the workspace's visible count plus a signed delta. `merge()` still inlines its own copy because it needs a base map in the lookup chain.
+- [x] Tests in `tests/cherrypick.test.ts` (14 cases × 3 adapters = 42): single-file copy / source-wins overwrite / directory selector pulls subtree / missing-source-tombstones / directory deletion subtree tombstones / implicit parent expansion / equal-skip / multiple-path selection / rootDir / empty-paths rejected / empty-source rejected / self-source rejected / unknown-source rejected / readonly rejects.
+- [x] Tests in `tests/revert.test.ts` (12 cases × 3 adapters = 36): modify-revert / delete-extra / restore-deleted / directory scope (modify+add+remove descendants, out-of-scope untouched) / parent expansion when restoring a deep file / whole-tree revert with no filter / equal-skip / rootDir / empty-target rejected / self-target rejected / unknown-target rejected / readonly rejects.
+- Full suite green: 801/801
