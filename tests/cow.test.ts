@@ -454,4 +454,281 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       expect(await v1.readFile("/will-delete.txt")).toBe("v1 recreated");
     });
   });
+
+  describe("detach()", () => {
+    interface ParentRow {
+      parent_version_id: number | null;
+    }
+    interface IdRow {
+      id: number;
+    }
+
+    async function getParentId(
+      workspaceId: string,
+      label: string,
+    ): Promise<number | null> {
+      const r = await client.query<ParentRow>(
+        `SELECT parent_version_id FROM fs_versions
+         WHERE workspace_id = $1 AND label = $2`,
+        [workspaceId, label],
+      );
+      const v = r.rows[0]?.parent_version_id;
+      return v == null ? null : Number(v);
+    }
+
+    async function getVersionId(
+      workspaceId: string,
+      label: string,
+    ): Promise<number> {
+      const r = await client.query<IdRow>(
+        `SELECT id FROM fs_versions WHERE workspace_id = $1 AND label = $2`,
+        [workspaceId, label],
+      );
+      return Number(r.rows[0]!.id);
+    }
+
+    async function ancestorIdsOf(
+      workspaceId: string,
+      descendantId: number,
+    ): Promise<number[]> {
+      const r = await client.query<{ ancestor_id: number }>(
+        `SELECT ancestor_id FROM version_ancestors
+         WHERE workspace_id = $1 AND descendant_id = $2
+         ORDER BY ancestor_id`,
+        [workspaceId, descendantId],
+      );
+      return r.rows.map((row) => Number(row.ancestor_id));
+    }
+
+    it("preserves the current version's visible contents byte-for-byte", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/a.txt", "AAA");
+      await v1.writeFile("/dir/b.txt", "BBB");
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/own.txt", "v2 only");
+      await v2.writeFile("/a.txt", "v2 overrides");
+      await v2.rm("/dir/b.txt");
+
+      // Capture pre-detach view.
+      const before = {
+        a: await v2.readFile("/a.txt"),
+        own: await v2.readFile("/own.txt"),
+        dirExists: await v2.exists("/dir"),
+        bExists: await v2.exists("/dir/b.txt"),
+      };
+      expect(before).toEqual({
+        a: "v2 overrides",
+        own: "v2 only",
+        dirExists: true,
+        bExists: false,
+      });
+
+      await v2.detach();
+
+      expect(await v2.readFile("/a.txt")).toBe("v2 overrides");
+      expect(await v2.readFile("/own.txt")).toBe("v2 only");
+      expect(await v2.exists("/dir")).toBe(true);
+      expect(await v2.exists("/dir/b.txt")).toBe(false);
+    });
+
+    it("preserves descendants' visible contents and the effect of a current-version tombstone", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/from-v1.txt", "v1 wrote this");
+      await v1.writeFile("/will-be-tombstoned.txt", "v1 wrote this too");
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/v2-only.txt", "v2 only");
+      // Tombstone a path that lives in v1. After detach we expect v3 to keep
+      // not seeing it, even though the tombstone row at v2 will be removed.
+      await v2.rm("/will-be-tombstoned.txt");
+
+      const v3 = await v2.fork("v3");
+      await v3.writeFile("/v3-only.txt", "v3 only");
+
+      // Pre-detach descendant view through v3.
+      expect(await v3.readFile("/from-v1.txt")).toBe("v1 wrote this");
+      expect(await v3.readFile("/v2-only.txt")).toBe("v2 only");
+      expect(await v3.readFile("/v3-only.txt")).toBe("v3 only");
+      expect(await v3.exists("/will-be-tombstoned.txt")).toBe(false);
+
+      await v2.detach();
+
+      // v3's view is byte-identical.
+      expect(await v3.readFile("/from-v1.txt")).toBe("v1 wrote this");
+      expect(await v3.readFile("/v2-only.txt")).toBe("v2 only");
+      expect(await v3.readFile("/v3-only.txt")).toBe("v3 only");
+      // The tombstone row at v2 is gone, but v3 still does not see the path:
+      // v3 no longer reaches v1 through v2 after detach.
+      expect(await v3.exists("/will-be-tombstoned.txt")).toBe(false);
+    });
+
+    it("clears parent_version_id on the current version and only on it", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      const v2 = await v1.fork("v2");
+      const v3 = await v2.fork("v3");
+
+      expect(await getParentId(WS, "v2")).toBe(await getVersionId(WS, "v1"));
+      expect(await getParentId(WS, "v3")).toBe(await getVersionId(WS, "v2"));
+
+      await v2.detach();
+
+      expect(await getParentId(WS, "v2")).toBeNull();
+      // Direct child v3 still points at v2.
+      expect(await getParentId(WS, "v3")).toBe(await getVersionId(WS, "v2"));
+      // v1 untouched.
+      expect(await getParentId(WS, "v1")).toBeNull();
+    });
+
+    it("removes closure rows from the subtree to former outside ancestors and keeps inside rows", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      const v2 = await v1.fork("v2");
+      await v2.fork("v3");
+
+      const v1Id = await getVersionId(WS, "v1");
+      const v2Id = await getVersionId(WS, "v2");
+      const v3Id = await getVersionId(WS, "v3");
+
+      // Pre-detach: v3's ancestors are { v3, v2, v1 }; v2's are { v2, v1 }.
+      expect(await ancestorIdsOf(WS, v3Id)).toEqual([v1Id, v2Id, v3Id].sort((a, b) => a - b));
+      expect(await ancestorIdsOf(WS, v2Id)).toEqual([v1Id, v2Id].sort((a, b) => a - b));
+
+      await v2.detach();
+
+      // Inside-subtree rows kept, outside-subtree rows removed.
+      expect(await ancestorIdsOf(WS, v3Id)).toEqual([v2Id, v3Id].sort((a, b) => a - b));
+      expect(await ancestorIdsOf(WS, v2Id)).toEqual([v2Id]);
+      // v1's own self-row is unaffected.
+      expect(await ancestorIdsOf(WS, v1Id)).toEqual([v1Id]);
+    });
+
+    it("listVersions is unchanged across detach", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      const v2 = await v1.fork("v2");
+      await v2.fork("v3");
+
+      const before = (await v1.listVersions()).sort();
+      await v2.detach();
+      const after = (await v1.listVersions()).sort();
+      expect(after).toEqual(before);
+    });
+
+    it("makes the former ancestor deletable when no other child references it", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/inherited.txt", "from v1");
+
+      const v2 = await v1.fork("v2");
+      // While v2 is still attached, v1 cannot be deleted (it has a child).
+      await expect(v2.deleteVersion("v1")).rejects.toThrow(/descendants/);
+
+      await v2.detach();
+
+      // Now v2 is detached and v1 has no children left, so v1 is deletable.
+      await v2.deleteVersion("v1");
+      expect((await v2.listVersions()).sort()).toEqual(["v2"]);
+
+      // The materialized content survives.
+      expect(await v2.readFile("/inherited.txt")).toBe("from v1");
+    });
+
+    it("keeps blob rows referenced by current visible files", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/keep-me.txt", "blob payload");
+
+      const v2 = await v1.fork("v2");
+      await v2.detach();
+      // Materialization references the same blob, so we must still find it.
+      expect(await v2.readFile("/keep-me.txt")).toBe("blob payload");
+      // After dropping v1, the blob is still referenced by v2 and stays.
+      await v2.deleteVersion("v1");
+      expect(await countBlobs(client, WS)).toBeGreaterThan(0);
+      expect(await v2.readFile("/keep-me.txt")).toBe("blob payload");
+    });
+
+    it("blocks live overlay: parent writes after detach do not bleed into the detached version", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/shared.txt", "before fork");
+
+      const v2 = await v1.fork("v2");
+      await v2.detach();
+
+      // Parent writes on v1 must no longer be visible to v2.
+      await v1.writeFile("/added-after-detach.txt", "parent wrote this later");
+      expect(await v2.exists("/added-after-detach.txt")).toBe(false);
+
+      // Parent edits to a path v2 inherited at fork time also stop bleeding through.
+      await v1.writeFile("/shared.txt", "edited after detach");
+      expect(await v2.readFile("/shared.txt")).toBe("before fork");
+    });
+
+    it("is idempotent on a root version", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/file.txt", "hi");
+
+      // v1 already has parent_version_id=NULL; detach should be a safe no-op.
+      await v1.detach();
+      expect(await getParentId(WS, "v1")).toBeNull();
+      expect(await v1.readFile("/file.txt")).toBe("hi");
+
+      // Run twice to confirm idempotency.
+      await v1.detach();
+      expect(await v1.readFile("/file.txt")).toBe("hi");
+    });
+
+    it("detaching the middle of a chain materializes inherited content and severs only that link", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/a.txt", "from v1");
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/b.txt", "from v2");
+      const v3 = await v2.fork("v3");
+      await v3.writeFile("/c.txt", "from v3");
+
+      await v2.detach();
+
+      // v2 sees what it saw before, with /a.txt now materialized at v2.
+      expect(await v2.readFile("/a.txt")).toBe("from v1");
+      expect(await v2.readFile("/b.txt")).toBe("from v2");
+
+      // v3's view is identical, all three paths still resolve.
+      expect(await v3.readFile("/a.txt")).toBe("from v1");
+      expect(await v3.readFile("/b.txt")).toBe("from v2");
+      expect(await v3.readFile("/c.txt")).toBe("from v3");
+
+      // v1 stays untouched.
+      expect(await v1.readFile("/a.txt")).toBe("from v1");
+    });
+
+    it("rolls back inside a transaction that throws", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/a.txt", "from v1");
+
+      const v2 = await v1.fork("v2");
+      const v2IdBefore = await getVersionId(WS, "v2");
+      const parentBefore = await getParentId(WS, "v2");
+      const ancestorsBefore = await ancestorIdsOf(WS, v2IdBefore);
+
+      await expect(
+        v2.transaction(async (tx) => {
+          await tx.detach();
+          // Detach committed nothing yet; throw to roll back.
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow(/boom/);
+
+      // Graph fully restored.
+      expect(await getParentId(WS, "v2")).toBe(parentBefore);
+      expect(await ancestorIdsOf(WS, v2IdBefore)).toEqual(ancestorsBefore);
+    });
+  });
 });

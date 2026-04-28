@@ -52,8 +52,11 @@ Notes: deferred items have unambiguous design but will be authored alongside the
 
 ## Phase 4 - `detach()`
 
-- [ ] Implement subtree-safe `detach()` (materialize inherited entries, rewrite closure rows, clear `parent_version_id`, drop redundant tombstones)
-- [ ] Tests: identical visible contents before/after, descendant views unchanged, `parent_version_id` becomes NULL, former ancestors deletable, idempotent on root
+- [x] Implement subtree-safe `detach()` (materialize inherited entries, rewrite closure rows, clear `parent_version_id`, drop redundant tombstones). One transaction; locks the whole subtree (`SELECT FOR UPDATE` on `fs_versions` + advisory locks via the shared `lockVersions()` helper) before any writes.
+- [x] Materialization uses a `DISTINCT ON (path)` over `fs_entries` joined to `version_ancestors` ordered by `depth ASC`; rows owned by `V` itself and rows whose nearest hit is a tombstone are filtered out before insert (`ON CONFLICT DO NOTHING`).
+- [x] Closure rewrite: `DELETE FROM version_ancestors WHERE descendant_id IN subtree AND ancestor_id NOT IN subtree` — preserves self rows and within-subtree edges, removes only links pointing outside. Once `V` has no parent, tombstones at `V` cannot mask anything anymore, so we drop them.
+- [x] Tests in `tests/cow.test.ts > detach()` (11 cases × 3 adapters): preserves V's view, preserves descendant view including a current-version tombstone's effect, clears only V's `parent_version_id`, removes only outside-subtree closure rows (keeps inside ones), `listVersions()` unchanged, former ancestors become deletable, blob rows survive ancestor deletion, live overlay severed (parent writes after detach do NOT bleed into V), idempotent on root, mid-chain detach materializes correctly, transaction rollback fully restores the graph
+- Full suite green: 630/630
 
 ## Phase 5 - `renameVersion()` & `promoteTo()`
 
