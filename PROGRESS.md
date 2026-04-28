@@ -44,9 +44,11 @@ Notes: deferred items have unambiguous design but will be authored alongside the
 
 ## Phase 3 - `diff()` / `diffStream()`
 
-- [ ] Implement `diff()` with FULL OUTER JOIN over visible CTEs
-- [ ] Implement `diffStream()` with keyset pagination
-- [ ] Tests: added / removed / modified / type-changed / mode-only / symlink target / scope / rootDir / streamed pagination
+- [x] Implement `diff()` with FULL OUTER JOIN over two `DISTINCT ON` visible-entry CTEs (tombstones filtered out at the CTE level)
+- [x] Implement `diffStream()` with keyset pagination by encoded ltree path; per-batch transaction; `batchSize` clamped to [1, 5000]
+- [x] Direction documented: `before` is current, `after` is `other`. Equality on `node_type`, `blob_hash`, `mode`, `symlink_target`. `mtime`/`size_bytes` ignored
+- [x] Tests in `tests/diff.test.ts` (48 cases × 3 adapters): added / removed / modified / type-changed / mode-only / symlink target / mtime ignored / sibling versions / subtree scope / single-file scope / rootDir / unknown version error / streaming round-trip / clamped batchSize
+- Full suite green: 597/597
 
 ## Phase 4 - `detach()`
 

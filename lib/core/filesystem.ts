@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from "crypto";
 import type {
   SqlClient,
+  SqlParam,
   PgFileSystemOptions,
   FsStat,
   DirentEntry,
@@ -13,6 +14,9 @@ import type {
   ReadFileLinesOptions,
   ReadFileLinesResult,
   SearchResult,
+  EntryShape,
+  NodeType,
+  VersionDiffEntry,
 } from "./types.js";
 import { FsError, SqlError } from "./types.js";
 import { readonlySqlClient } from "./readonly.js";
@@ -90,6 +94,24 @@ const DEFAULT_MAX_CP_NODES = 10_000;
 
 const DEFAULT_VERSION = "main";
 const TOMBSTONE = "tombstone";
+const DIFF_DEFAULT_BATCH_SIZE = 500;
+const DIFF_MAX_BATCH_SIZE = 5000;
+
+interface DiffRow {
+  path: string;
+  o_type: string | null;
+  o_hash: Uint8Array | null;
+  o_link: string | null;
+  o_mode: number | null;
+  o_size: number | string | null;
+  o_mtime: Date | null;
+  t_type: string | null;
+  t_hash: Uint8Array | null;
+  t_link: string | null;
+  t_mode: number | null;
+  t_size: number | string | null;
+  t_mtime: Date | null;
+}
 
 // -- PgFileSystem -----------------------------------------------------------
 
@@ -1892,6 +1914,195 @@ export class PgFileSystem {
     return facade;
   }
 
+  /**
+   * Compare this version's visible tree to `other`'s visible tree at the same
+   * workspace, and return the path-level differences.
+   *
+   * `before` is this version's entry; `after` is `other`'s. Reading "what
+   * changes if current became `other`?" gives the natural interpretation.
+   * Equality is over `node_type`, `blob_hash`, `mode`, and `symlink_target`;
+   * `mtime`, `size_bytes`, and `created_at` are not part of the comparison.
+   *
+   * If `opts.path` is provided, the comparison is scoped to that user path
+   * and its descendants. Tombstones in either version present as `null` for
+   * that side.
+   */
+  async diff(
+    other: string,
+    opts?: { path?: string },
+  ): Promise<VersionDiffEntry[]> {
+    if (other.length === 0) {
+      throw new Error("diff: other must be a non-empty version label");
+    }
+    const scopeUser = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopeUser);
+    const internalScope = this.toInternalPath(scopeUser);
+
+    return this.withWorkspace(async (tx) => {
+      const ourId = await this.getCurrentVersionId(tx);
+      const theirId = await this.requireVersionIdByLabel(tx, other);
+      const scopeLtree = pathToLtree(internalScope, this.workspaceId);
+      const { entries } = await this.fetchDiff(tx, ourId, theirId, scopeLtree, null);
+      return entries;
+    });
+  }
+
+  /**
+   * Streaming diff with keyset pagination by encoded ltree path. Each batch is
+   * fetched in its own short transaction; the stream is not snapshot-isolated
+   * across the whole iteration. Use `diff()` for an in-memory snapshot.
+   */
+  async *diffStream(
+    other: string,
+    opts?: { path?: string; batchSize?: number },
+  ): AsyncIterable<VersionDiffEntry> {
+    if (other.length === 0) {
+      throw new Error("diffStream: other must be a non-empty version label");
+    }
+    const scopeUser = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopeUser);
+    const internalScope = this.toInternalPath(scopeUser);
+    const requested = opts?.batchSize ?? DIFF_DEFAULT_BATCH_SIZE;
+    const batchSize = Math.max(1, Math.min(requested, DIFF_MAX_BATCH_SIZE));
+
+    let cursor: string | null = null;
+    while (true) {
+      const { entries, lastLtree } = await this.withWorkspace(async (tx) => {
+        const ourId = await this.getCurrentVersionId(tx);
+        const theirId = await this.requireVersionIdByLabel(tx, other);
+        const scopeLtree = pathToLtree(internalScope, this.workspaceId);
+        return this.fetchDiff(tx, ourId, theirId, scopeLtree, {
+          cursor,
+          limit: batchSize,
+        });
+      });
+      for (const entry of entries) yield entry;
+      if (entries.length < batchSize) return;
+      cursor = lastLtree;
+    }
+  }
+
+  /**
+   * Run the actual diff SQL: two visible-entry CTEs, FULL OUTER JOIN by path,
+   * filter out equal rows. Returns rows already mapped to `VersionDiffEntry`
+   * plus the encoded-ltree path of the last row, suitable as the next
+   * keyset-pagination cursor.
+   */
+  private async fetchDiff(
+    tx: SqlClient,
+    ourId: number,
+    theirId: number,
+    scopeLtree: string,
+    page: { cursor: string | null; limit: number } | null,
+  ): Promise<{ entries: VersionDiffEntry[]; lastLtree: string | null }> {
+    const params: SqlParam[] = [this.workspaceId, ourId, theirId, scopeLtree];
+    let cursorClause = "";
+    let limitClause = "";
+    if (page) {
+      if (page.cursor !== null) {
+        params.push(page.cursor);
+        cursorClause = `AND path > $${params.length}::ltree`;
+      }
+      params.push(page.limit);
+      limitClause = `LIMIT $${params.length}`;
+    }
+    const sql = `
+      WITH ours_raw AS (
+        SELECT DISTINCT ON (e.path)
+          e.path,
+          e.node_type,
+          e.blob_hash,
+          e.symlink_target,
+          e.mode,
+          e.size_bytes,
+          e.mtime
+        FROM fs_entries e
+        JOIN version_ancestors a
+          ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+        WHERE e.workspace_id = $1
+          AND a.descendant_id = $2
+          AND e.path <@ $4::ltree
+        ORDER BY e.path, a.depth ASC
+      ),
+      ours AS (SELECT * FROM ours_raw WHERE node_type != 'tombstone'),
+      theirs_raw AS (
+        SELECT DISTINCT ON (e.path)
+          e.path,
+          e.node_type,
+          e.blob_hash,
+          e.symlink_target,
+          e.mode,
+          e.size_bytes,
+          e.mtime
+        FROM fs_entries e
+        JOIN version_ancestors a
+          ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+        WHERE e.workspace_id = $1
+          AND a.descendant_id = $3
+          AND e.path <@ $4::ltree
+        ORDER BY e.path, a.depth ASC
+      ),
+      theirs AS (SELECT * FROM theirs_raw WHERE node_type != 'tombstone')
+      SELECT
+        path::text AS path,
+        ours.node_type AS o_type,
+        ours.blob_hash AS o_hash,
+        ours.symlink_target AS o_link,
+        ours.mode AS o_mode,
+        ours.size_bytes AS o_size,
+        ours.mtime AS o_mtime,
+        theirs.node_type AS t_type,
+        theirs.blob_hash AS t_hash,
+        theirs.symlink_target AS t_link,
+        theirs.mode AS t_mode,
+        theirs.size_bytes AS t_size,
+        theirs.mtime AS t_mtime
+      FROM ours
+      FULL OUTER JOIN theirs USING (path)
+      WHERE (
+        ours.node_type IS NULL
+        OR theirs.node_type IS NULL
+        OR ours.node_type != theirs.node_type
+        OR ours.mode != theirs.mode
+        OR ours.symlink_target IS DISTINCT FROM theirs.symlink_target
+        OR ours.blob_hash IS DISTINCT FROM theirs.blob_hash
+      )
+      ${cursorClause}
+      ORDER BY path
+      ${limitClause}
+    `;
+
+    const result = await tx.query<DiffRow>(sql, params);
+    const entries: VersionDiffEntry[] = [];
+    for (const row of result.rows) {
+      const before = mapDiffSide(
+        row.o_type,
+        row.o_hash,
+        row.o_link,
+        row.o_mode,
+        row.o_size,
+        row.o_mtime,
+      );
+      const after = mapDiffSide(
+        row.t_type,
+        row.t_hash,
+        row.t_link,
+        row.t_mode,
+        row.t_size,
+        row.t_mtime,
+      );
+      entries.push({
+        path: this.toUserPath(ltreeToPath(row.path)),
+        change: classifyDiffChange(before, after),
+        before,
+        after,
+      });
+    }
+    const lastLtree =
+      result.rows.length > 0 ? result.rows[result.rows.length - 1]!.path : null;
+    return { entries, lastLtree };
+  }
+
   async fork(newVersion: string): Promise<PgFileSystem> {
     if (!newVersion || newVersion.length === 0) {
       throw new Error("fork: newVersion must be a non-empty string");
@@ -2089,6 +2300,35 @@ function blobHashEqual(
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function mapDiffSide(
+  type: string | null,
+  hash: Uint8Array | null,
+  symlinkTarget: string | null,
+  mode: number | null,
+  size: number | string | null,
+  mtime: Date | null,
+): EntryShape | null {
+  if (type === null) return null;
+  return {
+    type: type as NodeType,
+    blobHash: hash ? Buffer.from(hash).toString("hex") : null,
+    symlinkTarget,
+    mode: mode ?? 0,
+    size: size === null ? 0 : Number(size),
+    mtime: mtime ?? new Date(0),
+  };
+}
+
+function classifyDiffChange(
+  before: EntryShape | null,
+  after: EntryShape | null,
+): "added" | "removed" | "modified" | "type-changed" {
+  if (before === null) return "added";
+  if (after === null) return "removed";
+  if (before.type !== after.type) return "type-changed";
+  return "modified";
 }
 
 // path-encoding's `encodeLabel` is not exported here; mirror the encoding for a single basename.
