@@ -29,6 +29,8 @@ export default function ConfigurationPage() {
   maxReadSize: 5 * 1024 * 1024,       // max read size (default: unlimited)
   maxFiles: 10_000,                    // max files per workspace (default: 10,000)
   maxDepth: 50,                        // max path depth (default: 50)
+  maxSymlinkDepth: 16,                 // max symlink indirection (default: 16)
+  maxCpNodes: 10_000,                  // max nodes per cp -r (default: 10,000)
   statementTimeoutMs: 5000,            // query timeout in ms (default: 5000)
 
   // Sandbox
@@ -103,6 +105,18 @@ export default function ConfigurationPage() {
                 <td className="py-2">Maximum directory nesting depth</td>
               </tr>
               <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">maxSymlinkDepth</td>
+                <td className="py-2 pr-4 font-mono">number</td>
+                <td className="py-2 pr-4 font-mono">16</td>
+                <td className="py-2">Maximum levels of symlink indirection before <code className="font-mono">ELOOP</code></td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">maxCpNodes</td>
+                <td className="py-2 pr-4 font-mono">number</td>
+                <td className="py-2 pr-4 font-mono">10,000</td>
+                <td className="py-2">Maximum nodes a single recursive <code className="font-mono">cp</code> may traverse</td>
+              </tr>
+              <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">statementTimeoutMs</td>
                 <td className="py-2 pr-4 font-mono">number</td>
                 <td className="py-2 pr-4 font-mono">5000</td>
@@ -154,6 +168,8 @@ const fs = new PgFileSystem({
   maxReadSize: 512 * 1024,        // 512 KB max read
   maxFiles: 1000,                 // 1,000 files per workspace
   maxDepth: 20,                   // 20 levels deep
+  maxSymlinkDepth: 8,             // 8 levels of symlink indirection
+  maxCpNodes: 1000,               // 1,000 nodes per recursive cp
   statementTimeoutMs: 2000,       // 2s query timeout
 })`}
         />
