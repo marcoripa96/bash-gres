@@ -398,4 +398,60 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       expect(labels.sort()).toEqual(["v1", "v2", "v3"]);
     });
   });
+
+  describe("live ancestor overlay (fork is not a snapshot)", () => {
+    it("a parent write after fork is visible to the child for unshadowed paths", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/shared.txt", "before fork");
+
+      const v2 = await v1.fork("v2");
+      // Child sees the inherited row.
+      expect(await v2.readFile("/shared.txt")).toBe("before fork");
+
+      // Parent writes to a NEW path the child has not seen yet.
+      await v1.writeFile("/added-after-fork.txt", "from parent");
+
+      // Live overlay: the new parent path is visible to the child because the
+      // child has no row (or tombstone) at this path that would shadow the parent.
+      expect(await v2.exists("/added-after-fork.txt")).toBe(true);
+      expect(await v2.readFile("/added-after-fork.txt")).toBe("from parent");
+
+      // Parent edits an existing inherited path. The child also sees that update,
+      // because the child still has no row at that path.
+      await v1.writeFile("/shared.txt", "edited after fork");
+      expect(await v2.readFile("/shared.txt")).toBe("edited after fork");
+    });
+
+    it("once the child writes a path, later parent writes do not change the child's view of it", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/config.txt", "v1 original");
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/config.txt", "v2 owns this");
+
+      await v1.writeFile("/config.txt", "v1 changed again");
+
+      // Child has shadowed the path; parent writes can't bleed through.
+      expect(await v2.readFile("/config.txt")).toBe("v2 owns this");
+      // Parent reflects its own latest write.
+      expect(await v1.readFile("/config.txt")).toBe("v1 changed again");
+    });
+
+    it("a tombstone in the child shields it from later parent writes at that path", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/will-delete.txt", "v1");
+
+      const v2 = await v1.fork("v2");
+      await v2.rm("/will-delete.txt");
+      expect(await v2.exists("/will-delete.txt")).toBe(false);
+
+      // Parent re-creates the path. Child's tombstone keeps it hidden.
+      await v1.writeFile("/will-delete.txt", "v1 recreated");
+      expect(await v2.exists("/will-delete.txt")).toBe(false);
+      expect(await v1.readFile("/will-delete.txt")).toBe("v1 recreated");
+    });
+  });
 });

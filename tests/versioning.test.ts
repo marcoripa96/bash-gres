@@ -110,7 +110,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem versioning [%s]", (_name, factory) =>
   });
 
   describe("fork", () => {
-    it("copies every file and directory into a new version", async () => {
+    it("makes every file and directory visible in the forked version through ancestor overlay", async () => {
       const v1 = new PgFileSystem({
         db: client,
         workspaceId: "version-workspace",

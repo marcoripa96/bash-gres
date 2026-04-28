@@ -102,13 +102,15 @@ const tree = await fs.walk("/docs")
 
 ## Versioning
 
-Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are fully isolated, so the same path can hold different contents. Fork copies every row into a new version; the fork diverges from the source on the next write.
+Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are fully isolated, so the same path can hold different contents. Fork is O(1): it links the new version to its parent through a closure table without copying any entry rows. Reads walk that closure to the nearest ancestor that has a row at the requested path.
+
+This is a **live ancestor overlay**, not a historical snapshot. A write to a parent version after a child has been forked can still affect the child's visible view at any path the child has not shadowed. Once the child writes (or deletes) a path, that path is shielded from later parent writes. To freeze a checkpoint independent of its parents, fork and then `detach()`.
 
 ```ts
 const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
 await v1.writeFile("/config.json", '{"env":"staging"}')
 
-const v2 = await v1.fork("v2")                 // copy v1 -> v2
+const v2 = await v1.fork("v2")                 // O(1) link, no row copy
 await v2.writeFile("/config.json", '{"env":"prod"}')
 
 await v1.readFile("/config.json") // '{"env":"staging"}' (untouched)
