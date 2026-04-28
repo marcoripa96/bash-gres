@@ -4,11 +4,13 @@ export interface MigrationOptions {
   enableVectorSearch?: boolean;
 }
 
+const RLS_TABLES = ["fs_versions", "version_ancestors", "fs_entries", "fs_blobs"];
+
 /**
  * Returns SQL for a custom Drizzle migration covering what `createSchema()`
  * cannot express: extensions and RLS policies.
  *
- * The table and indexes are handled by the Drizzle schema (`createSchema()`),
+ * The tables and indexes are handled by the Drizzle schema (`createSchema()`),
  * so `drizzle-kit generate` picks those up automatically. This function
  * produces the SQL for everything else.
  *
@@ -39,20 +41,22 @@ export function generateMigrationSQL(options: MigrationOptions = {}): string {
   }
 
   if (enableRLS) {
-    parts.push(`
-ALTER TABLE fs_nodes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE fs_nodes FORCE ROW LEVEL SECURITY;
+    for (const table of RLS_TABLES) {
+      parts.push(`
+ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
 
 DO $$ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE tablename = 'fs_nodes' AND policyname = 'workspace_isolation'
+        WHERE tablename = '${table}' AND policyname = 'workspace_isolation'
     ) THEN
-        CREATE POLICY workspace_isolation ON fs_nodes FOR ALL
+        CREATE POLICY workspace_isolation ON ${table} FOR ALL
             USING (workspace_id = current_setting('app.workspace_id', true))
             WITH CHECK (workspace_id = current_setting('app.workspace_id', true));
     END IF;
 END $$;`);
+    }
   }
 
   return parts.join("\n");

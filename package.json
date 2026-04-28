@@ -34,6 +34,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "bench": "tsc -p tsconfig.bench.json && node dist-bench/bench/perf.js",
     "prepublishOnly": "tsc"
   },
   "keywords": [

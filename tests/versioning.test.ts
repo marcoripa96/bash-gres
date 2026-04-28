@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { TEST_ADAPTERS } from "./helpers.js";
+import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
@@ -20,10 +20,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem versioning [%s]", (_name, factory) =>
   });
 
   beforeEach(async () => {
-    await client.query(
-      "DELETE FROM fs_nodes WHERE workspace_id = $1",
-      ["version-workspace"],
-    );
+    await resetWorkspace(client, "version-workspace");
   });
 
   describe("default version", () => {

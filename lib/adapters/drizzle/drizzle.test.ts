@@ -29,7 +29,10 @@ describe("drizzle adapter", () => {
   });
 
   beforeEach(async () => {
-    await sql`DELETE FROM fs_nodes WHERE workspace_id = ${WORKSPACE_ID}`;
+    await sql`DELETE FROM fs_entries WHERE workspace_id = ${WORKSPACE_ID}`;
+    await sql`DELETE FROM version_ancestors WHERE workspace_id = ${WORKSPACE_ID}`;
+    await sql`DELETE FROM fs_versions WHERE workspace_id = ${WORKSPACE_ID}`;
+    await sql`DELETE FROM fs_blobs WHERE workspace_id = ${WORKSPACE_ID}`;
   });
 
   it("initializes PgFileSystem with drizzle client", async () => {

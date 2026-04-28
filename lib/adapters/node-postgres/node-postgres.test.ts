@@ -27,9 +27,10 @@ describe("node-postgres adapter", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
-      WORKSPACE_ID,
-    ]);
+    await pool.query("DELETE FROM fs_entries WHERE workspace_id = $1", [WORKSPACE_ID]);
+    await pool.query("DELETE FROM version_ancestors WHERE workspace_id = $1", [WORKSPACE_ID]);
+    await pool.query("DELETE FROM fs_versions WHERE workspace_id = $1", [WORKSPACE_ID]);
+    await pool.query("DELETE FROM fs_blobs WHERE workspace_id = $1", [WORKSPACE_ID]);
   });
 
   it("initializes PgFileSystem with node-postgres client", async () => {

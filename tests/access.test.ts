@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { TEST_ADAPTERS } from "./helpers.js";
+import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { Bash } from "just-bash";
 import { PgFileSystem } from "../lib/core/filesystem.js";
@@ -43,7 +43,7 @@ describe.each(TEST_ADAPTERS)("rootDir [%s]", (_name, factory) => {
     let adminFs: PgFileSystem;
 
     beforeEach(async () => {
-      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      await resetWorkspace(client, WS_ROOT);
       adminFs = new PgFileSystem({ db: client, workspaceId: WS_ROOT });
       await adminFs.init();
 
@@ -157,7 +157,7 @@ describe.each(TEST_ADAPTERS)("rootDir [%s]", (_name, factory) => {
     let adminFs: PgFileSystem;
 
     beforeEach(async () => {
-      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      await resetWorkspace(client, WS_ROOT);
       adminFs = new PgFileSystem({ db: client, workspaceId: WS_ROOT });
       await adminFs.init();
       // Create /secret outside jail
@@ -194,7 +194,7 @@ describe.each(TEST_ADAPTERS)("rootDir [%s]", (_name, factory) => {
     let fs: PgFileSystem;
 
     beforeEach(async () => {
-      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      await resetWorkspace(client, WS_ROOT);
       fs = new PgFileSystem({ db: client, workspaceId: WS_ROOT });
       await fs.init();
     });
@@ -212,7 +212,7 @@ describe.each(TEST_ADAPTERS)("rootDir [%s]", (_name, factory) => {
     let bash: Bash;
 
     beforeEach(async () => {
-      await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_ROOT]);
+      await resetWorkspace(client, WS_ROOT);
       fs = new PgFileSystem({ db: client, workspaceId: WS_ROOT, rootDir: "/jail" });
       await fs.init();
       bash = new Bash({ fs, cwd: "/" });
@@ -263,7 +263,7 @@ describe.each(TEST_ADAPTERS)("edge cases [%s]", (_name, factory) => {
   });
 
   beforeEach(async () => {
-    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [WS_EDGE]);
+    await resetWorkspace(client, WS_EDGE);
   });
 
   it("rootDir that does not yet exist is created by init", async () => {

@@ -1,100 +1,111 @@
 import type { SqlClient, SetupOptions } from "./types.js";
 
 const TABLE_DDL = `
-CREATE TABLE IF NOT EXISTS fs_nodes (
-    id              bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    workspace_id      text NOT NULL CHECK (length(workspace_id) > 0),
-    version         text NOT NULL DEFAULT 'main' CHECK (length(version) > 0),
-    parent_id       bigint REFERENCES fs_nodes(id) ON DELETE RESTRICT,
-    name            text NOT NULL CHECK (length(name) <= 255),
-    node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink')),
+CREATE TABLE IF NOT EXISTS fs_versions (
+    id                 bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    workspace_id       text NOT NULL CHECK (length(workspace_id) > 0),
+    label              text NOT NULL CHECK (length(label) > 0),
+    parent_version_id  bigint REFERENCES fs_versions(id) ON DELETE RESTRICT,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT unique_workspace_version_label UNIQUE (workspace_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS version_ancestors (
+    workspace_id   text NOT NULL,
+    descendant_id  bigint NOT NULL,
+    ancestor_id    bigint NOT NULL,
+    depth          int NOT NULL CHECK (depth >= 0),
+    PRIMARY KEY (workspace_id, descendant_id, ancestor_id)
+);
+
+CREATE TABLE IF NOT EXISTS fs_blobs (
+    workspace_id  text NOT NULL CHECK (length(workspace_id) > 0),
+    hash          bytea NOT NULL,
+    content       text,
+    binary_data   bytea,
+    size_bytes    bigint NOT NULL DEFAULT 0,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, hash)
+);
+
+CREATE TABLE IF NOT EXISTS fs_entries (
+    workspace_id    text NOT NULL CHECK (length(workspace_id) > 0),
+    version_id      bigint NOT NULL,
     path            ltree NOT NULL,
-    content         text,
-    binary_data     bytea,
+    blob_hash       bytea,
+    node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink', 'tombstone')),
     symlink_target  text CHECK (symlink_target IS NULL OR length(symlink_target) <= 4096),
     mode            int NOT NULL DEFAULT 420 CHECK (mode >= 0 AND mode <= 4095),
     size_bytes      bigint NOT NULL DEFAULT 0,
     mtime           timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_workspace_version_path UNIQUE (workspace_id, version, path)
-);
-`;
-
-const MIGRATE_DDL = `
-DO $$ BEGIN
-  ALTER TABLE fs_nodes ADD COLUMN version text NOT NULL DEFAULT 'main' CHECK (length(version) > 0);
-EXCEPTION WHEN duplicate_column THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  IF EXISTS (
-      SELECT 1 FROM pg_constraint
-      WHERE conname = 'unique_workspace_path' AND conrelid = 'fs_nodes'::regclass
-  ) THEN
-      ALTER TABLE fs_nodes DROP CONSTRAINT unique_workspace_path;
-  END IF;
-  IF NOT EXISTS (
-      SELECT 1 FROM pg_constraint
-      WHERE conname = 'unique_workspace_version_path' AND conrelid = 'fs_nodes'::regclass
-  ) THEN
-      ALTER TABLE fs_nodes ADD CONSTRAINT unique_workspace_version_path
-          UNIQUE (workspace_id, version, path);
-  END IF;
-END $$;
+    PRIMARY KEY (workspace_id, version_id, path)
+) WITH (fillfactor = 100);
 `;
 
 const INDEXES_DDL = `
-CREATE INDEX IF NOT EXISTS idx_fs_path_gist
-  ON fs_nodes USING GIST (path gist_ltree_ops(siglen=124));
+-- Visibility lookup: per-workspace, per-path, ordered by version
+CREATE INDEX IF NOT EXISTS idx_fs_entries_path_version
+  ON fs_entries (workspace_id, path, version_id);
 
-CREATE INDEX IF NOT EXISTS idx_fs_workspace_parent
-  ON fs_nodes (workspace_id, parent_id);
+-- ltree subtree scans (directory listing, walk, glob)
+CREATE INDEX IF NOT EXISTS idx_fs_entries_path_gist
+  ON fs_entries USING GIST (path gist_ltree_ops(siglen=124));
 
-DROP INDEX IF EXISTS idx_fs_stat;
-CREATE INDEX IF NOT EXISTS idx_fs_stat
-  ON fs_nodes (workspace_id, version, path)
-  INCLUDE (node_type, mode, size_bytes, mtime);
+-- GC anti-join: "is this blob still referenced anywhere?"
+CREATE INDEX IF NOT EXISTS idx_fs_entries_blob_hash
+  ON fs_entries (workspace_id, blob_hash) WHERE blob_hash IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_fs_dir_lookup
-  ON fs_nodes (workspace_id, name, parent_id)
-  WHERE node_type = 'directory';
+-- Closure: ordered nearest-ancestor scan
+CREATE INDEX IF NOT EXISTS idx_version_ancestors_depth
+  ON version_ancestors (workspace_id, descendant_id, depth);
+
+-- Closure reverse: descendants of a version (refusal checks, subtree delete)
+CREATE INDEX IF NOT EXISTS idx_version_ancestors_reverse
+  ON version_ancestors (workspace_id, ancestor_id);
+
+-- Versions by parent (descendant-existence checks)
+CREATE INDEX IF NOT EXISTS idx_fs_versions_parent
+  ON fs_versions (workspace_id, parent_version_id);
 `;
 
 const FTS_INDEX_DDL = `
-CREATE INDEX IF NOT EXISTS idx_fs_content_bm25
-  ON fs_nodes USING bm25 (content)
+CREATE INDEX IF NOT EXISTS idx_fs_blobs_content_bm25
+  ON fs_blobs USING bm25 (content)
   WITH (text_config = 'english')
   WHERE content IS NOT NULL AND binary_data IS NULL;
 `;
 
-const RLS_DDL = `
-ALTER TABLE fs_nodes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE fs_nodes FORCE ROW LEVEL SECURITY;
+function rlsDdl(table: string): string {
+  return `
+ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
 
 DO $$ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE tablename = 'fs_nodes' AND policyname = 'workspace_isolation'
+        WHERE tablename = '${table}' AND policyname = 'workspace_isolation'
     ) THEN
-        CREATE POLICY workspace_isolation ON fs_nodes FOR ALL
+        CREATE POLICY workspace_isolation ON ${table} FOR ALL
             USING (workspace_id = current_setting('app.workspace_id', true))
             WITH CHECK (workspace_id = current_setting('app.workspace_id', true));
     END IF;
 END $$;
 `;
+}
 
 function vectorDDL(dimensions: number): string {
   return `
-    DO $$ BEGIN
-      ALTER TABLE fs_nodes ADD COLUMN embedding vector(${dimensions});
-    EXCEPTION WHEN duplicate_column THEN
-      NULL;
-    END $$;
+DO $$ BEGIN
+  ALTER TABLE fs_blobs ADD COLUMN embedding vector(${dimensions});
+EXCEPTION WHEN duplicate_column THEN
+  NULL;
+END $$;
 
-    CREATE INDEX IF NOT EXISTS idx_fs_embedding ON fs_nodes
-      USING hnsw (embedding vector_cosine_ops)
-      WITH (m = 16, ef_construction = 64);
-  `;
+CREATE INDEX IF NOT EXISTS idx_fs_blobs_embedding ON fs_blobs
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+`;
 }
 
 export async function setup(
@@ -127,7 +138,6 @@ export async function setup(
   }
 
   await client.query(TABLE_DDL);
-  await client.query(MIGRATE_DDL);
   await client.query(INDEXES_DDL);
 
   if (enableFullTextSearch) {
@@ -135,7 +145,9 @@ export async function setup(
   }
 
   if (enableRLS) {
-    await client.query(RLS_DDL);
+    for (const table of ["fs_versions", "version_ancestors", "fs_entries", "fs_blobs"]) {
+      await client.query(rlsDdl(table));
+    }
   }
 
   if (enableVectorSearch && embeddingDimensions) {

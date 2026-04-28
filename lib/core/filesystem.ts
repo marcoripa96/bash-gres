@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import type {
   SqlClient,
   PgFileSystemOptions,
@@ -23,17 +23,21 @@ import {
   parentPath,
   fileName,
 } from "./path-encoding.js";
-import { fullTextSearch, semanticSearch, hybridSearch, validateEmbedding } from "./search.js";
+import {
+  fullTextSearch,
+  semanticSearch,
+  hybridSearch,
+  validateEmbedding,
+} from "./search.js";
 
-interface FsRow {
-  id: number;
+// -- Row shapes -------------------------------------------------------------
+
+interface EntryRow {
   workspace_id: string;
-  parent_id: number | null;
-  name: string;
-  node_type: string;
+  version_id: number;
   path: string;
-  content: string | null;
-  binary_data: Uint8Array | null;
+  blob_hash: Uint8Array | null;
+  node_type: string;
   symlink_target: string | null;
   mode: number;
   size_bytes: number;
@@ -41,28 +45,25 @@ interface FsRow {
   created_at: Date;
 }
 
-type FsRowMeta = Omit<FsRow, "content" | "binary_data">;
-
-interface DirentStatRow {
-  name: string;
-  node_type: string;
-  mode: number;
+interface BlobRow {
+  hash: Uint8Array;
+  content: string | null;
+  binary_data: Uint8Array | null;
   size_bytes: number;
-  mtime: Date;
-  symlink_target: string | null;
 }
 
-interface WalkRow extends DirentStatRow {
+interface DirChildRow {
   path: string;
-  depth: number;
-}
-
-interface FsStatRow {
   node_type: string;
+  blob_hash: Uint8Array | null;
   symlink_target: string | null;
   mode: number;
   size_bytes: number;
   mtime: Date;
+}
+
+interface SubtreeRow extends DirChildRow {
+  depth_in_subtree: number;
 }
 
 const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -73,6 +74,9 @@ const MAX_SYMLINK_DEPTH = 16;
 const MAX_CP_NODES = 10_000;
 
 const DEFAULT_VERSION = "main";
+const TOMBSTONE = "tombstone";
+
+// -- PgFileSystem -----------------------------------------------------------
 
 export class PgFileSystem {
   private client: SqlClient;
@@ -89,6 +93,8 @@ export class PgFileSystem {
   private embeddingDimensions?: number;
   private rootDir: string;
   private readonly baseOptions: PgFileSystemOptions;
+  private cachedVersionId: number | null = null;
+  private blobsHasEmbeddingCache: boolean | null = null;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -120,16 +126,19 @@ export class PgFileSystem {
 
   async init(): Promise<void> {
     await this.withWorkspace(async (tx) => {
+      const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree("/", this.workspaceId);
       await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, version, name, node_type, path, mode)
-         VALUES ($1, $2, '/', 'directory', $3::ltree, $4)
-         ON CONFLICT (workspace_id, version, path) DO NOTHING`,
-        [this.workspaceId, this.version, rootLtree, 0o755],
+        `INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
+         VALUES ($1, $2, $3::ltree, 'directory', $4)
+         ON CONFLICT (workspace_id, version_id, path) DO NOTHING`,
+        [this.workspaceId, versionId, rootLtree, 0o755],
       );
 
       if (this.rootDir !== "/") {
-        await this.internalMkdir(tx, this.rootDir, { recursive: true });
+        await this.internalMkdir(tx, versionId, this.rootDir, {
+          recursive: true,
+        });
       }
     });
   }
@@ -153,135 +162,209 @@ export class PgFileSystem {
     });
   }
 
-  // -- Low-level helpers ------------------------------------------------------
+  // -- Version resolution -----------------------------------------------------
 
-  private async getNode(tx: SqlClient, posixPath: string): Promise<FsRow | null> {
-    const lt = pathToLtree(posixPath, this.workspaceId);
-    const result = await tx.query<FsRow>(
-      `SELECT * FROM fs_nodes
-       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
+  private async getCurrentVersionId(tx: SqlClient): Promise<number> {
+    if (this.cachedVersionId !== null) return this.cachedVersionId;
+    const r = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_versions
+       WHERE workspace_id = $1 AND label = $2
        LIMIT 1`,
-      [this.workspaceId, this.version, lt],
+      [this.workspaceId, this.version],
     );
-    return result.rows[0] ?? null;
+    if (r.rows.length === 0) {
+      throw new Error(
+        `Version '${this.version}' does not exist in workspace '${this.workspaceId}'. Call init() or fork() first.`,
+      );
+    }
+    this.cachedVersionId = Number(r.rows[0].id);
+    return this.cachedVersionId;
   }
 
-  private async getNodeMeta(
+  private async ensureVersion(tx: SqlClient): Promise<number> {
+    if (this.cachedVersionId !== null) return this.cachedVersionId;
+    const existing = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_versions
+       WHERE workspace_id = $1 AND label = $2
+       LIMIT 1`,
+      [this.workspaceId, this.version],
+    );
+    if (existing.rows.length > 0) {
+      this.cachedVersionId = Number(existing.rows[0].id);
+      return this.cachedVersionId;
+    }
+    const created = await tx.query<{ id: number }>(
+      `INSERT INTO fs_versions (workspace_id, label, parent_version_id)
+       VALUES ($1, $2, NULL)
+       RETURNING id`,
+      [this.workspaceId, this.version],
+    );
+    const id = Number(created.rows[0]!.id);
+    await tx.query(
+      `INSERT INTO version_ancestors (workspace_id, descendant_id, ancestor_id, depth)
+       VALUES ($1, $2, $2, 0)
+       ON CONFLICT DO NOTHING`,
+      [this.workspaceId, id],
+    );
+    this.cachedVersionId = id;
+    return id;
+  }
+
+  // -- Visibility resolution --------------------------------------------------
+
+  /**
+   * Find the visible entry at `posixPath` for the current version, walking the
+   * version-ancestors closure to the closest ancestor that has a row at this path.
+   * Returns null if not visible (no ancestor has a row, or the closest hit is a tombstone).
+   */
+  private async resolveEntry(
     tx: SqlClient,
     posixPath: string,
-  ): Promise<FsRowMeta | null> {
+  ): Promise<EntryRow | null> {
+    const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(posixPath, this.workspaceId);
-    const result = await tx.query<FsRowMeta>(
-      `SELECT id, workspace_id, parent_id, name, node_type, path,
-              symlink_target, mode, size_bytes, mtime, created_at
-       FROM fs_nodes
-       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
+    const r = await tx.query<EntryRow>(
+      `SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
+              e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
+       FROM version_ancestors a
+       INNER JOIN LATERAL (
+         SELECT * FROM fs_entries
+         WHERE workspace_id = $1
+           AND version_id = a.ancestor_id
+           AND path = $2::ltree
+         LIMIT 1
+       ) e ON true
+       WHERE a.workspace_id = $1
+         AND a.descendant_id = $3
+       ORDER BY a.depth ASC
        LIMIT 1`,
-      [this.workspaceId, this.version, lt],
+      [this.workspaceId, lt, versionId],
     );
-    return result.rows[0] ?? null;
+    const row = r.rows[0];
+    if (!row || row.node_type === TOMBSTONE) return null;
+    return row;
   }
 
-  private async getNodeStat(
+  private async resolveEntryFollowSymlink(
     tx: SqlClient,
     posixPath: string,
-  ): Promise<FsStatRow | null> {
-    const lt = pathToLtree(posixPath, this.workspaceId);
-    const result = await tx.query<FsStatRow>(
-      `SELECT node_type, symlink_target, mode, size_bytes, mtime
-       FROM fs_nodes
-       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
-       LIMIT 1`,
-      [this.workspaceId, this.version, lt],
-    );
-    return result.rows[0] ?? null;
-  }
-
-  private async getNodeForUpdate(
-    tx: SqlClient,
-    posixPath: string,
-  ): Promise<FsRow | null> {
-    const lt = pathToLtree(posixPath, this.workspaceId);
-    const result = await tx.query<FsRow>(
-      `SELECT * FROM fs_nodes
-       WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
-       LIMIT 1
-       FOR UPDATE`,
-      [this.workspaceId, this.version, lt],
-    );
-    return result.rows[0] ?? null;
-  }
-
-  private async resolveSymlink(
-    tx: SqlClient,
-    path: string,
     maxDepth = MAX_SYMLINK_DEPTH,
-  ): Promise<FsRow> {
-    const node = await this.getNode(tx, path);
-    if (!node) throw new FsError("ENOENT", "no such file or directory", path);
+  ): Promise<EntryRow> {
+    const node = await this.resolveEntry(tx, posixPath);
+    if (!node)
+      throw new FsError("ENOENT", "no such file or directory", posixPath);
     if (node.node_type === "symlink" && node.symlink_target) {
       if (maxDepth <= 0)
-        throw new FsError("ELOOP", "too many levels of symbolic links", path);
-      return this.resolveSymlink(
+        throw new FsError(
+          "ELOOP",
+          "too many levels of symbolic links",
+          posixPath,
+        );
+      return this.resolveEntryFollowSymlink(
         tx,
-        this.resolveLinkTargetPath(path, node.symlink_target),
+        this.resolveLinkTargetPath(posixPath, node.symlink_target),
         maxDepth - 1,
       );
     }
     return node;
   }
 
-  private async resolveSymlinkMeta(
+  private async getBlob(
     tx: SqlClient,
-    path: string,
-    maxDepth = MAX_SYMLINK_DEPTH,
-  ): Promise<FsRowMeta> {
-    const node = await this.getNodeMeta(tx, path);
-    if (!node) throw new FsError("ENOENT", "no such file or directory", path);
-    if (node.node_type === "symlink" && node.symlink_target) {
-      if (maxDepth <= 0)
-        throw new FsError("ELOOP", "too many levels of symbolic links", path);
-      return this.resolveSymlinkMeta(
-        tx,
-        this.resolveLinkTargetPath(path, node.symlink_target),
-        maxDepth - 1,
-      );
-    }
-    return node;
+    hash: Uint8Array,
+  ): Promise<BlobRow | null> {
+    const r = await tx.query<BlobRow>(
+      `SELECT hash, content, binary_data, size_bytes
+       FROM fs_blobs
+       WHERE workspace_id = $1 AND hash = $2
+       LIMIT 1`,
+      [this.workspaceId, hash],
+    );
+    return r.rows[0] ?? null;
   }
 
-  private async resolveSymlinkStat(
+  // -- Visible directory listing ---------------------------------------------
+
+  private async listVisibleChildren(
     tx: SqlClient,
-    path: string,
-    maxDepth = MAX_SYMLINK_DEPTH,
-  ): Promise<FsStatRow> {
-    const node = await this.getNodeStat(tx, path);
-    if (!node) throw new FsError("ENOENT", "no such file or directory", path);
-    if (node.node_type === "symlink" && node.symlink_target) {
-      if (maxDepth <= 0)
-        throw new FsError("ELOOP", "too many levels of symbolic links", path);
-      return this.resolveSymlinkStat(
-        tx,
-        this.resolveLinkTargetPath(path, node.symlink_target),
-        maxDepth - 1,
-      );
-    }
-    return node;
+    parentPosix: string,
+  ): Promise<DirChildRow[]> {
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(parentPosix, this.workspaceId);
+    const r = await tx.query<DirChildRow>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path::text AS path,
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes,
+           e.mtime
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           AND e.path != $3::ltree
+           AND nlevel(e.path) = nlevel($3::ltree) + 1
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
+      [this.workspaceId, versionId, lt, TOMBSTONE],
+    );
+    return r.rows;
   }
+
+  private async listVisibleSubtree(
+    tx: SqlClient,
+    rootPosix: string,
+    includeRoot = false,
+  ): Promise<SubtreeRow[]> {
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(rootPosix, this.workspaceId);
+    const filter = includeRoot ? "" : "AND e.path != $3::ltree";
+    const r = await tx.query<SubtreeRow>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path::text AS path,
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes,
+           e.mtime,
+           nlevel(e.path) - nlevel($3::ltree) AS depth_in_subtree
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           ${filter}
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
+      [this.workspaceId, versionId, lt, TOMBSTONE],
+    );
+    return r.rows;
+  }
+
+  // -- Symlink target resolution ---------------------------------------------
 
   private resolveLinkTargetPath(linkPath: string, target: string): string {
     let resolved: string;
     if (target.startsWith("/")) {
-      // Absolute symlink targets: resolve relative to rootDir to detect escapes
-      // (e.g. /../../secret with rootDir=/jail → /jail/../../secret → /secret → outside)
       resolved = normalizePath(this.rootDir + "/" + target);
     } else {
-      // Relative targets resolve from the link's parent (already internal)
       resolved = normalizePath(parentPath(linkPath) + "/" + target);
     }
     this.guardRootBoundary(resolved);
     return resolved;
   }
+
+  // -- Validation -------------------------------------------------------------
 
   private validateFileSize(content: string | Uint8Array): void {
     const size =
@@ -296,12 +379,19 @@ export class PgFileSystem {
   }
 
   private async validateNodeCount(tx: SqlClient): Promise<void> {
-    const result = await tx.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count FROM fs_nodes
-       WHERE workspace_id = $1 AND version = $2`,
-      [this.workspaceId, this.version],
+    const versionId = await this.getCurrentVersionId(tx);
+    const r = await tx.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM (
+         SELECT DISTINCT ON (e.path) e.node_type
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1 AND a.descendant_id = $2
+         ORDER BY e.path, a.depth ASC
+       ) v WHERE node_type != $3`,
+      [this.workspaceId, versionId, TOMBSTONE],
     );
-    if (result.rows[0] && result.rows[0].count >= this.maxFiles) {
+    if (r.rows[0] && r.rows[0].count >= this.maxFiles) {
       throw new Error(
         `Node limit reached: ${this.maxFiles} nodes per workspace`,
       );
@@ -339,27 +429,6 @@ export class PgFileSystem {
     return this.toInternalPath(normalizePath(userPath));
   }
 
-  private mapDirentStatRow(row: DirentStatRow): DirentStatEntry {
-    return {
-      name: row.name,
-      isFile: row.node_type === "file",
-      isDirectory: row.node_type === "directory",
-      isSymbolicLink: row.node_type === "symlink",
-      mode: row.mode,
-      size: Number(row.size_bytes),
-      mtime: new Date(row.mtime),
-      symlinkTarget: row.symlink_target,
-    };
-  }
-
-  private mapWalkRow(row: WalkRow): WalkEntry {
-    return {
-      path: this.toUserPath(ltreeToPath(row.path)),
-      depth: Number(row.depth),
-      ...this.mapDirentStatRow(row),
-    };
-  }
-
   private guardRootBoundary(internalPath: string): void {
     if (this.rootDir === "/") return;
     if (
@@ -374,10 +443,151 @@ export class PgFileSystem {
     }
   }
 
-  // -- Internal write ---------------------------------------------------------
+  // -- Mappers ---------------------------------------------------------------
+
+  private mapDirChildToDirent(row: DirChildRow): DirentEntry {
+    const userPath = ltreeToPath(row.path);
+    return {
+      name: fileName(userPath),
+      isFile: row.node_type === "file",
+      isDirectory: row.node_type === "directory",
+      isSymbolicLink: row.node_type === "symlink",
+    };
+  }
+
+  private mapDirChildToStatEntry(row: DirChildRow): DirentStatEntry {
+    const userPath = ltreeToPath(row.path);
+    return {
+      name: fileName(userPath),
+      isFile: row.node_type === "file",
+      isDirectory: row.node_type === "directory",
+      isSymbolicLink: row.node_type === "symlink",
+      mode: row.mode,
+      size: Number(row.size_bytes),
+      mtime: new Date(row.mtime),
+      symlinkTarget: row.symlink_target,
+    };
+  }
+
+  private mapSubtreeToWalk(row: SubtreeRow): WalkEntry {
+    const userPath = ltreeToPath(row.path);
+    return {
+      path: this.toUserPath(userPath),
+      name: fileName(userPath),
+      depth: Number(row.depth_in_subtree),
+      isFile: row.node_type === "file",
+      isDirectory: row.node_type === "directory",
+      isSymbolicLink: row.node_type === "symlink",
+      mode: row.mode,
+      size: Number(row.size_bytes),
+      mtime: new Date(row.mtime),
+      symlinkTarget: row.symlink_target,
+    };
+  }
+
+  private statFromEntry(row: EntryRow): FsStat {
+    return {
+      isFile: row.node_type === "file",
+      isDirectory: row.node_type === "directory",
+      isSymbolicLink: row.node_type === "symlink",
+      mode: row.mode,
+      size: Number(row.size_bytes),
+      mtime: new Date(row.mtime),
+    };
+  }
+
+  // -- Internal write paths --------------------------------------------------
+
+  private async upsertBlob(
+    tx: SqlClient,
+    hash: Uint8Array,
+    content: string | Uint8Array,
+    sizeBytes: number,
+    embedding: number[] | null,
+  ): Promise<void> {
+    const isText = typeof content === "string";
+    const textContent = isText ? content : null;
+    const binaryData = isText ? null : content;
+
+    if (embedding !== null) {
+      const embeddingStr = `[${embedding.join(",")}]`;
+      await tx.query(
+        `INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes, embedding)
+         VALUES ($1, $2, $3, $4, $5, $6::vector)
+         ON CONFLICT (workspace_id, hash) DO UPDATE SET
+           embedding = COALESCE(fs_blobs.embedding, EXCLUDED.embedding)`,
+        [this.workspaceId, hash, textContent, binaryData, sizeBytes, embeddingStr],
+      );
+    } else {
+      await tx.query(
+        `INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (workspace_id, hash) DO NOTHING`,
+        [this.workspaceId, hash, textContent, binaryData, sizeBytes],
+      );
+    }
+  }
+
+  private async upsertEntry(
+    tx: SqlClient,
+    versionId: number,
+    posixPath: string,
+    nodeType: string,
+    blobHash: Uint8Array | null,
+    sizeBytes: number,
+    mode: number,
+    symlinkTarget: string | null,
+  ): Promise<void> {
+    const lt = pathToLtree(posixPath, this.workspaceId);
+    await tx.query(
+      `INSERT INTO fs_entries
+         (workspace_id, version_id, path, blob_hash, node_type,
+          symlink_target, mode, size_bytes, mtime)
+       VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, now())
+       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+         blob_hash = EXCLUDED.blob_hash,
+         node_type = EXCLUDED.node_type,
+         symlink_target = EXCLUDED.symlink_target,
+         mode = EXCLUDED.mode,
+         size_bytes = EXCLUDED.size_bytes,
+         mtime = now()`,
+      [
+        this.workspaceId,
+        versionId,
+        lt,
+        blobHash,
+        nodeType,
+        symlinkTarget,
+        mode,
+        sizeBytes,
+      ],
+    );
+  }
+
+  private async writeTombstone(
+    tx: SqlClient,
+    versionId: number,
+    posixPath: string,
+  ): Promise<void> {
+    const lt = pathToLtree(posixPath, this.workspaceId);
+    await tx.query(
+      `INSERT INTO fs_entries
+         (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
+       VALUES ($1, $2, $3::ltree, NULL, $4, 0, 0, now())
+       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+         blob_hash = NULL,
+         node_type = $4,
+         symlink_target = NULL,
+         mode = 0,
+         size_bytes = 0,
+         mtime = now()`,
+      [this.workspaceId, versionId, lt, TOMBSTONE],
+    );
+  }
 
   private async internalWriteFile(
     tx: SqlClient,
+    versionId: number,
     path: string,
     content: string | Uint8Array,
     precomputedEmbedding?: number[] | null,
@@ -385,67 +595,94 @@ export class PgFileSystem {
     this.validateFileSize(content);
     this.validatePathDepth(path);
 
-    const name = fileName(path);
     const parentPosix = parentPath(path);
-    const parent = await this.getNodeMeta(tx, parentPosix);
+    const parent = await this.resolveEntry(tx, parentPosix);
     if (!parent)
       throw new FsError("ENOENT", "no such file or directory, open", path);
+    if (parent.node_type !== "directory")
+      throw new FsError("ENOTDIR", "not a directory, open", path);
 
-    const existing = await this.getNodeMeta(tx, path);
+    const existing = await this.resolveEntry(tx, path);
     if (existing?.node_type === "directory")
-      throw new FsError("EISDIR", "illegal operation on a directory, open", path);
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, open",
+        path,
+      );
 
     if (!existing) {
       await this.validateNodeCount(tx);
     }
 
-    const lt = pathToLtree(path, this.workspaceId);
     const isText = typeof content === "string";
-    const textContent = isText ? content : null;
-    const binaryData = isText ? null : content;
-    const sizeBytes = isText
-      ? new TextEncoder().encode(content).byteLength
-      : content.byteLength;
+    const bytes = isText
+      ? new TextEncoder().encode(content)
+      : (content as Uint8Array);
+    const sizeBytes = bytes.byteLength;
+    const hash = sha256(bytes);
 
     let embedding: number[] | null = null;
     if (precomputedEmbedding !== undefined) {
       embedding = precomputedEmbedding;
-    } else if (isText && this.embed && content.length > 0) {
-      embedding = await this.embed(content);
-      if (embedding) validateEmbedding(embedding, this.embeddingDimensions);
+    } else if (
+      isText &&
+      this.embed &&
+      content.length > 0 &&
+      (await this.blobsHasEmbedding(tx))
+    ) {
+      embedding = await this.maybeEmbed(tx, hash, content);
     }
 
-    if (embedding) {
-      const embeddingStr = `[${embedding.join(",")}]`;
-      await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime, embedding)
-         VALUES ($1, $2, $3, $4, 'file', $5::ltree, $6, $7, $8, now(), $9::vector)
-         ON CONFLICT (workspace_id, version, path) DO UPDATE SET
-           content = EXCLUDED.content,
-           binary_data = EXCLUDED.binary_data,
-           size_bytes = EXCLUDED.size_bytes,
-           mtime = now(),
-           embedding = EXCLUDED.embedding`,
-        [this.workspaceId, this.version, parent.id, name, lt, textContent, binaryData, sizeBytes, embeddingStr],
-      );
-    } else {
-      await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, content, binary_data, size_bytes, mtime)
-         VALUES ($1, $2, $3, $4, 'file', $5::ltree, $6, $7, $8, now())
-         ON CONFLICT (workspace_id, version, path) DO UPDATE SET
-           content = EXCLUDED.content,
-           binary_data = EXCLUDED.binary_data,
-           size_bytes = EXCLUDED.size_bytes,
-           mtime = now()`,
-        [this.workspaceId, this.version, parent.id, name, lt, textContent, binaryData, sizeBytes],
-      );
-    }
+    await this.upsertBlob(tx, hash, content, sizeBytes, embedding);
+    await this.upsertEntry(
+      tx,
+      versionId,
+      path,
+      "file",
+      hash,
+      sizeBytes,
+      0o644,
+      null,
+    );
+  }
+
+  private async blobsHasEmbedding(tx: SqlClient): Promise<boolean> {
+    if (this.blobsHasEmbeddingCache !== null)
+      return this.blobsHasEmbeddingCache;
+    const r = await tx.query<{ has_col: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'fs_blobs' AND column_name = 'embedding'
+       ) AS has_col`,
+    );
+    this.blobsHasEmbeddingCache = r.rows[0]?.has_col ?? false;
+    return this.blobsHasEmbeddingCache;
+  }
+
+  private async maybeEmbed(
+    tx: SqlClient,
+    hash: Uint8Array,
+    content: string,
+  ): Promise<number[] | null> {
+    if (!this.embed) return null;
+    const existing = await tx.query<{ has_embedding: boolean }>(
+      `SELECT (embedding IS NOT NULL) AS has_embedding
+       FROM fs_blobs
+       WHERE workspace_id = $1 AND hash = $2
+       LIMIT 1`,
+      [this.workspaceId, hash],
+    );
+    if (existing.rows[0]?.has_embedding) return null;
+    const embedding = await this.embed(content);
+    validateEmbedding(embedding, this.embeddingDimensions);
+    return embedding;
   }
 
   // -- Internal mkdir ---------------------------------------------------------
 
   private async internalMkdir(
     tx: SqlClient,
+    versionId: number,
     path: string,
     options?: MkdirOptions,
   ): Promise<void> {
@@ -454,101 +691,55 @@ export class PgFileSystem {
 
     if (recursive) {
       const segments = path.split("/").filter(Boolean);
-      const allPaths: string[] = [];
-      const allLtrees: string[] = [];
-      const allNames: string[] = [];
       let current = "/";
-
       for (const segment of segments) {
         current = current === "/" ? `/${segment}` : `${current}/${segment}`;
-        allPaths.push(current);
-        allLtrees.push(pathToLtree(current, this.workspaceId));
-        allNames.push(segment);
-      }
-
-      const existingResult = await tx.query<{ path: string; node_type: string }>(
-        `SELECT path::text, node_type FROM fs_nodes
-         WHERE workspace_id = $1
-           AND version = $2
-           AND path = ANY($3::text[]::ltree[])`,
-        [this.workspaceId, this.version, allLtrees],
-      );
-      const existingMap = new Map(
-        existingResult.rows.map((r) => [r.path, r.node_type]),
-      );
-
-      for (let i = 0; i < allLtrees.length; i++) {
-        const nodeType = existingMap.get(allLtrees[i]);
-        if (nodeType && nodeType !== "directory") {
-          throw new FsError("ENOTDIR", "not a directory, mkdir", allPaths[i]);
+        const visible = await this.resolveEntry(tx, current);
+        if (visible) {
+          if (visible.node_type !== "directory") {
+            throw new FsError("ENOTDIR", "not a directory, mkdir", current);
+          }
+          // already a visible directory; nothing to do
+          continue;
         }
-      }
-
-      for (let i = 0; i < allLtrees.length; i++) {
-        if (!existingMap.has(allLtrees[i])) {
-          const parentLt =
-            i === 0
-              ? pathToLtree("/", this.workspaceId)
-              : allLtrees[i - 1];
-          await tx.query(
-            `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, mode)
-             SELECT $1, $2, p.id, $3, 'directory', $4::ltree, $5
-             FROM fs_nodes p
-             WHERE p.workspace_id = $1
-               AND p.version = $2
-               AND p.path = $6::ltree
-             ON CONFLICT (workspace_id, version, path) DO NOTHING`,
-            [this.workspaceId, this.version, allNames[i], allLtrees[i], 0o755, parentLt],
-          );
-        }
+        await this.upsertEntry(
+          tx,
+          versionId,
+          current,
+          "directory",
+          null,
+          0,
+          0o755,
+          null,
+        );
       }
     } else {
-      const existing = await this.getNodeMeta(tx, path);
+      const existing = await this.resolveEntry(tx, path);
       if (existing)
         throw new FsError("EEXIST", "file already exists, mkdir", path);
-      const parentPosix = parentPath(path);
-      const parent = await this.getNodeMeta(tx, parentPosix);
+      const parent = await this.resolveEntry(tx, parentPath(path));
       if (!parent)
-        throw new FsError(
-          "ENOENT",
-          "no such file or directory, mkdir",
-          path,
-        );
-      const name = fileName(path);
-      const lt = pathToLtree(path, this.workspaceId);
-      await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, mode)
-         VALUES ($1, $2, $3, $4, 'directory', $5::ltree, $6)`,
-        [this.workspaceId, this.version, parent.id, name, lt, 0o755],
+        throw new FsError("ENOENT", "no such file or directory, mkdir", path);
+      if (parent.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, mkdir", path);
+      await this.upsertEntry(
+        tx,
+        versionId,
+        path,
+        "directory",
+        null,
+        0,
+        0o755,
+        null,
       );
     }
-  }
-
-  // -- Internal readdir -------------------------------------------------------
-
-  private async internalReaddir(
-    tx: SqlClient,
-    path: string,
-  ): Promise<string[]> {
-    const node = await this.getNodeMeta(tx, path);
-    if (!node)
-      throw new FsError("ENOENT", "no such file or directory, scandir", path);
-    if (node.node_type !== "directory")
-      throw new FsError("ENOTDIR", "not a directory, scandir", path);
-
-    const result = await tx.query<{ name: string }>(
-      `SELECT name FROM fs_nodes
-       WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
-       ORDER BY name`,
-      [this.workspaceId, this.version, node.id],
-    );
-    return result.rows.map((r) => r.name);
   }
 
   // -- Internal cp ------------------------------------------------------------
 
   private async internalCp(
     tx: SqlClient,
+    versionId: number,
     src: string,
     dest: string,
     options?: CpOptions,
@@ -564,8 +755,8 @@ export class PgFileSystem {
       );
     }
 
-    const srcNode = await this.getNode(tx, src);
-    if (!srcNode)
+    const srcEntry = await this.resolveEntry(tx, src);
+    if (!srcEntry)
       throw new FsError("ENOENT", "no such file or directory, cp", src);
 
     nodeCounter.count++;
@@ -573,25 +764,83 @@ export class PgFileSystem {
       throw new Error(`cp: too many nodes (exceeds limit of ${MAX_CP_NODES})`);
     }
 
-    if (srcNode.node_type === "directory") {
+    if (srcEntry.node_type === "directory") {
       if (!options?.recursive) {
-        throw new FsError("EISDIR", "illegal operation on a directory, cp", src);
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, cp",
+          src,
+        );
       }
-      await this.internalMkdir(tx, dest, { recursive: true });
-      const children = await this.internalReaddir(tx, src);
+      await this.internalMkdir(tx, versionId, dest, { recursive: true });
+      const children = await this.listVisibleChildren(tx, src);
       for (const child of children) {
-        const srcChild = src === "/" ? `/${child}` : `${src}/${child}`;
-        const destChild = dest === "/" ? `/${child}` : `${dest}/${child}`;
-        await this.internalCp(tx, srcChild, destChild, options, nodeCounter);
+        const name = fileName(ltreeToPath(child.path));
+        const srcChild = src === "/" ? `/${name}` : `${src}/${name}`;
+        const destChild = dest === "/" ? `/${name}` : `${dest}/${name}`;
+        await this.internalCp(
+          tx,
+          versionId,
+          srcChild,
+          destChild,
+          options,
+          nodeCounter,
+        );
       }
       return;
     }
 
-    const content =
-      srcNode.content !== null
-        ? srcNode.content
-        : srcNode.binary_data ?? new Uint8Array(0);
-    await this.internalWriteFile(tx, dest, content, null);
+    if (srcEntry.node_type === "symlink") {
+      // Recreate the symlink at dest. validatePathDepth happens via guard upstream;
+      // re-validate target boundary.
+      this.validatePathDepth(dest);
+      const target = srcEntry.symlink_target ?? "";
+      const sizeBytes = new TextEncoder().encode(target).byteLength;
+      await this.upsertEntry(
+        tx,
+        versionId,
+        dest,
+        "symlink",
+        null,
+        sizeBytes,
+        0o777,
+        target,
+      );
+      return;
+    }
+
+    // file: share the blob (same blob_hash), insert new entry at dest
+    if (srcEntry.blob_hash) {
+      // confirm parent dir exists
+      const parentEntry = await this.resolveEntry(tx, parentPath(dest));
+      if (!parentEntry)
+        throw new FsError("ENOENT", "no such file or directory, cp", dest);
+      if (parentEntry.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, cp", dest);
+      const existing = await this.resolveEntry(tx, dest);
+      if (existing?.node_type === "directory")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, cp",
+          dest,
+        );
+      if (!existing) {
+        await this.validateNodeCount(tx);
+      }
+      await this.upsertEntry(
+        tx,
+        versionId,
+        dest,
+        "file",
+        srcEntry.blob_hash,
+        Number(srcEntry.size_bytes),
+        srcEntry.mode,
+        null,
+      );
+    } else {
+      // Empty file (no blob_hash). Create empty entry.
+      await this.internalWriteFile(tx, versionId, dest, "", null);
+    }
   }
 
   // -- Public API: File I/O ---------------------------------------------------
@@ -601,13 +850,16 @@ export class PgFileSystem {
     _options?: { encoding?: string | null } | string,
   ): Promise<string> {
     const internal = this.guardRead(path);
-
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlink(tx, internal);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
-        throw new FsError("EISDIR", "illegal operation on a directory, read", path);
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, read",
+          path,
+        );
 
-      const size = node.size_bytes;
+      const size = Number(node.size_bytes);
       if (this.maxReadSize !== undefined && size > this.maxReadSize) {
         throw new FsError(
           "E2BIG",
@@ -616,32 +868,46 @@ export class PgFileSystem {
         );
       }
 
-      if (node.content !== null) return node.content;
-      if (node.binary_data !== null)
-        return new TextDecoder().decode(node.binary_data);
+      if (!node.blob_hash) return "";
+      const blob = await this.getBlob(tx, node.blob_hash);
+      if (!blob) return "";
+      if (blob.content !== null) return blob.content;
+      if (blob.binary_data !== null)
+        return new TextDecoder().decode(blob.binary_data);
       return "";
     });
   }
 
-  async readFileRange(path: string, options?: ReadFileRangeOptions): Promise<string> {
+  async readFileRange(
+    path: string,
+    options?: ReadFileRangeOptions,
+  ): Promise<string> {
     const internal = this.guardRead(path);
-
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
-        throw new FsError("EISDIR", "illegal operation on a directory, read", path);
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, read",
+          path,
+        );
+      if (!node.blob_hash) return "";
 
-      const sqlOffset = (options?.offset ?? 0) + 1; // SQL SUBSTRING is 1-based
+      const sqlOffset = (options?.offset ?? 0) + 1;
       const sqlLimit = options?.limit;
 
-      const textExpr = sqlLimit !== undefined
-        ? `substr(content, $3, $4)`
-        : `substr(content, $3)`;
-      const binaryExpr = sqlLimit !== undefined
-        ? `substring(binary_data FROM $3 FOR $4)`
-        : `substring(binary_data FROM $3)`;
+      const textExpr =
+        sqlLimit !== undefined ? `substr(content, $3, $4)` : `substr(content, $3)`;
+      const binaryExpr =
+        sqlLimit !== undefined
+          ? `substring(binary_data FROM $3 FOR $4)`
+          : `substring(binary_data FROM $3)`;
 
-      const params: (string | number)[] = [this.workspaceId, node.id, sqlOffset];
+      const params: (string | number | Uint8Array)[] = [
+        this.workspaceId,
+        node.blob_hash,
+        sqlOffset,
+      ];
       if (sqlLimit !== undefined) params.push(sqlLimit);
 
       const result = await tx.query<{
@@ -650,8 +916,8 @@ export class PgFileSystem {
       }>(
         `SELECT ${textExpr} AS chunk_text,
                 ${binaryExpr} AS chunk_binary
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND id = $2
+         FROM fs_blobs
+         WHERE workspace_id = $1 AND hash = $2
          LIMIT 1`,
         params,
       );
@@ -659,9 +925,8 @@ export class PgFileSystem {
       const chunk = result.rows[0];
       if (!chunk) return "";
       if (chunk.chunk_text !== null) return chunk.chunk_text;
-      if (chunk.chunk_binary !== null) {
+      if (chunk.chunk_binary !== null)
         return new TextDecoder().decode(chunk.chunk_binary);
-      }
       return "";
     });
   }
@@ -671,9 +936,8 @@ export class PgFileSystem {
     options?: ReadFileLinesOptions,
   ): Promise<ReadFileLinesResult> {
     const internal = this.guardRead(path);
-
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError(
           "EISDIR",
@@ -697,13 +961,12 @@ export class PgFileSystem {
         );
       const end = limit !== undefined ? start + limit - 1 : null;
 
-      // Postgres array slicing `arr[a:b]` is 1-indexed and inclusive on both ends.
-      // `string_to_array(content, E'\n')` produces a trailing empty element when the
-      // file ends with `\n`; we subtract one from `total` to match `wc -l` semantics.
+      if (!node.blob_hash) return { content: "", total: 0 };
+
       const sliceExpr = end !== null ? "lines[$3:$4]" : "lines[$3:]";
-      const params: (string | number)[] = [
+      const params: (string | number | Uint8Array)[] = [
         this.workspaceId,
-        node.id,
+        node.blob_hash,
         start,
       ];
       if (end !== null) params.push(end);
@@ -713,15 +976,12 @@ export class PgFileSystem {
         total: number | null;
         is_binary: boolean;
       }>(
-        // `string_to_array(content, E'\n')` produces a trailing empty element
-        // when the file ends with `\n`; we trim it so `wc -l` semantics hold and
-        // a default-slice read doesn't reintroduce a trailing newline.
         `WITH raw AS (
            SELECT string_to_array(content, E'\n') AS arr,
                   (content LIKE '%' || E'\n') AS has_trail,
                   (content IS NULL AND binary_data IS NOT NULL) AS is_binary
-           FROM fs_nodes
-           WHERE workspace_id = $1 AND id = $2
+           FROM fs_blobs
+           WHERE workspace_id = $1 AND hash = $2
          ),
          parts AS (
            SELECT
@@ -756,15 +1016,18 @@ export class PgFileSystem {
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlink(tx, internal);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError(
           "EISDIR",
           "illegal operation on a directory, read",
           path,
         );
-      if (node.binary_data !== null) return node.binary_data;
-      if (node.content !== null) return new TextEncoder().encode(node.content);
+      if (!node.blob_hash) return new Uint8Array(0);
+      const blob = await this.getBlob(tx, node.blob_hash);
+      if (!blob) return new Uint8Array(0);
+      if (blob.binary_data !== null) return blob.binary_data;
+      if (blob.content !== null) return new TextEncoder().encode(blob.content);
       return new Uint8Array(0);
     });
   }
@@ -775,19 +1038,13 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
-
-    let embedding: number[] | null = null;
-    if (typeof content === "string" && this.embed && content.length > 0) {
-      embedding = await this.embed(content);
-      if (embedding) validateEmbedding(embedding, this.embeddingDimensions);
-    }
-
     return this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
       if (parent !== "/") {
-        await this.internalMkdir(tx, parent, { recursive: true });
+        await this.internalMkdir(tx, versionId, parent, { recursive: true });
       }
-      await this.internalWriteFile(tx, internal, content, embedding);
+      await this.internalWriteFile(tx, versionId, internal, content);
     });
   }
 
@@ -798,34 +1055,45 @@ export class PgFileSystem {
   ): Promise<void> {
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
       if (parent !== "/") {
-        await this.internalMkdir(tx, parent, { recursive: true });
+        await this.internalMkdir(tx, versionId, parent, { recursive: true });
       }
-      const existing = await this.getNodeForUpdate(tx, internal);
-
+      const existing = await this.resolveEntry(tx, internal);
       if (!existing) {
-        await this.internalWriteFile(tx, internal, content);
+        await this.internalWriteFile(tx, versionId, internal, content);
         return;
       }
+      if (existing.node_type === "directory")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, append",
+          path,
+        );
 
       const appendSize =
         typeof content === "string"
           ? new TextEncoder().encode(content).byteLength
           : content.byteLength;
 
-      if (existing.size_bytes + appendSize > this.maxFileSize) {
+      if (Number(existing.size_bytes) + appendSize > this.maxFileSize) {
         throw new Error(
-          `File too large: ${existing.size_bytes + appendSize} bytes exceeds maximum of ${this.maxFileSize} bytes`,
+          `File too large: ${
+            Number(existing.size_bytes) + appendSize
+          } bytes exceeds maximum of ${this.maxFileSize} bytes`,
         );
       }
 
-      if (existing.binary_data !== null || typeof content !== "string") {
-        const existingBytes =
-          existing.binary_data ??
-          (existing.content !== null
-            ? new TextEncoder().encode(existing.content)
-            : new Uint8Array(0));
+      const blob = existing.blob_hash
+        ? await this.getBlob(tx, existing.blob_hash)
+        : null;
+      const existingText = blob?.content ?? null;
+      const existingBytes =
+        blob?.binary_data ??
+        (existingText !== null ? new TextEncoder().encode(existingText) : null);
+
+      if (existingBytes !== null && (typeof content !== "string" || existingText === null)) {
         const appendBytes =
           typeof content === "string"
             ? new TextEncoder().encode(content)
@@ -835,9 +1103,10 @@ export class PgFileSystem {
         );
         merged.set(new Uint8Array(existingBytes), 0);
         merged.set(new Uint8Array(appendBytes), existingBytes.byteLength);
-        await this.internalWriteFile(tx, internal, merged);
+        await this.internalWriteFile(tx, versionId, internal, merged);
       } else {
-        await this.internalWriteFile(tx, internal, (existing.content ?? "") + content);
+        const merged = (existingText ?? "") + (content as string);
+        await this.internalWriteFile(tx, versionId, internal, merged);
       }
     });
   }
@@ -847,29 +1116,18 @@ export class PgFileSystem {
   async exists(path: string): Promise<boolean> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const lt = pathToLtree(internal, this.workspaceId);
-      const result = await tx.query<{ exists: number }>(
-        `SELECT 1 AS exists
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2 AND path = $3::ltree
-         LIMIT 1`,
-        [this.workspaceId, this.version, lt],
-      );
-      return result.rows.length > 0;
+      const node = await this.resolveEntry(tx, internal);
+      return node !== null;
     });
   }
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkStat(tx, internal);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
       return {
-        isFile: node.node_type === "file",
-        isDirectory: node.node_type === "directory",
+        ...this.statFromEntry(node),
         isSymbolicLink: false,
-        mode: node.mode,
-        size: Number(node.size_bytes),
-        mtime: new Date(node.mtime),
       };
     });
   }
@@ -877,21 +1135,10 @@ export class PgFileSystem {
   async lstat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeStat(tx, internal);
+      const node = await this.resolveEntry(tx, internal);
       if (!node)
-        throw new FsError(
-          "ENOENT",
-          "no such file or directory, lstat",
-          path,
-        );
-      return {
-        isFile: node.node_type === "file",
-        isDirectory: node.node_type === "directory",
-        isSymbolicLink: node.node_type === "symlink",
-        mode: node.mode,
-        size: Number(node.size_bytes),
-        mtime: new Date(node.mtime),
-      };
+        throw new FsError("ENOENT", "no such file or directory, lstat", path);
+      return this.statFromEntry(node);
     });
   }
 
@@ -908,13 +1155,9 @@ export class PgFileSystem {
     path: string,
     maxDepth = MAX_SYMLINK_DEPTH,
   ): Promise<string> {
-    const node = await this.getNodeMeta(tx, path);
+    const node = await this.resolveEntry(tx, path);
     if (!node)
-      throw new FsError(
-        "ENOENT",
-        "no such file or directory, realpath",
-        path,
-      );
+      throw new FsError("ENOENT", "no such file or directory, realpath", path);
     if (node.node_type === "symlink" && node.symlink_target) {
       if (maxDepth <= 0)
         throw new FsError(
@@ -936,99 +1179,56 @@ export class PgFileSystem {
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      await this.internalMkdir(tx, internal, options);
+      const versionId = await this.getCurrentVersionId(tx);
+      await this.internalMkdir(tx, versionId, internal, options);
     });
   }
 
   async readdir(path: string): Promise<string[]> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
-      if (node.node_type !== "directory") {
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
+      if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      }
-
-      const result = await tx.query<{ name: string }>(
-        `SELECT name FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
-         ORDER BY name`,
-        [this.workspaceId, this.version, node.id],
-      );
-      return result.rows.map((row) => row.name);
+      const realPath = ltreeToPath(node.path);
+      const children = await this.listVisibleChildren(tx, realPath);
+      return children.map((c) => fileName(ltreeToPath(c.path)));
     });
   }
 
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
-      if (!node)
-        throw new FsError(
-          "ENOENT",
-          "no such file or directory, scandir",
-          path,
-        );
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
-
-      const result = await tx.query<{ name: string; node_type: string }>(
-        `SELECT name, node_type
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
-         ORDER BY name`,
-        [this.workspaceId, this.version, node.id],
-      );
-      return result.rows.map((r) => ({
-        name: r.name,
-        isFile: r.node_type === "file",
-        isDirectory: r.node_type === "directory",
-        isSymbolicLink: r.node_type === "symlink",
-      }));
+      const realPath = ltreeToPath(node.path);
+      const children = await this.listVisibleChildren(tx, realPath);
+      return children.map((c) => this.mapDirChildToDirent(c));
     });
   }
 
   async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
-      if (node.node_type !== "directory") {
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
+      if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      }
-
-      const result = await tx.query<DirentStatRow>(
-        `SELECT name, node_type, mode, size_bytes, mtime, symlink_target
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
-         ORDER BY name`,
-        [this.workspaceId, this.version, node.id],
-      );
-      return result.rows.map((row) => this.mapDirentStatRow(row));
+      const realPath = ltreeToPath(node.path);
+      const children = await this.listVisibleChildren(tx, realPath);
+      return children.map((c) => this.mapDirChildToStatEntry(c));
     });
   }
 
   async walk(path: string): Promise<WalkEntry[]> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
-      if (node.node_type !== "directory") {
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
+      if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      }
-
-      const rootPath = ltreeToPath(node.path);
-      const rootLtree = pathToLtree(rootPath, this.workspaceId);
-      const result = await tx.query<WalkRow>(
-        `SELECT path::text, name, node_type, mode, size_bytes, mtime, symlink_target,
-                nlevel(path) - nlevel($3::ltree) AS depth
-         FROM fs_nodes
-         WHERE workspace_id = $1
-           AND version = $2
-           AND path <@ $3::ltree
-           AND path != $3::ltree
-         ORDER BY path`,
-        [this.workspaceId, this.version, rootLtree],
-      );
-
-      return result.rows.map((row) => this.mapWalkRow(row));
+      const realPath = ltreeToPath(node.path);
+      const rows = await this.listVisibleSubtree(tx, realPath, false);
+      return rows.map((r) => this.mapSubtreeToWalk(r));
     });
   }
 
@@ -1037,74 +1237,29 @@ export class PgFileSystem {
   async rm(path: string, options?: RmOptions): Promise<void> {
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeMeta(tx, internal);
-
+      const versionId = await this.getCurrentVersionId(tx);
+      const node = await this.resolveEntry(tx, internal);
       if (!node) {
         if (options?.force) return;
         throw new FsError("ENOENT", "no such file or directory, rm", path);
       }
-
       if (node.node_type === "directory") {
-        if (!options?.recursive) {
-          const children = await tx.query(
-            `SELECT 1 FROM fs_nodes
-             WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
-             LIMIT 1`,
-            [this.workspaceId, this.version, node.id],
-          );
-          if (children.rows.length > 0) {
-            throw new FsError(
-              "ENOTEMPTY",
-              "directory not empty, rm",
-              path,
-            );
+        const children = await this.listVisibleChildren(tx, internal);
+        if (children.length > 0 && !options?.recursive) {
+          throw new FsError("ENOTEMPTY", "directory not empty, rm", path);
+        }
+        if (options?.recursive) {
+          const subtree = await this.listVisibleSubtree(tx, internal, true);
+          // Tombstone all visible paths (including root) at current version.
+          // Order doesn't matter because tombstones don't reference each other.
+          for (const row of subtree) {
+            const userPath = ltreeToPath(row.path);
+            await this.writeTombstone(tx, versionId, userPath);
           }
+          return;
         }
       }
-
-      if (options?.recursive && node.node_type === "directory") {
-        const lt = pathToLtree(internal, this.workspaceId);
-        const subtree = await tx.query<{ id: number; depth: number }>(
-          `SELECT id, nlevel(path) AS depth
-           FROM fs_nodes
-           WHERE workspace_id = $1 AND version = $2 AND path <@ $3::ltree
-           ORDER BY depth DESC, path DESC`,
-          [this.workspaceId, this.version, lt],
-        );
-
-        let currentDepth: number | null = null;
-        let idsAtDepth: number[] = [];
-        for (const row of subtree.rows) {
-          if (currentDepth === null) {
-            currentDepth = row.depth;
-          }
-
-          if (row.depth !== currentDepth) {
-            await tx.query(
-              `DELETE FROM fs_nodes
-               WHERE workspace_id = $1 AND id = ANY($2::int[])`,
-              [this.workspaceId, idsAtDepth],
-            );
-            idsAtDepth = [];
-            currentDepth = row.depth;
-          }
-
-          idsAtDepth.push(row.id);
-        }
-
-        if (idsAtDepth.length > 0) {
-          await tx.query(
-            `DELETE FROM fs_nodes
-             WHERE workspace_id = $1 AND id = ANY($2::int[])`,
-            [this.workspaceId, idsAtDepth],
-          );
-        }
-      } else {
-        await tx.query(
-          `DELETE FROM fs_nodes WHERE workspace_id = $1 AND id = $2`,
-          [this.workspaceId, node.id],
-        );
-      }
+      await this.writeTombstone(tx, versionId, internal);
     });
   }
 
@@ -1112,7 +1267,8 @@ export class PgFileSystem {
     const srcInternal = this.guardRead(src);
     const destInternal = this.guardWrite(dest);
     return this.withWorkspace(async (tx) => {
-      await this.internalCp(tx, srcInternal, destInternal, options);
+      const versionId = await this.getCurrentVersionId(tx);
+      await this.internalCp(tx, versionId, srcInternal, destInternal, options);
     });
   }
 
@@ -1120,6 +1276,7 @@ export class PgFileSystem {
     const srcInternal = this.guardWrite(src);
     const destInternal = this.guardWrite(dest);
     return this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
       const srcPath = srcInternal;
       const destPath = destInternal;
 
@@ -1131,20 +1288,21 @@ export class PgFileSystem {
         );
       }
 
-      const srcNode = await this.getNodeForUpdate(tx, srcPath);
-      if (!srcNode)
+      const srcEntry = await this.resolveEntry(tx, srcPath);
+      if (!srcEntry)
         throw new FsError("ENOENT", "no such file or directory, mv", src);
 
-      const destParentPosix = parentPath(destPath);
-      const destParent = await this.getNodeMeta(tx, destParentPosix);
+      const destParent = await this.resolveEntry(tx, parentPath(destPath));
       if (!destParent)
         throw new FsError("ENOENT", "no such file or directory, mv", dest);
+      if (destParent.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, mv", dest);
 
-      const destNode = await this.getNodeMeta(tx, destPath);
-      if (destNode) {
+      const destEntry = await this.resolveEntry(tx, destPath);
+      if (destEntry) {
         if (
-          destNode.node_type === "directory" &&
-          srcNode.node_type !== "directory"
+          destEntry.node_type === "directory" &&
+          srcEntry.node_type !== "directory"
         ) {
           throw new FsError(
             "EISDIR",
@@ -1153,8 +1311,8 @@ export class PgFileSystem {
           );
         }
         if (
-          destNode.node_type !== "directory" &&
-          srcNode.node_type === "directory"
+          destEntry.node_type !== "directory" &&
+          srcEntry.node_type === "directory"
         ) {
           throw new FsError(
             "ENOTDIR",
@@ -1162,69 +1320,53 @@ export class PgFileSystem {
             dest,
           );
         }
-        if (destNode.node_type === "directory") {
-          const children = await tx.query(
-            `SELECT 1 FROM fs_nodes
-             WHERE workspace_id = $1 AND version = $2 AND parent_id = $3
-             LIMIT 1`,
-            [this.workspaceId, this.version, destNode.id],
-          );
-          if (children.rows.length > 0) {
+        if (destEntry.node_type === "directory") {
+          const children = await this.listVisibleChildren(tx, destPath);
+          if (children.length > 0) {
             throw new FsError("ENOTEMPTY", "directory not empty, mv", dest);
           }
         }
-        await tx.query(
-          `DELETE FROM fs_nodes WHERE workspace_id = $1 AND id = $2`,
-          [this.workspaceId, destNode.id],
-        );
+        // Tombstone destination first.
+        await this.writeTombstone(tx, versionId, destPath);
       }
 
-      const newName = fileName(destPath);
-      const newLtree = pathToLtree(destPath, this.workspaceId);
-      const oldLtree = pathToLtree(srcPath, this.workspaceId);
-
-      // Lock all descendant rows before path rewrite
-      if (srcNode.node_type === "directory") {
-        await tx.query(
-          `SELECT id FROM fs_nodes
-           WHERE workspace_id = $1 AND version = $2 AND path <@ $3::ltree
-           ORDER BY path
-           FOR UPDATE`,
-          [this.workspaceId, this.version, oldLtree],
+      if (srcEntry.node_type === "directory") {
+        // Move all visible descendants: tombstone each old path, insert new entry at translated path.
+        const subtree = await this.listVisibleSubtree(tx, srcPath, true);
+        // Insert new entries first, then tombstone old paths. Order matters
+        // because src and dest may overlap (already guarded above, but be safe).
+        for (const row of subtree) {
+          const oldPath = ltreeToPath(row.path);
+          const suffix = oldPath === srcPath ? "" : oldPath.slice(srcPath.length);
+          const newPath = destPath + suffix;
+          await this.upsertEntry(
+            tx,
+            versionId,
+            newPath,
+            row.node_type,
+            row.blob_hash,
+            Number(row.size_bytes),
+            row.mode,
+            row.symlink_target,
+          );
+        }
+        for (const row of subtree) {
+          const oldPath = ltreeToPath(row.path);
+          await this.writeTombstone(tx, versionId, oldPath);
+        }
+      } else {
+        // single-file or symlink: insert at dest with same blob_hash/symlink_target
+        await this.upsertEntry(
+          tx,
+          versionId,
+          destPath,
+          srcEntry.node_type,
+          srcEntry.blob_hash,
+          Number(srcEntry.size_bytes),
+          srcEntry.mode,
+          srcEntry.symlink_target,
         );
-      }
-
-      await tx.query(
-        `UPDATE fs_nodes
-         SET name = $1, path = $2::ltree, parent_id = $3, mtime = now()
-         WHERE workspace_id = $4 AND id = $5`,
-        [newName, newLtree, destParent.id, this.workspaceId, srcNode.id],
-      );
-
-      if (srcNode.node_type === "directory") {
-        await tx.query(
-          `UPDATE fs_nodes
-           SET path = ($1::ltree || subpath(path, nlevel($2::ltree)))
-           WHERE workspace_id = $3
-             AND version = $4
-             AND path <@ $2::ltree
-             AND path != $2::ltree`,
-          [newLtree, oldLtree, this.workspaceId, this.version],
-        );
-
-        await tx.query(
-          `UPDATE fs_nodes AS child
-           SET parent_id = parent.id
-           FROM fs_nodes AS parent
-           WHERE child.workspace_id = $1
-             AND child.version = $2
-             AND parent.workspace_id = $1
-             AND parent.version = $2
-             AND child.path <@ $3::ltree
-             AND child.path != $3::ltree
-             AND parent.path = subltree(child.path, 0, nlevel(child.path) - 1)`,
-          [this.workspaceId, this.version, newLtree],
-        );
+        await this.writeTombstone(tx, versionId, srcPath);
       }
     });
   }
@@ -1237,10 +1379,17 @@ export class PgFileSystem {
     }
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
-      await tx.query(
-        `UPDATE fs_nodes SET mode = $1 WHERE workspace_id = $2 AND id = $3`,
-        [mode, this.workspaceId, node.id],
+      const versionId = await this.getCurrentVersionId(tx);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
+      await this.upsertEntry(
+        tx,
+        versionId,
+        ltreeToPath(node.path),
+        node.node_type,
+        node.blob_hash,
+        Number(node.size_bytes),
+        mode,
+        node.symlink_target,
       );
     });
   }
@@ -1248,10 +1397,33 @@ export class PgFileSystem {
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveSymlinkMeta(tx, internal);
+      const versionId = await this.getCurrentVersionId(tx);
+      const node = await this.resolveEntryFollowSymlink(tx, internal);
+      const lt = pathToLtree(ltreeToPath(node.path), this.workspaceId);
+      // Insert/update entry at current version preserving everything but mtime.
       await tx.query(
-        `UPDATE fs_nodes SET mtime = $1 WHERE workspace_id = $2 AND id = $3`,
-        [mtime, this.workspaceId, node.id],
+        `INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = EXCLUDED.blob_hash,
+           node_type = EXCLUDED.node_type,
+           symlink_target = EXCLUDED.symlink_target,
+           mode = EXCLUDED.mode,
+           size_bytes = EXCLUDED.size_bytes,
+           mtime = EXCLUDED.mtime`,
+        [
+          this.workspaceId,
+          versionId,
+          lt,
+          node.blob_hash,
+          node.node_type,
+          node.symlink_target,
+          node.mode,
+          Number(node.size_bytes),
+          mtime,
+        ],
       );
     });
   }
@@ -1264,7 +1436,6 @@ export class PgFileSystem {
     if (target.includes("\0")) {
       throw new Error("Paths cannot contain null bytes");
     }
-
     if (target.length > 4096) {
       throw new Error(
         "Symlink target exceeds maximum length of 4096 characters",
@@ -1272,27 +1443,31 @@ export class PgFileSystem {
     }
 
     return this.withWorkspace(async (tx) => {
-      const parentPosix = parentPath(internal);
-      const parent = await this.getNodeMeta(tx, parentPosix);
+      const versionId = await this.getCurrentVersionId(tx);
+      const parent = await this.resolveEntry(tx, parentPath(internal));
       if (!parent)
         throw new FsError(
           "ENOENT",
           "no such file or directory, symlink",
           linkPath,
         );
+      if (parent.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, symlink", linkPath);
 
       const resolvedTarget = this.resolveLinkTargetPath(internal, target);
       this.validatePathDepth(resolvedTarget);
       this.guardRootBoundary(resolvedTarget);
 
-      const name = fileName(internal);
-      const lt = pathToLtree(internal, this.workspaceId);
       const sizeBytes = new TextEncoder().encode(target).byteLength;
-
-      await tx.query(
-        `INSERT INTO fs_nodes (workspace_id, version, parent_id, name, node_type, path, symlink_target, mode, size_bytes)
-         VALUES ($1, $2, $3, $4, 'symlink', $5::ltree, $6, $7, $8)`,
-        [this.workspaceId, this.version, parent.id, name, lt, target, 0o777, sizeBytes],
+      await this.upsertEntry(
+        tx,
+        versionId,
+        internal,
+        "symlink",
+        null,
+        sizeBytes,
+        0o777,
+        target,
       );
     });
   }
@@ -1301,32 +1476,56 @@ export class PgFileSystem {
     const srcInternal = this.guardRead(existingPath);
     const destInternal = this.guardWrite(newPath);
     return this.withWorkspace(async (tx) => {
-      const srcNode = await this.getNode(tx, srcInternal);
-      if (!srcNode)
+      const versionId = await this.getCurrentVersionId(tx);
+      const srcEntry = await this.resolveEntry(tx, srcInternal);
+      if (!srcEntry)
         throw new FsError(
           "ENOENT",
           "no such file or directory, link",
           existingPath,
         );
-      if (srcNode.node_type === "directory")
+      if (srcEntry.node_type === "directory")
         throw new FsError(
           "EPERM",
           "operation not permitted, link",
           existingPath,
         );
 
-      const content =
-        srcNode.content !== null
-          ? srcNode.content
-          : srcNode.binary_data ?? new Uint8Array(0);
-      await this.internalWriteFile(tx, destInternal, content);
+      const parent = await this.resolveEntry(tx, parentPath(destInternal));
+      if (!parent)
+        throw new FsError("ENOENT", "no such file or directory, link", newPath);
+      if (parent.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, link", newPath);
+
+      const existing = await this.resolveEntry(tx, destInternal);
+      if (existing?.node_type === "directory")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, link",
+          newPath,
+        );
+      if (!existing) {
+        await this.validateNodeCount(tx);
+      }
+
+      // Hard link semantics: same blob, new path. (Symlinks not "linkable" via link().)
+      await this.upsertEntry(
+        tx,
+        versionId,
+        destInternal,
+        srcEntry.node_type,
+        srcEntry.blob_hash,
+        Number(srcEntry.size_bytes),
+        srcEntry.mode,
+        srcEntry.symlink_target,
+      );
     });
   }
 
   async readlink(path: string): Promise<string> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.getNodeStat(tx, internal);
+      const node = await this.resolveEntry(tx, internal);
       if (!node)
         throw new FsError(
           "ENOENT",
@@ -1366,10 +1565,14 @@ export class PgFileSystem {
     this.guardRead(scopePath);
     const internalScope = this.toInternalPath(scopePath);
     return this.withWorkspace(async (tx) => {
-      const results = await fullTextSearch(tx, this.workspaceId, this.version, query, {
-        ...opts,
-        path: internalScope,
-      });
+      const versionId = await this.getCurrentVersionId(tx);
+      const results = await fullTextSearch(
+        tx,
+        this.workspaceId,
+        versionId,
+        query,
+        { ...opts, path: internalScope },
+      );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }
@@ -1385,10 +1588,14 @@ export class PgFileSystem {
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
     return this.withWorkspace(async (tx) => {
-      const results = await semanticSearch(tx, this.workspaceId, this.version, embedding, {
-        ...opts,
-        path: internalScope,
-      });
+      const versionId = await this.getCurrentVersionId(tx);
+      const results = await semanticSearch(
+        tx,
+        this.workspaceId,
+        versionId,
+        embedding,
+        { ...opts, path: internalScope },
+      );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }
@@ -1409,139 +1616,148 @@ export class PgFileSystem {
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
     return this.withWorkspace(async (tx) => {
-      const results = await hybridSearch(tx, this.workspaceId, this.version, query, embedding, {
-        ...opts,
-        path: internalScope,
-      });
+      const versionId = await this.getCurrentVersionId(tx);
+      const results = await hybridSearch(
+        tx,
+        this.workspaceId,
+        versionId,
+        query,
+        embedding,
+        { ...opts, path: internalScope },
+      );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }
 
   // -- Public API: Glob -------------------------------------------------------
 
-  async glob(
-    pattern: string,
-    opts?: { cwd?: string },
-  ): Promise<string[]> {
+  async glob(pattern: string, opts?: { cwd?: string }): Promise<string[]> {
     const userCwd = opts?.cwd ? normalizePath(opts.cwd) : "/";
     this.guardRead(userCwd);
     const literalPrefix = globLiteralPrefix(pattern);
     const queryScope = literalPrefix
-      ? normalizePath(userCwd === "/" ? `/${literalPrefix}` : `${userCwd}/${literalPrefix}`)
+      ? normalizePath(
+          userCwd === "/" ? `/${literalPrefix}` : `${userCwd}/${literalPrefix}`,
+        )
       : userCwd;
     const internalScope = this.toInternalPath(queryScope);
     const queryPlan = analyzeGlobPattern(pattern, literalPrefix);
+
     return this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
       const scopeLtree = pathToLtree(internalScope, this.workspaceId);
+
       const where = [
-        `workspace_id = $1`,
-        `version = $2`,
-        queryPlan.exact ? `path = $3::ltree` : `path <@ $3::ltree`,
-        `node_type = 'file'`,
+        `e.workspace_id = $1`,
+        `a.descendant_id = $2`,
+        queryPlan.exact ? `e.path = $3::ltree` : `e.path <@ $3::ltree`,
       ];
-      const params: (string | number)[] = [this.workspaceId, this.version, scopeLtree];
+      const params: (string | number)[] = [
+        this.workspaceId,
+        versionId,
+        scopeLtree,
+      ];
 
       if (!queryPlan.exact && queryPlan.fixedDepth !== null) {
-        where.push(`nlevel(path) = nlevel($3::ltree) + ${queryPlan.fixedDepth}`);
+        where.push(
+          `nlevel(e.path) = nlevel($3::ltree) + ${queryPlan.fixedDepth}`,
+        );
       }
 
       if (queryPlan.basename !== null) {
-        where.push(`name = $${params.length + 1}`);
-        params.push(queryPlan.basename);
+        // basename match: the encoded last label
+        where.push(
+          `subltree(e.path, nlevel(e.path) - 1, nlevel(e.path)) = $${params.length + 1}::ltree`,
+        );
+        params.push(encodeBasenameForLtree(queryPlan.basename));
       }
 
-      const result = await tx.query<{ path: string }>(
-        `SELECT path::text FROM fs_nodes
-         WHERE ${where.join("\n           AND ")}
-         ORDER BY path`,
-        params,
-      );
+      const sql = `
+        WITH visible AS (
+          SELECT DISTINCT ON (e.path)
+            e.path::text AS path,
+            e.node_type
+          FROM fs_entries e
+          JOIN version_ancestors a
+            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+          WHERE ${where.join(" AND ")}
+          ORDER BY e.path, a.depth ASC
+        )
+        SELECT path FROM visible WHERE node_type = 'file' ORDER BY path
+      `;
+      const result = await tx.query<{ path: string }>(sql, params);
 
       const regex = globToRegex(pattern);
       return result.rows
         .map((r) => ltreeToPath(r.path))
         .map((p) => this.toUserPath(p))
         .filter((p) => {
-          const relative = userCwd === "/" ? p.slice(1) : p.slice(userCwd.length + 1);
+          const relative =
+            userCwd === "/" ? p.slice(1) : p.slice(userCwd.length + 1);
           return regex.test(relative);
         });
     });
   }
 
-  async dispose(): Promise<void> {
-    await this.withWorkspace(async (tx) => {
-      const rootLtree = pathToLtree("/", this.workspaceId);
-      const subtree = await tx.query<{ id: number; depth: number }>(
-        `SELECT id, nlevel(path) AS depth
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2 AND path <@ $3::ltree
-         ORDER BY depth DESC, path DESC`,
-        [this.workspaceId, this.version, rootLtree],
-      );
-      await deleteRowsDepthFirst(tx, this.workspaceId, subtree.rows);
-    });
-  }
-
-  // -- Public API: Versioning -------------------------------------------------
+  // -- Versioning -------------------------------------------------------------
 
   async fork(newVersion: string): Promise<PgFileSystem> {
     if (!newVersion || newVersion.length === 0) {
       throw new Error("fork: newVersion must be a non-empty string");
     }
     if (newVersion === this.version) {
-      throw new Error(`fork: newVersion must differ from current version '${this.version}'`);
+      throw new Error(
+        `fork: newVersion must differ from current version '${this.version}'`,
+      );
     }
 
     await this.withWorkspace(async (tx) => {
+      const parentId = await this.getCurrentVersionId(tx);
       const existing = await tx.query(
-        `SELECT 1 FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2
-         LIMIT 1`,
+        `SELECT 1 FROM fs_versions
+         WHERE workspace_id = $1 AND label = $2`,
         [this.workspaceId, newVersion],
       );
       if (existing.rows.length > 0) {
         throw new Error(`fork: version '${newVersion}' already exists`);
       }
-
-      const embeddingCol = await hasEmbeddingColumn(tx);
-      const embeddingInsert = embeddingCol ? ", embedding" : "";
-      const embeddingSelect = embeddingCol ? ", embedding" : "";
-
-      await tx.query(
-        `INSERT INTO fs_nodes
-           (workspace_id, version, name, node_type, path, content, binary_data,
-            symlink_target, mode, size_bytes, mtime, created_at${embeddingInsert})
-         SELECT workspace_id, $3 AS version, name, node_type, path, content, binary_data,
-                symlink_target, mode, size_bytes, mtime, created_at${embeddingSelect}
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2`,
-        [this.workspaceId, this.version, newVersion],
+      const created = await tx.query<{ id: number }>(
+        `INSERT INTO fs_versions (workspace_id, label, parent_version_id)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [this.workspaceId, newVersion, parentId],
       );
-
+      const newId = Number(created.rows[0]!.id);
       await tx.query(
-        `UPDATE fs_nodes AS child
-         SET parent_id = parent.id
-         FROM fs_nodes AS parent
-         WHERE child.workspace_id = $1 AND child.version = $2
-           AND parent.workspace_id = $1 AND parent.version = $2
-           AND nlevel(child.path) > 1
-           AND parent.path = subltree(child.path, 0, nlevel(child.path) - 1)`,
-        [this.workspaceId, newVersion],
+        `INSERT INTO version_ancestors (workspace_id, descendant_id, ancestor_id, depth)
+         SELECT $1, $2, ancestor_id, depth + 1
+         FROM version_ancestors
+         WHERE workspace_id = $1 AND descendant_id = $3`,
+        [this.workspaceId, newId, parentId],
+      );
+      await tx.query(
+        `INSERT INTO version_ancestors (workspace_id, descendant_id, ancestor_id, depth)
+         VALUES ($1, $2, $2, 0)`,
+        [this.workspaceId, newId],
       );
     });
 
-    return new PgFileSystem({ ...this.baseOptions, db: this.rawDb, version: newVersion });
+    return new PgFileSystem({
+      ...this.baseOptions,
+      db: this.rawDb,
+      version: newVersion,
+    });
   }
 
   async listVersions(): Promise<string[]> {
     return this.withWorkspace(async (tx) => {
-      const result = await tx.query<{ version: string }>(
-        `SELECT DISTINCT version FROM fs_nodes
+      const r = await tx.query<{ label: string }>(
+        `SELECT label FROM fs_versions
          WHERE workspace_id = $1
-         ORDER BY version`,
+         ORDER BY label`,
         [this.workspaceId],
       );
-      return result.rows.map((r) => r.version);
+      return r.rows.map((row) => row.label);
     });
   }
 
@@ -1552,57 +1768,121 @@ export class PgFileSystem {
       );
     }
     await this.withWorkspace(async (tx) => {
-      const subtree = await tx.query<{ id: number; depth: number }>(
-        `SELECT id, nlevel(path) AS depth
-         FROM fs_nodes
-         WHERE workspace_id = $1 AND version = $2
-         ORDER BY depth DESC, path DESC`,
+      const r = await tx.query<{ id: number }>(
+        `SELECT id FROM fs_versions
+         WHERE workspace_id = $1 AND label = $2
+         LIMIT 1`,
         [this.workspaceId, version],
       );
-      await deleteRowsDepthFirst(tx, this.workspaceId, subtree.rows);
+      if (r.rows.length === 0) return;
+      const targetId = Number(r.rows[0]!.id);
+      await this.deleteVersionById(tx, targetId);
     });
   }
-}
 
-async function deleteRowsDepthFirst(
-  tx: SqlClient,
-  workspaceId: string,
-  rows: { id: number; depth: number }[],
-): Promise<void> {
-  let currentDepth: number | null = null;
-  let idsAtDepth: number[] = [];
-  for (const row of rows) {
-    if (currentDepth === null) {
-      currentDepth = row.depth;
-    }
-    if (row.depth !== currentDepth) {
-      await tx.query(
-        `DELETE FROM fs_nodes
-         WHERE workspace_id = $1 AND id = ANY($2::int[])`,
-        [workspaceId, idsAtDepth],
-      );
-      idsAtDepth = [];
-      currentDepth = row.depth;
-    }
-    idsAtDepth.push(row.id);
-  }
-  if (idsAtDepth.length > 0) {
-    await tx.query(
-      `DELETE FROM fs_nodes
-       WHERE workspace_id = $1 AND id = ANY($2::int[])`,
-      [workspaceId, idsAtDepth],
+  private async deleteVersionById(
+    tx: SqlClient,
+    versionId: number,
+  ): Promise<void> {
+    const children = await tx.query(
+      `SELECT 1 FROM fs_versions
+       WHERE workspace_id = $1 AND parent_version_id = $2
+       LIMIT 1`,
+      [this.workspaceId, versionId],
     );
+    if (children.rows.length > 0) {
+      throw new Error(
+        `deleteVersion: version has descendants; delete or squash them first`,
+      );
+    }
+
+    // Advisory lock to serialize against concurrent writers of the same blobs
+    // in this workspace. The lock is released at end of transaction.
+    await tx.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1), $2::int)`,
+      [this.workspaceId, versionId],
+    );
+
+    // Capture blob hashes that this version's entries referenced.
+    const freed = await tx.query<{ blob_hash: Uint8Array }>(
+      `DELETE FROM fs_entries
+       WHERE workspace_id = $1 AND version_id = $2
+       RETURNING blob_hash`,
+      [this.workspaceId, versionId],
+    );
+    const candidates = new Map<string, Uint8Array>();
+    for (const row of freed.rows) {
+      if (row.blob_hash) {
+        candidates.set(bytesKey(row.blob_hash), row.blob_hash);
+      }
+    }
+
+    await tx.query(
+      `DELETE FROM version_ancestors
+       WHERE workspace_id = $1 AND (descendant_id = $2 OR ancestor_id = $2)`,
+      [this.workspaceId, versionId],
+    );
+    await tx.query(
+      `DELETE FROM fs_versions
+       WHERE workspace_id = $1 AND id = $2`,
+      [this.workspaceId, versionId],
+    );
+
+    if (candidates.size > 0) {
+      // GC orphan blobs: only those previously owned by this version and now unreferenced.
+      for (const hash of candidates.values()) {
+        await tx.query(
+          `DELETE FROM fs_blobs
+           WHERE workspace_id = $1 AND hash = $2
+             AND NOT EXISTS (
+               SELECT 1 FROM fs_entries
+               WHERE workspace_id = $1 AND blob_hash = $2
+             )`,
+          [this.workspaceId, hash],
+        );
+      }
+    }
+  }
+
+  async dispose(): Promise<void> {
+    await this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
+      await this.deleteVersionById(tx, versionId);
+    });
+    this.cachedVersionId = null;
   }
 }
 
-async function hasEmbeddingColumn(tx: SqlClient): Promise<boolean> {
-  const result = await tx.query<{ exists: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM information_schema.columns
-       WHERE table_name = 'fs_nodes' AND column_name = 'embedding'
-     ) AS exists`,
-  );
-  return result.rows[0]?.exists ?? false;
+// -- Free helpers -----------------------------------------------------------
+
+function sha256(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(bytes).digest());
+}
+
+function bytesKey(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("hex");
+}
+
+// path-encoding's `encodeLabel` is not exported here; mirror the encoding for a single basename.
+// The encoded last label of an ltree is exactly `encodeLabel(basename)`. We re-implement it
+// inline to avoid leaking another export from path-encoding.
+function encodeBasenameForLtree(name: string): string {
+  if (name.length === 0) throw new Error("Cannot encode empty basename");
+  let result = "";
+  for (const char of name) {
+    if (char === "\0") throw new Error("Filenames cannot contain null bytes");
+    if (/[A-Za-z0-9\-]/.test(char)) {
+      result += char;
+    } else {
+      const hex = char
+        .codePointAt(0)!
+        .toString(16)
+        .toUpperCase()
+        .padStart(2, "0");
+      result += `_x${hex}_`;
+    }
+  }
+  return result;
 }
 
 function globToRegex(pattern: string): RegExp {
@@ -1622,7 +1902,11 @@ function globToRegex(pattern: string): RegExp {
     } else if (char === "{") {
       const close = pattern.indexOf("}", i);
       if (close !== -1) {
-        const options = pattern.slice(i + 1, close).split(",").map(escapeRegex).join("|");
+        const options = pattern
+          .slice(i + 1, close)
+          .split(",")
+          .map(escapeRegex)
+          .join("|");
         regex += `(?:${options})`;
         i = close + 1;
       } else {
@@ -1638,34 +1922,14 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp(regex);
 }
 
-function injectWorkspaceSettings(text: string): string {
-  const trimmed = text.trimStart();
-  const leading = text.slice(0, text.length - trimmed.length);
-  const shifted = shiftSqlParams(trimmed, 2);
-  const settingsCte =
-    "_bash_gres_settings AS (SELECT set_config('app.workspace_id', $1, true), set_config('statement_timeout', $2, true))";
-
-  if (/^WITH\b/i.test(trimmed)) {
-    return `${leading}WITH ${settingsCte}, ${shifted.slice(5)}`;
-  }
-
-  return `${leading}WITH ${settingsCte} ${shifted}`;
-}
-
-function shiftSqlParams(text: string, offset: number): string {
-  return text.replace(/\$(\d+)/g, (_match, index) => `$${Number(index) + offset}`);
-}
-
 function globLiteralPrefix(pattern: string): string | null {
   const segments = pattern.split("/");
   const prefix: string[] = [];
-
   for (const segment of segments) {
     if (segment === "" || segment === "." || segment === "..") break;
     if (/[?*{]/.test(segment)) break;
     prefix.push(segment);
   }
-
   return prefix.length > 0 ? prefix.join("/") : null;
 }
 
@@ -1681,16 +1945,13 @@ function analyzeGlobPattern(
   if (relative === "") {
     return { exact: true, fixedDepth: 0, basename: null };
   }
-
   const segments = relative.split("/").filter(Boolean);
   const basename = segments.at(-1) ?? null;
   return {
     exact: false,
     fixedDepth: segments.includes("**") ? null : segments.length,
     basename:
-      basename !== null && !/[?*{]/.test(basename)
-        ? basename
-        : null,
+      basename !== null && !/[?*{]/.test(basename) ? basename : null,
   };
 }
 

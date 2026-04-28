@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { TEST_ADAPTERS } from "../../tests/helpers.js";
+import { TEST_ADAPTERS, resetWorkspace } from "../../tests/helpers.js";
 import { ensureSetup } from "../../tests/global-setup.js";
 import { PgFileSystem } from "./filesystem.js";
 import { FsError } from "./types.js";
@@ -25,9 +25,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem permissions [%s]", (_name, factory) =
   });
 
   beforeEach(async () => {
-    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
-      WORKSPACE,
-    ]);
+    await resetWorkspace(client, WORKSPACE);
     rwFs = new PgFileSystem({ db: client, workspaceId: WORKSPACE });
     await rwFs.init();
 

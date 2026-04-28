@@ -16,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { TEST_ADAPTERS } from "./helpers.js";
+import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
@@ -38,9 +38,7 @@ describe.each(TEST_ADAPTERS)("PgFileSystem: native parity [%s]", (_name, factory
   });
 
   beforeEach(async () => {
-    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [
-      "test-workspace-native-parity",
-    ]);
+    await resetWorkspace(client, "test-workspace-native-parity");
     fs = new PgFileSystem({ db: client, workspaceId: "test-workspace-native-parity" });
     await fs.init();
   });

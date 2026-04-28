@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { Bash } from "just-bash";
 import { ensureSetup } from "./global-setup.js";
-import { TEST_ADAPTERS } from "./helpers.js";
+import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import type { SqlClient } from "./helpers.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 
@@ -24,7 +24,7 @@ describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
   });
 
   beforeEach(async () => {
-    await client.query("DELETE FROM fs_nodes WHERE workspace_id = $1", [wsId]);
+    await resetWorkspace(client, wsId);
     pgFs = new PgFileSystem({ db: client, workspaceId: wsId });
     await pgFs.init();
     bash = new Bash({ fs: pgFs });
