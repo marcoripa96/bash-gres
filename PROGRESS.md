@@ -35,8 +35,12 @@ Notes: deferred items have unambiguous design but will be authored alongside the
 
 ## Phase 2 - `transaction(fn)`
 
-- [ ] Implement `PgFileSystem.transaction()`
-- [ ] Tests: commit, rollback, readonly rejects writes, nested calls share the outer tx, post-commit label mutation
+- [x] Implement `PgFileSystem.transaction()` with a transaction-bound facade (private `txClient` field, `createTxFacade()`)
+- [x] `withWorkspace()` short-circuits to `txClient` when set, so all public methods called on the facade reuse the outer transaction
+- [x] Re-entrant: `transaction()` on a facade returns the same facade
+- [x] `fork()` inside a transaction returns a tx-bound child so subsequent writes on the new branch stay in the outer tx
+- [x] Tests in `tests/transaction.test.ts`: commit, rollback, return value, nested calls share outer tx, readonly rejects writes (EPERM), RLS isolation, rootDir preservation
+- [ ] Post-commit label mutation hook (deferred to Phase 5 with `renameVersion()`)
 
 ## Phase 3 - `diff()` / `diffStream()`
 

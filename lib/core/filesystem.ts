@@ -117,6 +117,13 @@ export class PgFileSystem {
   private readonly baseOptions: PgFileSystemOptions;
   private cachedVersionId: number | null = null;
   private blobsHasEmbeddingCache: boolean | null = null;
+  /**
+   * When non-null, this instance is a transaction-bound facade. All `withWorkspace()`
+   * calls on the facade run `fn(txClient)` directly instead of opening a new
+   * transaction. The outer `transaction()` call has already wired up RLS
+   * (`app.workspace_id`) and `statement_timeout` on this client.
+   */
+  private txClient: SqlClient | null = null;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -180,9 +187,7 @@ export class PgFileSystem {
 
   /**
    * Open a transaction on `client`, install the per-tx workspace + timeout
-   * settings, and run `fn`. Use `withWorkspace()` for a normal call against
-   * the instance's own client; pass an already-open `tx` here when composing
-   * multiple operations inside one outer transaction.
+   * settings, and run `fn`. Used by both `withWorkspace()` and `transaction()`.
    */
   private runInWorkspace<T>(
     client: SqlClient,
@@ -196,16 +201,27 @@ export class PgFileSystem {
         [this.workspaceId, String(this.statementTimeoutMs)],
       );
       return fn(tx);
-    }).catch((e) => {
+    });
+  }
+
+  /**
+   * Run `fn` inside a workspace-scoped transaction. If this instance is a
+   * transaction-bound facade (i.e. `txClient` is set), reuse the open
+   * transaction directly. Maps PostgreSQL "read-only transaction" violations
+   * (SQLSTATE 25006) into the public `EPERM` `FsError`.
+   */
+  private async withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
+    try {
+      if (this.txClient) {
+        return await fn(this.txClient);
+      }
+      return await this.runInWorkspace(this.client, fn);
+    } catch (e) {
       if (e instanceof SqlError && e.code === "25006") {
         throw new FsError("EPERM", "read-only file system", "/");
       }
       throw e;
-    });
-  }
-
-  private withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
-    return this.runInWorkspace(this.client, fn);
+    }
   }
 
   // -- Version resolution -----------------------------------------------------
@@ -1823,6 +1839,59 @@ export class PgFileSystem {
 
   // -- Versioning -------------------------------------------------------------
 
+  /**
+   * Run `fn` inside a single database transaction. `fn` receives a
+   * transaction-bound `PgFileSystem` facade for the same workspace, version,
+   * permissions, limits, and rootDir. Multiple operations on the facade share
+   * the same transaction: if `fn` throws or rejects, every write rolls back;
+   * if `fn` returns, the transaction commits and the return value is the
+   * `transaction()` result.
+   *
+   * Re-entrant: calling `transaction()` on a facade that is already inside an
+   * outer transaction reuses that outer transaction (no nested savepoints).
+   *
+   * Read-only instances still produce a read-only transaction; writes inside
+   * `fn` raise `FsError(EPERM)`.
+   *
+   * The facade should not be retained after `fn` resolves — its underlying
+   * SQL transaction has closed and further calls will fail.
+   */
+  async transaction<T>(fn: (tx: PgFileSystem) => Promise<T>): Promise<T> {
+    if (this.txClient) {
+      // Already inside a transaction: nested calls share the outer tx.
+      return fn(this);
+    }
+    try {
+      return await this.runInWorkspace(this.client, async (sqlTx) => {
+        const facade = this.createTxFacade(sqlTx);
+        return fn(facade);
+      });
+    } catch (e) {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Build a transaction-bound `PgFileSystem` facade that shares this instance's
+   * configuration and runs every operation against the supplied SQL transaction
+   * client.
+   */
+  private createTxFacade(sqlTx: SqlClient): PgFileSystem {
+    const facade = new PgFileSystem({
+      ...this.baseOptions,
+      db: this.rawDb,
+      // Use the live label, not the construction-time one, so a facade created
+      // after a successful renameVersion() still points at the right version.
+      version: this.versionLabel,
+    });
+    facade.txClient = sqlTx;
+    facade.cachedVersionId = this.cachedVersionId;
+    return facade;
+  }
+
   async fork(newVersion: string): Promise<PgFileSystem> {
     if (!newVersion || newVersion.length === 0) {
       throw new Error("fork: newVersion must be a non-empty string");
@@ -1864,11 +1933,17 @@ export class PgFileSystem {
       );
     });
 
-    return new PgFileSystem({
+    const child = new PgFileSystem({
       ...this.baseOptions,
       db: this.rawDb,
       version: newVersion,
     });
+    if (this.txClient) {
+      // Stay in the outer transaction so subsequent writes through the child
+      // are visible to other facade-bound operations and roll back together.
+      child.txClient = this.txClient;
+    }
+    return child;
   }
 
   async listVersions(): Promise<string[]> {
