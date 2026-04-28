@@ -126,6 +126,55 @@ export interface FsPermissions {
   write?: boolean;
 }
 
+// -- Versioning primitives --------------------------------------------------
+
+export type NodeType = "file" | "directory" | "symlink";
+
+/** Public-facing shape of an entry at a single path in some version. */
+export interface EntryShape {
+  type: NodeType;
+  mode: number;
+  size: number;
+  mtime: Date;
+  /** Hex-encoded sha256 of the file's blob. `null` for directories and symlinks. */
+  blobHash: string | null;
+  /** Symlink target as stored. `null` for files and directories. */
+  symlinkTarget: string | null;
+}
+
+export interface VersionDiffEntry {
+  path: string;
+  change: "added" | "removed" | "modified" | "type-changed";
+  before: EntryShape | null;
+  after: EntryShape | null;
+}
+
+export type MergeStrategy = "fail" | "ours" | "theirs";
+
+export interface ConflictEntry {
+  path: string;
+  base: EntryShape | null;
+  ours: EntryShape | null;
+  theirs: EntryShape | null;
+}
+
+export interface MergeResult {
+  applied: string[];
+  conflicts: ConflictEntry[];
+  skipped: string[];
+}
+
+export interface RenameVersionResult {
+  label: string;
+  displacedLabel?: string;
+}
+
+export interface PromoteResult {
+  label: string;
+  displacedLabel?: string;
+  droppedPrevious: boolean;
+}
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;

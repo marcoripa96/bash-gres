@@ -18,18 +18,20 @@ Branch: `feat/versioning-primitives`.
 
 ## Phase 1 - Shared refactor
 
-- [ ] Public versioning types in `lib/core/types.ts` (`NodeType`, `EntryShape`, `VersionDiffEntry`, `MergeStrategy`, `ConflictEntry`, `MergeResult`, `RenameVersionResult`, `PromoteResult`)
-- [ ] Re-export new types from `lib/core/index.ts`
-- [ ] Convert `version` to a getter backed by mutable `versionLabel`
-- [ ] Split `withWorkspace()` into `runInWorkspace(client, fn)` + `withWorkspace(fn)`
-- [ ] Transaction-bound `PgFileSystem` facade with post-commit hooks
-- [ ] Shared visible-entry helpers (`fetchVisibleSubtree`, entry-shape mapper)
-- [ ] Entry-shape writer (`writeEntryShape`)
-- [ ] Parent-directory expansion helper for batch applies
-- [ ] Batch node-count validation
-- [ ] Entry equality helper (`node_type`, `blob_hash`, `mode`, `symlink_target`)
-- [ ] Advisory lock helper for version mutation
-- [ ] Version lookup helpers (`getVersionIdByLabel`, `requireVersionIdByLabel`)
+- [x] Public versioning types in `lib/core/types.ts` (`NodeType`, `EntryShape`, `VersionDiffEntry`, `MergeStrategy`, `ConflictEntry`, `MergeResult`, `RenameVersionResult`, `PromoteResult`)
+- [x] Re-export new types from `lib/core/index.ts`
+- [x] Convert `version` to a getter backed by mutable `versionLabel`
+- [x] Split `withWorkspace()` into `runInWorkspace(client, fn)` + `withWorkspace(fn)` so a transaction-bound facade can reuse it
+- [ ] Transaction-bound `PgFileSystem` facade with post-commit hooks (deferred to Phase 2 where it's wired up)
+- [ ] Shared visible-entry helpers / entry-shape mapper (deferred to Phase 3 where diff/merge first need them)
+- [x] Entry-shape writer (`writeEntryShape`) and `InternalEntryShape` row type
+- [ ] Parent-directory expansion helper for batch applies (deferred to Phase 6 where merge first needs it)
+- [ ] Batch node-count validation (deferred to Phase 6)
+- [x] Entry equality helper (`entryShapeEqual` over `node_type`, `blob_hash`, `mode`, `symlink_target`)
+- [x] Advisory lock helper for version mutation (`lockVersions`)
+- [x] Version lookup helpers (`getVersionIdByLabel`, `requireVersionIdByLabel`)
+
+Notes: deferred items have unambiguous design but will be authored alongside their first consumer to avoid speculative dead code. They're tracked here so we don't lose them.
 
 ## Phase 2 - `transaction(fn)`
 

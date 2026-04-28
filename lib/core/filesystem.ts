@@ -66,6 +66,21 @@ interface SubtreeRow extends DirChildRow {
   depth_in_subtree: number;
 }
 
+/**
+ * Internal representation of an entry's data, used by batch primitives
+ * (diff/merge/cherry-pick/revert/detach) to apply pre-fetched rows back into
+ * `fs_entries` without re-reading or re-hashing content. Mirrors the public
+ * `EntryShape` from `types.ts`, but holds a raw `Uint8Array` blob hash for
+ * direct binding to PostgreSQL.
+ */
+interface InternalEntryShape {
+  type: "file" | "directory" | "symlink";
+  blobHash: Uint8Array | null;
+  symlinkTarget: string | null;
+  mode: number;
+  sizeBytes: number;
+}
+
 const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_MAX_FILES = 10_000;
 const DEFAULT_MAX_DEPTH = 50;
@@ -82,7 +97,12 @@ export class PgFileSystem {
   private client: SqlClient;
   private rawDb: SqlClient;
   readonly workspaceId: string;
-  readonly version: string;
+  /**
+   * Mutable backing for the public `version` getter. Internal code that needs
+   * to change the instance's label after a successful commit (e.g. `renameVersion()`)
+   * writes here.
+   */
+  private versionLabel: string;
   readonly permissions: { read: boolean; write: boolean };
   private maxFileSize: number;
   private maxReadSize: number | undefined;
@@ -107,8 +127,8 @@ export class PgFileSystem {
     this.rawDb = options.db;
     this.client = perms.write ? options.db : readonlySqlClient(options.db);
     this.workspaceId = options.workspaceId ?? randomUUID();
-    this.version = options.version ?? DEFAULT_VERSION;
-    if (this.version.length === 0) {
+    this.versionLabel = options.version ?? DEFAULT_VERSION;
+    if (this.versionLabel.length === 0) {
       throw new Error("version must be a non-empty string");
     }
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
@@ -127,6 +147,14 @@ export class PgFileSystem {
       ...options,
       workspaceId: this.workspaceId,
     };
+  }
+
+  /**
+   * The version label this instance is bound to. Backed by a mutable private field
+   * so that operations like `renameVersion()` can update the label after commit.
+   */
+  get version(): string {
+    return this.versionLabel;
   }
 
   async init(): Promise<void> {
@@ -150,8 +178,17 @@ export class PgFileSystem {
 
   // -- Transaction wrapper (sets RLS context + timeout) -----------------------
 
-  private withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
-    return this.client.transaction(async (tx) => {
+  /**
+   * Open a transaction on `client`, install the per-tx workspace + timeout
+   * settings, and run `fn`. Use `withWorkspace()` for a normal call against
+   * the instance's own client; pass an already-open `tx` here when composing
+   * multiple operations inside one outer transaction.
+   */
+  private runInWorkspace<T>(
+    client: SqlClient,
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    return client.transaction(async (tx) => {
       await tx.query(
         `SELECT
            set_config('app.workspace_id', $1, true),
@@ -167,6 +204,10 @@ export class PgFileSystem {
     });
   }
 
+  private withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T> {
+    return this.runInWorkspace(this.client, fn);
+  }
+
   // -- Version resolution -----------------------------------------------------
 
   private async getCurrentVersionId(tx: SqlClient): Promise<number> {
@@ -175,11 +216,11 @@ export class PgFileSystem {
       `SELECT id FROM fs_versions
        WHERE workspace_id = $1 AND label = $2
        LIMIT 1`,
-      [this.workspaceId, this.version],
+      [this.workspaceId, this.versionLabel],
     );
     if (r.rows.length === 0) {
       throw new Error(
-        `Version '${this.version}' does not exist in workspace '${this.workspaceId}'. Call init() or fork() first.`,
+        `Version '${this.versionLabel}' does not exist in workspace '${this.workspaceId}'. Call init() or fork() first.`,
       );
     }
     this.cachedVersionId = Number(r.rows[0].id);
@@ -192,7 +233,7 @@ export class PgFileSystem {
       `SELECT id FROM fs_versions
        WHERE workspace_id = $1 AND label = $2
        LIMIT 1`,
-      [this.workspaceId, this.version],
+      [this.workspaceId, this.versionLabel],
     );
     if (existing.rows.length > 0) {
       this.cachedVersionId = Number(existing.rows[0].id);
@@ -202,7 +243,7 @@ export class PgFileSystem {
       `INSERT INTO fs_versions (workspace_id, label, parent_version_id)
        VALUES ($1, $2, NULL)
        RETURNING id`,
-      [this.workspaceId, this.version],
+      [this.workspaceId, this.versionLabel],
     );
     const id = Number(created.rows[0]!.id);
     await tx.query(
@@ -213,6 +254,52 @@ export class PgFileSystem {
     );
     this.cachedVersionId = id;
     return id;
+  }
+
+  /** Resolve a label to a version ID in this workspace, or null if missing. */
+  private async getVersionIdByLabel(
+    tx: SqlClient,
+    label: string,
+  ): Promise<number | null> {
+    const r = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_versions
+       WHERE workspace_id = $1 AND label = $2
+       LIMIT 1`,
+      [this.workspaceId, label],
+    );
+    return r.rows.length > 0 ? Number(r.rows[0]!.id) : null;
+  }
+
+  private async requireVersionIdByLabel(
+    tx: SqlClient,
+    label: string,
+  ): Promise<number> {
+    const id = await this.getVersionIdByLabel(tx, label);
+    if (id === null) {
+      throw new Error(
+        `Version '${label}' does not exist in workspace '${this.workspaceId}'.`,
+      );
+    }
+    return id;
+  }
+
+  /**
+   * Acquire transaction-scoped advisory locks for the given version IDs in
+   * deterministic order (sorted ascending) to avoid deadlocks. Released at end
+   * of transaction.
+   */
+  private async lockVersions(
+    tx: SqlClient,
+    versionIds: number[],
+  ): Promise<void> {
+    if (versionIds.length === 0) return;
+    const sorted = [...new Set(versionIds)].sort((a, b) => a - b);
+    for (const id of sorted) {
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1), $2::int)`, [
+        this.workspaceId,
+        id,
+      ]);
+    }
   }
 
   // -- Visibility resolution --------------------------------------------------
@@ -587,6 +674,34 @@ export class PgFileSystem {
          size_bytes = 0,
          mtime = now()`,
       [this.workspaceId, versionId, lt, TOMBSTONE],
+    );
+  }
+
+  /**
+   * Apply a pre-fetched entry shape to the destination version's `fs_entries`.
+   * Used by batch operations (merge, cherry-pick, revert, detach) to copy
+   * within the same workspace without rehashing content. A `null` shape writes
+   * a tombstone.
+   */
+  private async writeEntryShape(
+    tx: SqlClient,
+    versionId: number,
+    posixPath: string,
+    shape: InternalEntryShape | null,
+  ): Promise<void> {
+    if (shape === null) {
+      await this.writeTombstone(tx, versionId, posixPath);
+      return;
+    }
+    await this.upsertEntry(
+      tx,
+      versionId,
+      posixPath,
+      shape.type,
+      shape.blobHash,
+      shape.sizeBytes,
+      shape.mode,
+      shape.symlinkTarget,
     );
   }
 
@@ -1712,9 +1827,9 @@ export class PgFileSystem {
     if (!newVersion || newVersion.length === 0) {
       throw new Error("fork: newVersion must be a non-empty string");
     }
-    if (newVersion === this.version) {
+    if (newVersion === this.versionLabel) {
       throw new Error(
-        `fork: newVersion must differ from current version '${this.version}'`,
+        `fork: newVersion must differ from current version '${this.versionLabel}'`,
       );
     }
 
@@ -1769,7 +1884,7 @@ export class PgFileSystem {
   }
 
   async deleteVersion(version: string): Promise<void> {
-    if (version === this.version) {
+    if (version === this.versionLabel) {
       throw new Error(
         `deleteVersion: cannot delete current version '${version}'`,
       );
@@ -1868,6 +1983,37 @@ function sha256(bytes: Uint8Array): Uint8Array {
 
 function bytesKey(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("hex");
+}
+
+/**
+ * Semantic equality for entry shapes. Compares `type`, `blob_hash`,
+ * `symlink_target`, and `mode`. Ignores `mtime`, `size_bytes`, `created_at`.
+ * `size_bytes` is derived from blob/symlink content; comparing it would be
+ * redundant with `blob_hash` and `symlink_target`.
+ */
+function entryShapeEqual(
+  a: InternalEntryShape | null,
+  b: InternalEntryShape | null,
+): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  if (a.type !== b.type) return false;
+  if (a.mode !== b.mode) return false;
+  if ((a.symlinkTarget ?? null) !== (b.symlinkTarget ?? null)) return false;
+  return blobHashEqual(a.blobHash, b.blobHash);
+}
+
+function blobHashEqual(
+  a: Uint8Array | null,
+  b: Uint8Array | null,
+): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 // path-encoding's `encodeLabel` is not exported here; mirror the encoding for a single basename.

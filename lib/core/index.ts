@@ -20,6 +20,14 @@ export {
   type SetupOptions,
   type FsPermissions,
   type PgFileSystemOptions,
+  type NodeType,
+  type EntryShape,
+  type VersionDiffEntry,
+  type MergeStrategy,
+  type ConflictEntry,
+  type MergeResult,
+  type RenameVersionResult,
+  type PromoteResult,
 } from "./types.js";
 export {
   pathToLtree,
