@@ -70,8 +70,8 @@ const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_MAX_FILES = 10_000;
 const DEFAULT_MAX_DEPTH = 50;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 5000;
-const MAX_SYMLINK_DEPTH = 16;
-const MAX_CP_NODES = 10_000;
+const DEFAULT_MAX_SYMLINK_DEPTH = 16;
+const DEFAULT_MAX_CP_NODES = 10_000;
 
 const DEFAULT_VERSION = "main";
 const TOMBSTONE = "tombstone";
@@ -88,6 +88,8 @@ export class PgFileSystem {
   private maxReadSize: number | undefined;
   private maxFiles: number;
   private maxDepth: number;
+  private maxSymlinkDepth: number;
+  private maxCpNodes: number;
   private statementTimeoutMs: number;
   private embed?: (text: string) => Promise<number[]>;
   private embeddingDimensions?: number;
@@ -113,6 +115,9 @@ export class PgFileSystem {
     this.maxReadSize = options.maxReadSize;
     this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    this.maxSymlinkDepth =
+      options.maxSymlinkDepth ?? DEFAULT_MAX_SYMLINK_DEPTH;
+    this.maxCpNodes = options.maxCpNodes ?? DEFAULT_MAX_CP_NODES;
     this.statementTimeoutMs =
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
@@ -248,7 +253,7 @@ export class PgFileSystem {
   private async resolveEntryFollowSymlink(
     tx: SqlClient,
     posixPath: string,
-    maxDepth = MAX_SYMLINK_DEPTH,
+    maxDepth: number = this.maxSymlinkDepth,
   ): Promise<EntryRow> {
     const node = await this.resolveEntry(tx, posixPath);
     if (!node)
@@ -760,8 +765,10 @@ export class PgFileSystem {
       throw new FsError("ENOENT", "no such file or directory, cp", src);
 
     nodeCounter.count++;
-    if (nodeCounter.count > MAX_CP_NODES) {
-      throw new Error(`cp: too many nodes (exceeds limit of ${MAX_CP_NODES})`);
+    if (nodeCounter.count > this.maxCpNodes) {
+      throw new Error(
+        `cp: too many nodes (exceeds limit of ${this.maxCpNodes})`,
+      );
     }
 
     if (srcEntry.node_type === "directory") {
@@ -1153,7 +1160,7 @@ export class PgFileSystem {
   private async internalRealpath(
     tx: SqlClient,
     path: string,
-    maxDepth = MAX_SYMLINK_DEPTH,
+    maxDepth: number = this.maxSymlinkDepth,
   ): Promise<string> {
     const node = await this.resolveEntry(tx, path);
     if (!node)

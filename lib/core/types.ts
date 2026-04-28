@@ -132,10 +132,18 @@ export interface PgFileSystemOptions {
   version?: string;
   permissions?: FsPermissions;
   rootDir?: string;
+  /** Maximum size of a single file write, in bytes. Default: 10 MiB. */
   maxFileSize?: number;
+  /** If set, `readFile` rejects files larger than this many bytes. Default: unlimited. */
   maxReadSize?: number;
+  /** Maximum number of entries (files + directories) per workspace. Default: 10000. */
   maxFiles?: number;
+  /** Maximum path depth (number of `/`-separated segments). Default: 50. */
   maxDepth?: number;
+  /** Maximum levels of symlink indirection before ELOOP. Default: 16. */
+  maxSymlinkDepth?: number;
+  /** Maximum number of nodes a single `cp -r` may traverse. Default: 10000. */
+  maxCpNodes?: number;
   statementTimeoutMs?: number;
   embed?: (text: string) => Promise<number[]>;
   embeddingDimensions?: number;
