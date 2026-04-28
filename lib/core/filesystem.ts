@@ -17,6 +17,8 @@ import type {
   EntryShape,
   NodeType,
   VersionDiffEntry,
+  RenameVersionResult,
+  PromoteResult,
 } from "./types.js";
 import { FsError, SqlError } from "./types.js";
 import { readonlySqlClient } from "./readonly.js";
@@ -146,6 +148,19 @@ export class PgFileSystem {
    * (`app.workspace_id`) and `statement_timeout` on this client.
    */
   private txClient: SqlClient | null = null;
+  /**
+   * Hooks queued by tx-bound facade methods (e.g. `renameVersion()`) to apply
+   * instance-state mutations on the originating instance only after the outer
+   * transaction commits. Set on the facade by `transaction()`; never mutated on
+   * a top-level instance.
+   */
+  private postCommitHooks: Array<() => void> | null = null;
+  /**
+   * The instance that produced this facade via `createTxFacade()`. Used so that
+   * post-commit hooks (such as label updates) can target the surviving outer
+   * instance rather than the transient facade.
+   */
+  private originInstance: PgFileSystem | null = null;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -1883,11 +1898,17 @@ export class PgFileSystem {
       // Already inside a transaction: nested calls share the outer tx.
       return fn(this);
     }
+    const hooks: Array<() => void> = [];
     try {
-      return await this.runInWorkspace(this.client, async (sqlTx) => {
-        const facade = this.createTxFacade(sqlTx);
+      const value = await this.runInWorkspace(this.client, async (sqlTx) => {
+        const facade = this.createTxFacade(sqlTx, hooks);
         return fn(facade);
       });
+      // Outer tx committed — apply queued post-commit state mutations on this
+      // instance. If the tx threw, we skip these and the instance's state is
+      // unchanged.
+      for (const hook of hooks) hook();
+      return value;
     } catch (e) {
       if (e instanceof SqlError && e.code === "25006") {
         throw new FsError("EPERM", "read-only file system", "/");
@@ -1901,7 +1922,10 @@ export class PgFileSystem {
    * configuration and runs every operation against the supplied SQL transaction
    * client.
    */
-  private createTxFacade(sqlTx: SqlClient): PgFileSystem {
+  private createTxFacade(
+    sqlTx: SqlClient,
+    postCommitHooks: Array<() => void>,
+  ): PgFileSystem {
     const facade = new PgFileSystem({
       ...this.baseOptions,
       db: this.rawDb,
@@ -1911,6 +1935,8 @@ export class PgFileSystem {
     });
     facade.txClient = sqlTx;
     facade.cachedVersionId = this.cachedVersionId;
+    facade.postCommitHooks = postCommitHooks;
+    facade.originInstance = this;
     return facade;
   }
 
@@ -2380,6 +2406,151 @@ export class PgFileSystem {
     }
   }
 
+  /**
+   * Rename the current version's label. With `swap: true`, atomically move an
+   * existing label out of the way (renaming the displaced version to a
+   * generated `<newLabel>-prev-YYYYMMDDHHMMSS-<id>` label) and assign that
+   * label to the current version. The current version's ID does not change,
+   * so `cachedVersionId` is preserved.
+   *
+   * If `newLabel` already equals the current label, the call is a no-op and
+   * returns `{ label: newLabel }` without touching the database.
+   *
+   * If `newLabel` is taken by another version and `swap !== true`, throws.
+   *
+   * The instance's `version` getter is updated only after the surrounding
+   * SQL commits. When called inside `transaction(fn)`, the outer instance's
+   * label is updated only if the outer transaction commits successfully; a
+   * rollback leaves it at the prior label.
+   */
+  async renameVersion(
+    newLabel: string,
+    opts?: { swap?: boolean },
+  ): Promise<RenameVersionResult> {
+    if (!newLabel || newLabel.length === 0) {
+      throw new Error("renameVersion: newLabel must be a non-empty string");
+    }
+    if (newLabel === this.versionLabel) {
+      return { label: newLabel };
+    }
+    const swap = opts?.swap ?? false;
+    const result = await this.withWorkspace((tx) =>
+      this.internalRenameVersion(tx, newLabel, swap),
+    );
+    // Update the active label on this instance. For top-level calls the SQL
+    // has already committed; for tx-bound facades it has not, but the facade
+    // is single-shot and is discarded when the outer transaction resolves.
+    // The `cachedVersionId` is left intact: the version ID didn't move.
+    this.versionLabel = result.label;
+    if (this.txClient && this.originInstance && this.postCommitHooks) {
+      const origin = this.originInstance;
+      const committed = result.label;
+      this.postCommitHooks.push(() => {
+        origin.versionLabel = committed;
+      });
+    }
+    return result;
+  }
+
+  private async internalRenameVersion(
+    tx: SqlClient,
+    newLabel: string,
+    swap: boolean,
+  ): Promise<RenameVersionResult> {
+    const currentId = await this.getCurrentVersionId(tx);
+
+    // Lock the target label row (if any) so a concurrent rename can't race
+    // between our existence check and the UPDATEs below.
+    const targetRows = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_versions
+       WHERE workspace_id = $1 AND label = $2
+       FOR UPDATE`,
+      [this.workspaceId, newLabel],
+    );
+
+    if (targetRows.rows.length === 0) {
+      await this.lockVersions(tx, [currentId]);
+      try {
+        await tx.query(
+          `UPDATE fs_versions SET label = $3
+           WHERE workspace_id = $1 AND id = $2`,
+          [this.workspaceId, currentId, newLabel],
+        );
+      } catch (e) {
+        throw mapVersionLabelUniqueViolation(e, newLabel);
+      }
+      return { label: newLabel };
+    }
+
+    const targetId = Number(targetRows.rows[0]!.id);
+    if (targetId === currentId) {
+      // The label already belongs to us (e.g. a stale cachedVersionId path);
+      // no DB change needed.
+      return { label: newLabel };
+    }
+
+    if (!swap) {
+      throw new Error(
+        `renameVersion: label '${newLabel}' is already used by another version. Pass { swap: true } to displace it.`,
+      );
+    }
+
+    await this.lockVersions(tx, [currentId, targetId]);
+
+    const displacedLabel = generatePrevLabel(newLabel, targetId);
+    try {
+      await tx.query(
+        `UPDATE fs_versions SET label = $3
+         WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, targetId, displacedLabel],
+      );
+    } catch (e) {
+      throw mapVersionLabelUniqueViolation(e, displacedLabel);
+    }
+    try {
+      await tx.query(
+        `UPDATE fs_versions SET label = $3
+         WHERE workspace_id = $1 AND id = $2`,
+        [this.workspaceId, currentId, newLabel],
+      );
+    } catch (e) {
+      throw mapVersionLabelUniqueViolation(e, newLabel);
+    }
+    return { label: newLabel, displacedLabel };
+  }
+
+  /**
+   * Promote the current version to a label, materializing it as a self-owning
+   * version, swapping any existing holder out of the way, and optionally
+   * deleting that previous holder. The whole sequence is one transaction:
+   * `detach()` -> `renameVersion(label, { swap: true })` -> optional
+   * `deleteVersion(displacedLabel)`.
+   *
+   * If `dropPrevious` is true and the displaced version still has descendants,
+   * the delete fails and the entire promotion rolls back.
+   */
+  async promoteTo(
+    label: string,
+    opts?: { dropPrevious?: boolean },
+  ): Promise<PromoteResult> {
+    if (!label || label.length === 0) {
+      throw new Error("promoteTo: label must be a non-empty string");
+    }
+    const dropPrevious = opts?.dropPrevious ?? false;
+    return this.transaction(async (tx) => {
+      await tx.detach();
+      const renamed = await tx.renameVersion(label, { swap: true });
+      if (dropPrevious && renamed.displacedLabel) {
+        await tx.deleteVersion(renamed.displacedLabel);
+      }
+      return {
+        label: renamed.label,
+        displacedLabel: dropPrevious ? undefined : renamed.displacedLabel,
+        droppedPrevious: Boolean(dropPrevious && renamed.displacedLabel),
+      };
+    });
+  }
+
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
@@ -2397,6 +2568,43 @@ function sha256(bytes: Uint8Array): Uint8Array {
 
 function bytesKey(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("hex");
+}
+
+/**
+ * Build the displaced-label format documented in VERSIONING_PRIMITIVES.md
+ * (`<newLabel>-prev-YYYYMMDDHHMMSS-<displacedId>`). The trailing version ID
+ * makes the label unique within a workspace even if two swaps land in the
+ * same UTC second.
+ */
+function generatePrevLabel(newLabel: string, displacedId: number): string {
+  const now = new Date();
+  const ts =
+    now.getUTCFullYear().toString() +
+    String(now.getUTCMonth() + 1).padStart(2, "0") +
+    String(now.getUTCDate()).padStart(2, "0") +
+    String(now.getUTCHours()).padStart(2, "0") +
+    String(now.getUTCMinutes()).padStart(2, "0") +
+    String(now.getUTCSeconds()).padStart(2, "0");
+  return `${newLabel}-prev-${ts}-${displacedId}`;
+}
+
+/**
+ * Map a PostgreSQL unique-violation (`23505`) on `unique_workspace_version_label`
+ * to a clear public error. Other errors pass through unchanged.
+ */
+function mapVersionLabelUniqueViolation(e: unknown, label: string): unknown {
+  if (
+    e instanceof SqlError &&
+    e.code === "23505" &&
+    (e.constraint === "unique_workspace_version_label" ||
+      (e.detail ?? "").includes("workspace_id") ||
+      e.message.includes("unique_workspace_version_label"))
+  ) {
+    return new Error(
+      `renameVersion: label '${label}' is already used by another version.`,
+    );
+  }
+  return e;
 }
 
 /**

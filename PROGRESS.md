@@ -60,9 +60,11 @@ Notes: deferred items have unambiguous design but will be authored alongside the
 
 ## Phase 5 - `renameVersion()` & `promoteTo()`
 
-- [ ] Implement `renameVersion(label, opts)` with `swap`
-- [ ] Implement `promoteTo(label, opts)` sugar (detach + renameVersion + optional deleteVersion)
-- [ ] Tests: rename to unused / existing / swap / rollback preserves label / promote E2E with `dropPrevious`
+- [x] Implement `renameVersion(label, opts)` with `swap`. Locks current (and displaced if any) via `lockVersions()` + `SELECT FOR UPDATE` on the target label row. Displaced label format: `<newLabel>-prev-YYYYMMDDHHMMSS-<displacedId>` (UTC). 23505 unique violations on `unique_workspace_version_label` are remapped to a clear public error. `cachedVersionId` is preserved (the version ID never moves).
+- [x] Post-commit hook plumbing in `transaction()`: facade-bound writes that need to mutate outer-instance state (currently just `versionLabel`) push closures into a per-tx hooks array. The orchestrator drains the array only after the SQL transaction commits successfully; rollback discards it. Top-level (non-tx) `renameVersion()` mutates `versionLabel` directly after `withWorkspace()` returns.
+- [x] Implement `promoteTo(label, opts)` sugar — single `transaction(fn)` wrapper around `detach()` + `renameVersion(label, { swap: true })` + optional `deleteVersion(displacedLabel)`. Returns `{ label, displacedLabel, droppedPrevious }` (omits `displacedLabel` when `dropPrevious: true`).
+- [x] Tests in `tests/promote.test.ts` (11 cases × 3 adapters): rename to unused / no-op when same / collision throws without swap / swap displaces and assigns the new label / rollback inside `transaction()` preserves outer label / commit inside `transaction()` updates outer label / empty label rejected / promote keeps displaced when `dropPrevious: false` / promote drops displaced when `dropPrevious: true` / promote rolls back fully when displaced delete fails (sibling descendants block it) / descendants of the promoted version keep their visible contents
+- Full suite green: 663/663
 
 ## Phase 6 - `merge()`
 
