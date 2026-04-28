@@ -3283,8 +3283,8 @@ function bytesKey(bytes: Uint8Array): string {
 }
 
 /**
- * Build the displaced-label format documented in VERSIONING_PRIMITIVES.md
- * (`<newLabel>-prev-YYYYMMDDHHMMSS-<displacedId>`). The trailing version ID
+ * Build the displaced-label format used by `renameVersion({ swap: true })`:
+ * `<newLabel>-prev-YYYYMMDDHHMMSS-<displacedId>`. The trailing version ID
  * makes the label unique within a workspace even if two swaps land in the
  * same UTC second.
  */

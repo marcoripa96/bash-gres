@@ -12,10 +12,10 @@ export default function VersioningPage() {
           <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
           instance is bound to a{" "}
           <code className="font-mono text-foreground/80">version</code> within
-          a workspace. Versions are fully isolated, so the same path can hold
-          different contents across versions, and you can fork, list, and
-          delete them. Use this to keep a working copy alongside deployed
-          snapshots, diff two states, or roll back.
+          a workspace. Versions are copy-on-write overlays, so the same path can
+          hold different contents across versions without duplicating every row
+          on fork. Use them to keep draft work beside deployed labels, diff two
+          trees, merge changes, revert paths, or promote a snapshot.
         </p>
       </header>
 
@@ -56,10 +56,10 @@ await v3.exists("/config.json") // false`}
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
           <code className="font-mono text-foreground/80">fork(name)</code>{" "}
-          copies every file and directory from the current version into a new
-          one and returns a{" "}
+          creates an O(1) child version and returns a{" "}
           <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
-          bound to it. Writes to the fork never leak back to the source.
+          bound to it. No entry rows are copied. Reads fall through to the
+          nearest ancestor row until the child writes or deletes that path.
         </p>
         <CodeBlock
           code={`const v1 = new PgFileSystem({
@@ -71,7 +71,7 @@ await v3.exists("/config.json") // false`}
 await v1.writeFile("/src/app.ts", "export default 1;")
 await v1.writeFile("/readme.md", "# v1")
 
-// Fork: copy v1 -> v2, return an fs bound to v2
+// Fork: link v1 -> v2, return an fs bound to v2
 const v2 = await v1.fork("v2")
 
 await v2.writeFile("/readme.md", "# v2 modified")
@@ -79,6 +79,13 @@ await v2.writeFile("/readme.md", "# v2 modified")
 await v1.readFile("/readme.md") // "# v1"        (unchanged)
 await v2.readFile("/readme.md") // "# v2 modified"`}
         />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          This is a live ancestor overlay, not a historical snapshot. If a
+          parent changes after a child is forked, the child can still see that
+          change for paths it has not shadowed. Call{" "}
+          <code className="font-mono text-foreground/80">detach()</code> when
+          you need a standalone checkpoint.
+        </p>
       </section>
 
       <section className="space-y-4">
@@ -100,20 +107,79 @@ await v1.deleteVersion("v2")`}
           Diffs
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          The library doesn&apos;t ship a diff helper. Since each version is
-          a regular filesystem, you can read the same path from two instances
-          and diff the strings with whatever tool you already use.
+          <code className="font-mono text-foreground/80">diff()</code> compares
+          the current visible tree to another version and returns changed paths
+          with before/after entry metadata. Use{" "}
+          <code className="font-mono text-foreground/80">diffStream()</code> for
+          keyset-paginated iteration over large trees.
         </p>
         <CodeBlock
-          code={`const v1 = new PgFileSystem({ db: sql, workspaceId, version: "v1" })
-const v2 = new PgFileSystem({ db: sql, workspaceId, version: "v2" })
+          code={`const changes = await v2.diff("v1", { path: "/src" })
+// [{ path: "/src/app.ts", change: "modified", before, after }]
 
-const before = await v1.readFile("/src/app.ts")
-const after  = await v2.readFile("/src/app.ts")
+for await (const change of v2.diffStream("v1", { batchSize: 500 })) {
+  console.log(change.path, change.change)
+}`}
+        />
+      </section>
 
-// Diff with your preferred library:
-import { createTwoFilesPatch } from "diff"
-const patch = createTwoFilesPatch("v1", "v2", before, after)`}
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          Merge, Cherry-Pick & Revert
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          <code className="font-mono text-foreground/80">merge()</code> applies
+          changes from another version into the current one using a three-way
+          comparison against the lowest common ancestor. Conflicts fail by
+          default, or you can resolve them with{" "}
+          <code className="font-mono text-foreground/80">strategy</code>.
+        </p>
+        <CodeBlock
+          code={`const result = await draft.merge("feature", {
+  strategy: "fail",      // "fail" | "ours" | "theirs"
+  pathScope: "/src",
+  dryRun: true,
+})
+
+if (result.conflicts.length === 0) {
+  await draft.merge("feature", { pathScope: "/src" })
+}
+
+// Source-wins copy for selected paths, without LCA conflict checks.
+await draft.cherryPick("feature", ["/src/router.ts", "/docs"])
+
+// Restore selected paths to match another version.
+await draft.revert("live", { paths: ["/config.json"] })`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          Detach & Rename
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          <code className="font-mono text-foreground/80">detach()</code>{" "}
+          materializes the current visible tree into the current version and
+          severs ancestor dependencies. Use{" "}
+          <code className="font-mono text-foreground/80">renameVersion()</code>{" "}
+          to move labels, or{" "}
+          <code className="font-mono text-foreground/80">promoteTo()</code> for
+          the common detach-and-swap deploy flow.
+        </p>
+        <CodeBlock
+          code={`// Freeze draft as an independent snapshot.
+await draft.detach()
+
+// Rename this version. With swap, an existing label is displaced.
+const renamed = await draft.renameVersion("release-2026-04-28", {
+  swap: true,
+})
+
+// Deploy helper: detach -> renameVersion(label, { swap: true })
+const promoted = await draft.promoteTo("live", {
+  dropPrevious: false,
+})
+// { label: "live", displacedLabel: "live-prev-..." }`}
         />
       </section>
 
@@ -122,26 +188,23 @@ const patch = createTwoFilesPatch("v1", "v2", before, after)`}
           Deploy Pattern
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          BashGres doesn&apos;t track a &quot;live&quot; version. That&apos;s
-          application logic. A typical pattern: keep a pointer in your own
-          config (or a small table) to the version your runtime should read
-          from, fork it when you want to edit, and flip the pointer when you
-          want to promote.
+          BashGres exposes versions as data. You can either keep the live
+          pointer in your own config, or reserve a label like{" "}
+          <code className="font-mono text-foreground/80">live</code> and use
+          <code className="font-mono text-foreground/80"> promoteTo()</code> to
+          atomically move that label to a detached draft.
         </p>
         <CodeBlock
-          code={`// 1. Your app remembers which version is deployed
-const LIVE = await getLiveVersionFromConfig() // "v2"
-
-// 2. Runtime reads use the live version
-const runtime = new PgFileSystem({ db: sql, workspaceId, version: LIVE })
+          code={`// 1. Runtime reads use the live label
+const runtime = new PgFileSystem({ db: sql, workspaceId, version: "live" })
 await runtime.readFile("/config.json")
 
-// 3. Start editing in a fresh version forked from live
+// 2. Start editing in a fresh version forked from live
 const draft = await runtime.fork("v3")
 await draft.writeFile("/config.json", '{"env":"prod-v2"}')
 
-// 4. When ready, flip the pointer (caller's responsibility)
-await setLiveVersionInConfig("v3")`}
+// 3. Promote by detaching the draft and swapping the live label
+await draft.promoteTo("live")`}
         />
       </section>
 
@@ -167,7 +230,47 @@ await setLiveVersionInConfig("v3")`}
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">fork(name)</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;PgFileSystem&gt;</td>
-                <td className="py-2">Copy the current version into a new one and return an fs bound to it. Throws if <code className="font-mono">name</code> already exists or equals the current version.</td>
+                <td className="py-2">Create an O(1) child overlay and return an fs bound to it. Throws if <code className="font-mono">name</code> already exists or equals the current version.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">diff(other, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;VersionDiffEntry[]&gt;</td>
+                <td className="py-2">Compare this visible tree to another version, optionally scoped to a path.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">diffStream(other, opts?)</td>
+                <td className="py-2 pr-4 font-mono">AsyncIterable&lt;VersionDiffEntry&gt;</td>
+                <td className="py-2">Stream the same diff with keyset pagination for large trees.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">merge(source, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;MergeResult&gt;</td>
+                <td className="py-2">Three-way merge from a source version into the current version.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">cherryPick(source, paths)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;MergeResult&gt;</td>
+                <td className="py-2">Source-wins copy of selected paths without LCA conflict checks.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">revert(target, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;MergeResult&gt;</td>
+                <td className="py-2">Restore selected paths in the current version to match a target version.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">detach()</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;void&gt;</td>
+                <td className="py-2">Materialize visible entries and sever ancestor dependencies.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">renameVersion(label, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;RenameVersionResult&gt;</td>
+                <td className="py-2">Rename this version label, optionally displacing an existing label with <code className="font-mono">swap</code>.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">promoteTo(label, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;PromoteResult&gt;</td>
+                <td className="py-2">Detach, swap this version onto a label, and optionally drop the previous holder.</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">listVersions()</td>

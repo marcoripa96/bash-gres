@@ -7,7 +7,7 @@ PostgreSQL-backed virtual filesystem for AI agents. Implements the [just-bash](h
 - Full bash environment via [just-bash](https://github.com/vercel-labs/just-bash): 60+ commands, pipes, redirects, variables, loops
 - Node.js `fs`-compatible API: readFile, writeFile, mkdir, cp, mv, rm, symlink, stat, walk, glob
 - Workspace isolation via PostgreSQL Row-Level Security
-- Named versions per workspace: fork, list, delete -- isolated working copies and deploy snapshots
+- Copy-on-write versions per workspace: fork, diff, merge, revert, promote, delete
 - BM25 full-text search via `pg_textsearch`
 - Optional pgvector semantic and hybrid search
 - Bring your own driver: `postgres.js`, `node-postgres (pg)`, or Drizzle ORM
@@ -102,7 +102,7 @@ const tree = await fs.walk("/docs")
 
 ## Versioning
 
-Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are fully isolated, so the same path can hold different contents. Fork is O(1): it links the new version to its parent through a closure table without copying any entry rows. Reads walk that closure to the nearest ancestor that has a row at the requested path.
+Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are copy-on-write overlays: the same path can hold different contents, and `fork()` is O(1) because it links the new version to its parent through a closure table without copying entry rows. Reads walk that closure to the nearest ancestor with a row at the requested path.
 
 This is a **live ancestor overlay**, not a historical snapshot. A write to a parent version after a child has been forked can still affect the child's visible view at any path the child has not shadowed. Once the child writes (or deletes) a path, that path is shielded from later parent writes. To freeze a checkpoint independent of its parents, fork and then `detach()`.
 
@@ -120,7 +120,16 @@ await v1.listVersions()     // ["v1", "v2"]
 await v1.deleteVersion("v2") // drops every row in v2
 ```
 
-The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the deploy pattern.
+Versioning primitives include:
+
+- `diff(other, { path? })` and `diffStream(other, { path?, batchSize? })` to compare visible trees.
+- `merge(source, { strategy?, paths?, pathScope?, dryRun? })` for LCA-based three-way merges.
+- `cherryPick(source, paths)` to source-win copy selected paths without LCA conflict checks.
+- `revert(target, { paths?, pathScope? })` to restore selected paths to another version.
+- `detach()` to materialize a version into a standalone snapshot independent of ancestors.
+- `renameVersion(label, { swap? })` and `promoteTo(label, { dropPrevious? })` for deploy labels.
+
+The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. A typical deploy flow is `fork()` a draft, edit it, optionally `merge()` or `revert()` changes, then `promoteTo("live")`. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the full versioning guide.
 
 ## Search
 
