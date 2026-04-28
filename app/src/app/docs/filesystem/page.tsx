@@ -216,6 +216,58 @@ const real = await fs.realpath("/link")`}
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
+          Workspace Usage
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          <code className="font-mono text-foreground/80">getUsage()</code>{" "}
+          reports workspace-wide storage usage and current-version logical
+          usage. Pass a path to scope visible counts to a subtree. Stored blob
+          bytes are deduplicated across copy-on-write versions, while logical
+          bytes count the visible files and symlinks in the selected path.
+        </p>
+        <CodeBlock
+          code={`const usage = await fs.getUsage()
+const projectUsage = await fs.getUsage({ path: "/project" })
+
+usage.logicalBytes     // visible bytes in fs.version
+usage.referencedBlobBytes // deduped visible file blobs for the path
+usage.storedBlobBytes  // deduplicated workspace blob bytes
+usage.blobCount        // stored blob rows
+usage.versions         // version labels in the workspace
+usage.entryRows        // fs_entries rows, including tombstones
+usage.visibleNodes     // visible nodes in fs.version, including root
+usage.limits           // { maxFiles, maxFileSize, maxWorkspaceBytes? }`}
+        />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Configure{" "}
+          <code className="font-mono text-foreground/80">maxWorkspaceBytes</code>{" "}
+          to reject writes that would add a new blob beyond the workspace quota.
+          Quota failures throw{" "}
+          <code className="font-mono text-foreground/80">FsQuotaError</code>{" "}
+          with structured fields for UI and API responses.
+        </p>
+        <CodeBlock
+          code={`const fs = new PgFileSystem({
+  db: sql,
+  workspaceId: "tenant-a",
+  maxWorkspaceBytes: 100 * 1024 * 1024,
+})
+
+try {
+  await fs.writeFile("/large.bin", bytes)
+} catch (e) {
+  if (e instanceof FsQuotaError) {
+    e.code            // "ENOSPC"
+    e.limit           // configured maxWorkspaceBytes
+    e.current         // current stored blob bytes
+    e.attemptedDelta  // bytes for the new unique blob
+  }
+}`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
           Symlinks & Links
         </h2>
         <CodeBlock

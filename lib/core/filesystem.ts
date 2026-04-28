@@ -22,8 +22,10 @@ import type {
   MergeStrategy,
   MergeResult,
   ConflictEntry,
+  WorkspaceUsage,
+  WorkspaceUsageOptions,
 } from "./types.js";
-import { FsError, SqlError } from "./types.js";
+import { FsError, FsQuotaError, SqlError } from "./types.js";
 import { readonlySqlClient } from "./readonly.js";
 import {
   pathToLtree,
@@ -120,6 +122,20 @@ interface DiffRow {
   t_mtime: Date | null;
 }
 
+interface UsageRow {
+  versions: number | string;
+  entry_rows: number | string;
+  tombstone_rows: number | string;
+  blob_count: number | string;
+  stored_blob_bytes: number | string;
+  referenced_blob_bytes: number | string;
+  visible_nodes: number | string;
+  visible_files: number | string;
+  visible_directories: number | string;
+  visible_symlinks: number | string;
+  logical_bytes: number | string;
+}
+
 // -- PgFileSystem -----------------------------------------------------------
 
 export class PgFileSystem {
@@ -136,6 +152,7 @@ export class PgFileSystem {
   private maxFileSize: number;
   private maxReadSize: number | undefined;
   private maxFiles: number;
+  private maxWorkspaceBytes: number | undefined;
   private maxDepth: number;
   private maxSymlinkDepth: number;
   private maxCpNodes: number;
@@ -183,6 +200,7 @@ export class PgFileSystem {
     this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
     this.maxReadSize = options.maxReadSize;
     this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
+    this.maxWorkspaceBytes = options.maxWorkspaceBytes;
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.maxSymlinkDepth =
       options.maxSymlinkDepth ?? DEFAULT_MAX_SYMLINK_DEPTH;
@@ -204,6 +222,79 @@ export class PgFileSystem {
    */
   get version(): string {
     return this.versionLabel;
+  }
+
+  async getUsage(options?: WorkspaceUsageOptions): Promise<WorkspaceUsage> {
+    const scopeUser = options?.path ? normalizePath(options.path) : "/";
+    this.guardRead(scopeUser);
+    const scopeInternal = this.toInternalPath(scopeUser);
+    return this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
+      const scopeLtree = pathToLtree(scopeInternal, this.workspaceId);
+      const r = await tx.query<UsageRow>(
+        `WITH visible_raw AS (
+           SELECT DISTINCT ON (e.path)
+             e.node_type,
+             e.size_bytes,
+             e.blob_hash
+           FROM fs_entries e
+           JOIN version_ancestors a
+             ON a.workspace_id = e.workspace_id
+            AND a.ancestor_id = e.version_id
+           WHERE e.workspace_id = $1
+             AND a.descendant_id = $2
+             AND e.path <@ $4::ltree
+           ORDER BY e.path, a.depth ASC
+         ),
+         visible AS (
+           SELECT node_type, size_bytes, blob_hash
+           FROM visible_raw
+           WHERE node_type != $3
+         ),
+         referenced_blobs AS (
+           SELECT DISTINCT blob_hash
+           FROM visible
+           WHERE node_type = 'file' AND blob_hash IS NOT NULL
+         )
+         SELECT
+           (SELECT COUNT(*) FROM fs_versions WHERE workspace_id = $1) AS versions,
+           (SELECT COUNT(*) FROM fs_entries WHERE workspace_id = $1) AS entry_rows,
+           (SELECT COUNT(*) FROM fs_entries WHERE workspace_id = $1 AND node_type = $3) AS tombstone_rows,
+           (SELECT COUNT(*) FROM fs_blobs WHERE workspace_id = $1) AS blob_count,
+           (SELECT COALESCE(SUM(size_bytes), 0) FROM fs_blobs WHERE workspace_id = $1) AS stored_blob_bytes,
+           (SELECT COALESCE(SUM(b.size_bytes), 0)
+            FROM referenced_blobs rb
+            JOIN fs_blobs b ON b.workspace_id = $1 AND b.hash = rb.blob_hash) AS referenced_blob_bytes,
+           (SELECT COUNT(*) FROM visible) AS visible_nodes,
+           (SELECT COUNT(*) FROM visible WHERE node_type = 'file') AS visible_files,
+           (SELECT COUNT(*) FROM visible WHERE node_type = 'directory') AS visible_directories,
+           (SELECT COUNT(*) FROM visible WHERE node_type = 'symlink') AS visible_symlinks,
+           (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes`,
+        [this.workspaceId, versionId, TOMBSTONE, scopeLtree],
+      );
+      const row = r.rows[0]!;
+      return {
+        workspaceId: this.workspaceId,
+        version: this.versionLabel,
+        path: scopeUser,
+        logicalBytes: Number(row.logical_bytes),
+        referencedBlobBytes: Number(row.referenced_blob_bytes),
+        storedBlobBytes: Number(row.stored_blob_bytes),
+        blobCount: Number(row.blob_count),
+        versions: Number(row.versions),
+        entryRows: Number(row.entry_rows),
+        tombstoneRows: Number(row.tombstone_rows),
+        visibleNodes: Number(row.visible_nodes),
+        visibleFiles: Number(row.visible_files),
+        visibleDirectories: Number(row.visible_directories),
+        visibleSymlinks: Number(row.visible_symlinks),
+        limits: {
+          maxFiles: this.maxFiles,
+          maxFileSize: this.maxFileSize,
+          ...(this.maxWorkspaceBytes !== undefined ? { maxWorkspaceBytes: this.maxWorkspaceBytes } : {}),
+        },
+      };
+    });
   }
 
   async init(): Promise<void> {
@@ -759,7 +850,10 @@ export class PgFileSystem {
     content: string | Uint8Array,
     sizeBytes: number,
     embedding: number[] | null,
+    userPath: string,
   ): Promise<void> {
+    await this.validateWorkspaceBytes(tx, hash, sizeBytes, userPath);
+
     const isText = typeof content === "string";
     const textContent = isText ? content : null;
     const binaryData = isText ? null : content;
@@ -779,6 +873,44 @@ export class PgFileSystem {
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (workspace_id, hash) DO NOTHING`,
         [this.workspaceId, hash, textContent, binaryData, sizeBytes],
+      );
+    }
+  }
+
+  private async validateWorkspaceBytes(
+    tx: SqlClient,
+    hash: Uint8Array,
+    sizeBytes: number,
+    userPath: string,
+  ): Promise<void> {
+    if (this.maxWorkspaceBytes === undefined) return;
+
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1), -1)`, [
+      this.workspaceId,
+    ]);
+
+    const existing = await tx.query(
+      `SELECT 1 FROM fs_blobs
+       WHERE workspace_id = $1 AND hash = $2
+       LIMIT 1`,
+      [this.workspaceId, hash],
+    );
+    if (existing.rows.length > 0) return;
+
+    const usage = await tx.query<{ stored_blob_bytes: number | string }>(
+      `SELECT COALESCE(SUM(size_bytes), 0) AS stored_blob_bytes
+       FROM fs_blobs
+       WHERE workspace_id = $1`,
+      [this.workspaceId],
+    );
+    const current = Number(usage.rows[0]?.stored_blob_bytes ?? 0);
+    if (current + sizeBytes > this.maxWorkspaceBytes) {
+      throw new FsQuotaError(
+        "workspace byte quota exceeded",
+        userPath,
+        this.maxWorkspaceBytes,
+        current,
+        sizeBytes,
       );
     }
   }
@@ -916,7 +1048,14 @@ export class PgFileSystem {
       embedding = await this.maybeEmbed(tx, hash, content);
     }
 
-    await this.upsertBlob(tx, hash, content, sizeBytes, embedding);
+    await this.upsertBlob(
+      tx,
+      hash,
+      content,
+      sizeBytes,
+      embedding,
+      this.toUserPath(path),
+    );
     await this.upsertEntry(
       tx,
       versionId,

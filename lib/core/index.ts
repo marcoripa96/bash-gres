@@ -2,6 +2,7 @@ export { PgFileSystem } from "./filesystem.js";
 export { setup } from "./setup.js";
 export {
   FsError,
+  FsQuotaError,
   SqlError,
   type SqlClient,
   type SqlParam,
@@ -28,6 +29,8 @@ export {
   type MergeResult,
   type RenameVersionResult,
   type PromoteResult,
+  type WorkspaceUsage,
+  type WorkspaceUsageOptions,
 } from "./types.js";
 export {
   pathToLtree,

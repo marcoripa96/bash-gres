@@ -46,6 +46,19 @@ export class FsError extends Error {
   }
 }
 
+export class FsQuotaError extends FsError {
+  constructor(
+    op: string,
+    path: string,
+    public readonly limit: number,
+    public readonly current: number,
+    public readonly attemptedDelta: number,
+  ) {
+    super("ENOSPC", op, path);
+    this.name = "FsQuotaError";
+  }
+}
+
 export interface FsStat {
   isFile: boolean;
   isDirectory: boolean;
@@ -175,6 +188,43 @@ export interface PromoteResult {
   droppedPrevious: boolean;
 }
 
+export interface WorkspaceUsage {
+  workspaceId: string;
+  /** Version used for visible/logical counts. */
+  version: string;
+  /** User path used for visible/logical counts. */
+  path: string;
+  /** Sum of visible file and symlink sizes in this version. */
+  logicalBytes: number;
+  /** Deduplicated blob bytes referenced by visible files under `path`. */
+  referencedBlobBytes: number;
+  /** Deduplicated bytes stored in fs_blobs for the whole workspace. */
+  storedBlobBytes: number;
+  /** Number of blobs stored for the whole workspace. */
+  blobCount: number;
+  /** Number of version labels in the workspace. */
+  versions: number;
+  /** Total fs_entries rows across all versions, including tombstones. */
+  entryRows: number;
+  /** Tombstone rows across all versions. */
+  tombstoneRows: number;
+  /** Visible non-tombstone nodes in this version, including root. */
+  visibleNodes: number;
+  visibleFiles: number;
+  visibleDirectories: number;
+  visibleSymlinks: number;
+  limits: {
+    maxFiles: number;
+    maxFileSize: number;
+    maxWorkspaceBytes?: number;
+  };
+}
+
+export interface WorkspaceUsageOptions {
+  /** Scope visible/logical counts to this user path and its descendants. */
+  path?: string;
+}
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
@@ -187,6 +237,8 @@ export interface PgFileSystemOptions {
   maxReadSize?: number;
   /** Maximum number of entries (files + directories) per workspace. Default: 10000. */
   maxFiles?: number;
+  /** Maximum deduplicated blob bytes per workspace. Default: unlimited. */
+  maxWorkspaceBytes?: number;
   /** Maximum path depth (number of `/`-separated segments). Default: 50. */
   maxDepth?: number;
   /** Maximum levels of symlink indirection before ELOOP. Default: 16. */

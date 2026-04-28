@@ -100,6 +100,43 @@ const stat = await fs.stat("/docs/guide.md")
 const tree = await fs.walk("/docs")
 ```
 
+## Workspace Usage
+
+```ts
+const usage = await fs.getUsage()
+const projectUsage = await fs.getUsage({ path: "/project" })
+
+usage.logicalBytes     // visible file + symlink bytes in fs.version
+usage.referencedBlobBytes // deduplicated blob bytes referenced by visible files
+usage.storedBlobBytes  // deduplicated blob bytes stored for the workspace
+usage.blobCount        // stored blob rows
+usage.versions         // version labels in the workspace
+usage.entryRows        // fs_entries rows across all versions, including tombstones
+usage.visibleNodes     // visible nodes in fs.version, including root
+usage.limits           // { maxFiles, maxFileSize, maxWorkspaceBytes? }
+```
+
+Set `maxWorkspaceBytes` to enforce a deduplicated blob-storage quota per workspace:
+
+```ts
+const fs = new PgFileSystem({
+  db: sql,
+  workspaceId: "tenant-a",
+  maxWorkspaceBytes: 100 * 1024 * 1024,
+})
+
+try {
+  await fs.writeFile("/large.bin", bytes)
+} catch (e) {
+  if (e instanceof FsQuotaError) {
+    e.code            // "ENOSPC"
+    e.limit           // configured maxWorkspaceBytes
+    e.current         // current stored blob bytes
+    e.attemptedDelta  // bytes for the new unique blob
+  }
+}
+```
+
 ## Versioning
 
 Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are copy-on-write overlays: the same path can hold different contents, and `fork()` is O(1) because it links the new version to its parent through a closure table without copying entry rows. Reads walk that closure to the nearest ancestor with a row at the requested path.
