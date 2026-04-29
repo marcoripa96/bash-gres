@@ -117,9 +117,27 @@ function isPgError(e: unknown): e is PgErrorShape {
   );
 }
 
+/**
+ * Drizzle ≥0.44 wraps driver errors in `DrizzleQueryError` (no SQLSTATE on
+ * the wrapper; the original pg error sits at `.cause`). Older Drizzle and
+ * the raw `pg` / `postgres-js` paths surface the pg error directly. Check
+ * the outer error first, then peek one level via `.cause` — that covers
+ * both shapes without scanning a cause chain.
+ *
+ * Preserving the SQLSTATE is what lets the FsError mappings in
+ * core/filesystem.ts (e.g. read-only `25006` → `EPERM`) keep firing
+ * regardless of which adapter the caller chose.
+ */
+function findPgError(e: unknown): PgErrorShape | undefined {
+  if (isPgError(e)) return e;
+  const cause = (e as { cause?: unknown } | null)?.cause;
+  return isPgError(cause) ? cause : undefined;
+}
+
 function wrapError(e: unknown): Error {
-  if (isPgError(e)) {
-    return new SqlError(e.message, e.code, e.detail, e.constraint, e);
+  const pg = findPgError(e);
+  if (pg) {
+    return new SqlError(pg.message, pg.code, pg.detail, pg.constraint, pg);
   }
   if (e instanceof Error) return e;
   return new Error(String(e));

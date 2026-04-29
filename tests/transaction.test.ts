@@ -140,6 +140,35 @@ describe.each(TEST_ADAPTERS)("PgFileSystem.transaction [%s]", (_name, factory) =
       expect(await writable.readFile("/seed.txt")).toBe("seed");
       expect(await writable.exists("/forbidden.txt")).toBe(false);
     });
+
+    it("rejects a direct (non-transactional) write on a read-only handle with FsError EPERM", async () => {
+      // Regression: drizzle ≥0.44 wraps driver errors in DrizzleQueryError,
+      // hiding the pg SQLSTATE behind `.cause`. The drizzle adapter must
+      // unwrap so the FsError(EPERM) mapping in core/filesystem.ts still
+      // fires. The existing transactional test above goes through
+      // PgFileSystem.transaction's own catch path; this case exercises
+      // the writeFile → withWorkspace path directly.
+      const writable = new PgFileSystem({ db: client, workspaceId: WS });
+      await writable.init();
+      await writable.writeFile("/seed.txt", "seed");
+
+      const ro = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        permissions: { read: true, write: false },
+      });
+
+      // Reads still work.
+      expect(await ro.readFile("/seed.txt")).toBe("seed");
+
+      await expect(ro.writeFile("/forbidden.txt", "no")).rejects.toMatchObject({
+        code: "EPERM",
+      });
+
+      // Seed file untouched.
+      expect(await writable.readFile("/seed.txt")).toBe("seed");
+      expect(await writable.exists("/forbidden.txt")).toBe(false);
+    });
   });
 
   describe("workspace isolation inside transaction", () => {
