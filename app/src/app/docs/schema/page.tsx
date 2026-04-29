@@ -8,10 +8,11 @@ export default function SchemaPage() {
           Schema & Setup
         </h1>
         <p className="mt-3 text-muted-foreground leading-relaxed">
-          BashGres uses a single{" "}
-          <code className="font-mono text-foreground/80">fs_nodes</code> table
-          with ltree paths, workspace isolation, and optional full-text and
-          vector indexes.
+          BashGres stores versioned filesystem state across small relational
+          tables: version roots, version labels, ancestor closure rows, entries,
+          and deduplicated blobs. Paths use PostgreSQL{" "}
+          <code className="font-mono text-foreground/80">ltree</code>, and RLS
+          isolates every table by workspace.
         </p>
       </header>
 
@@ -92,34 +93,71 @@ await setup(sql, {
           Table Schema
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          The <code className="font-mono text-foreground/80">fs_nodes</code>{" "}
-          table stores all files, directories, and symlinks:
+          The core tables separate the workspace isolation boundary from the
+          versioning boundary. A version root is usually{" "}
+          <code className="font-mono text-foreground/80">/</code>, but a
+          directory created with{" "}
+          <code className="font-mono text-foreground/80">versioned: true</code>{" "}
+          gets its own row in{" "}
+          <code className="font-mono text-foreground/80">fs_version_roots</code>.
         </p>
         <CodeBlock
           lang="sql"
-          code={`CREATE TABLE fs_nodes (
-    id              bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+          code={`CREATE TABLE fs_version_roots (
+    id            bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    workspace_id  text NOT NULL,
+    path          ltree NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (workspace_id, path)
+);
+
+CREATE TABLE fs_versions (
+    id                 bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    workspace_id       text NOT NULL,
+    version_root_id    bigint REFERENCES fs_version_roots(id) ON DELETE RESTRICT,
+    label              text NOT NULL,
+    parent_version_id  bigint REFERENCES fs_versions(id) ON DELETE RESTRICT,
+    created_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE version_ancestors (
+    workspace_id   text NOT NULL,
+    descendant_id  bigint NOT NULL,
+    ancestor_id    bigint NOT NULL,
+    depth          int NOT NULL CHECK (depth >= 0),
+    PRIMARY KEY (workspace_id, descendant_id, ancestor_id)
+);
+
+CREATE TABLE fs_blobs (
+    workspace_id  text NOT NULL,
+    hash          bytea NOT NULL,
+    content       text,
+    binary_data   bytea,
+    size_bytes    bigint NOT NULL DEFAULT 0,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, hash)
+);
+
+CREATE TABLE fs_entries (
     workspace_id    text NOT NULL,
-    version         text NOT NULL DEFAULT 'main',
-    parent_id       bigint REFERENCES fs_nodes(id) ON DELETE RESTRICT,
-    name            text NOT NULL,
-    node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink')),
+    version_id      bigint NOT NULL,
     path            ltree NOT NULL,
-    content         text,
-    binary_data     bytea,
+    blob_hash       bytea,
+    node_type       text NOT NULL CHECK (node_type IN ('file', 'directory', 'symlink', 'tombstone')),
     symlink_target  text,
-    mode            int NOT NULL DEFAULT 420,     -- 0o644
+    mode            int NOT NULL DEFAULT 420,
     size_bytes      bigint NOT NULL DEFAULT 0,
     mtime           timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_workspace_version_path UNIQUE (workspace_id, version, path)
+    PRIMARY KEY (workspace_id, version_id, path)
 );`}
         />
         <p className="text-sm text-muted-foreground leading-relaxed">
-          The{" "}
-          <code className="font-mono text-foreground/80">version</code>{" "}
-          column scopes every read and write so multiple named versions can
-          coexist within a workspace. See{" "}
+          <code className="font-mono text-foreground/80">fs_versions.label</code>{" "}
+          is unique per version root, so two versioned directories in the same
+          workspace can both have labels like{" "}
+          <code className="font-mono text-foreground/80">main</code> and{" "}
+          <code className="font-mono text-foreground/80">draft</code>. See{" "}
           <a
             href="/docs/versioning"
             className="underline underline-offset-2 hover:text-foreground transition-colors"
@@ -143,32 +181,32 @@ await setup(sql, {
             </thead>
             <tbody className="text-muted-foreground">
               <tr className="border-b border-border/30">
-                <td className="py-2 pr-4 font-mono">idx_fs_path_gist</td>
+                <td className="py-2 pr-4 font-mono">idx_fs_entries_path_gist</td>
                 <td className="py-2 pr-4">GiST</td>
-                <td className="py-2">ltree ancestor/descendant queries</td>
+                <td className="py-2">Subtree scans for directory listing, walk, glob, usage, and diff</td>
               </tr>
               <tr className="border-b border-border/30">
-                <td className="py-2 pr-4 font-mono">idx_fs_workspace_parent</td>
+                <td className="py-2 pr-4 font-mono">unique_workspace_version_root_label</td>
                 <td className="py-2 pr-4">B-tree</td>
-                <td className="py-2">Directory listing by parent</td>
+                <td className="py-2">Unique version labels inside each version root</td>
               </tr>
               <tr className="border-b border-border/30">
-                <td className="py-2 pr-4 font-mono">idx_fs_stat</td>
-                <td className="py-2 pr-4">B-tree (covering)</td>
-                <td className="py-2">stat() on (workspace_id, version, path) with INCLUDE (node_type, mode, size_bytes, mtime)</td>
+                <td className="py-2 pr-4 font-mono">idx_fs_entries_path_version</td>
+                <td className="py-2 pr-4">B-tree</td>
+                <td className="py-2">Visibility lookups by workspace, path, and version</td>
               </tr>
               <tr className="border-b border-border/30">
-                <td className="py-2 pr-4 font-mono">idx_fs_dir_lookup</td>
-                <td className="py-2 pr-4">B-tree (partial)</td>
-                <td className="py-2">Fast directory lookups (WHERE node_type = &apos;directory&apos;)</td>
+                <td className="py-2 pr-4 font-mono">idx_version_ancestors_depth</td>
+                <td className="py-2 pr-4">B-tree</td>
+                <td className="py-2">Nearest-ancestor scans for copy-on-write visibility</td>
               </tr>
               <tr className="border-b border-border/30">
-                <td className="py-2 pr-4 font-mono">idx_fs_content_bm25</td>
+                <td className="py-2 pr-4 font-mono">idx_fs_blobs_content_bm25</td>
                 <td className="py-2 pr-4">BM25</td>
                 <td className="py-2">Full-text search on content (optional)</td>
               </tr>
               <tr>
-                <td className="py-2 pr-4 font-mono">idx_fs_embedding</td>
+                <td className="py-2 pr-4 font-mono">idx_fs_blobs_embedding</td>
                 <td className="py-2 pr-4">HNSW</td>
                 <td className="py-2">Vector similarity search (optional)</td>
               </tr>
@@ -226,7 +264,7 @@ await setup(sql, {
           filename="schema.ts"
           code={`import { createSchema } from "bash-gres/drizzle"
 
-export const fsNodes = createSchema({
+export const schema = createSchema({
   enableFullTextSearch: true,   // BM25 index on content
   enableVectorSearch: false,    // pgvector HNSW index
   embeddingDimensions: 1536,    // required if enableVectorSearch
@@ -257,7 +295,7 @@ const sql = generateMigrationSQL({
 console.log(sql)
 // CREATE EXTENSION IF NOT EXISTS ltree;
 // CREATE EXTENSION IF NOT EXISTS pg_textsearch;
-// ALTER TABLE fs_nodes ENABLE ROW LEVEL SECURITY;
+// ALTER TABLE fs_entries ENABLE ROW LEVEL SECURITY;
 // ...`}
         />
         <CodeBlock

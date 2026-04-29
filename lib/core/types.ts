@@ -96,6 +96,12 @@ export interface SearchResult {
 
 export interface MkdirOptions {
   recursive?: boolean;
+  /** Initialize this directory as an independent version root. */
+  versioned?: boolean;
+}
+
+export interface VersionedDirectoryOptions {
+  version?: string;
 }
 
 export interface RmOptions {
@@ -202,11 +208,11 @@ export interface WorkspaceUsage {
   storedBlobBytes: number;
   /** Number of blobs stored for the whole workspace. */
   blobCount: number;
-  /** Number of version labels in the workspace. */
+  /** Number of version labels in the active version root. */
   versions: number;
-  /** Total fs_entries rows across all versions, including tombstones. */
+  /** Total fs_entries rows across the active version root, including tombstones. */
   entryRows: number;
-  /** Tombstone rows across all versions. */
+  /** Tombstone rows across the active version root. */
   tombstoneRows: number;
   /** Visible non-tombstone nodes in this version, including root. */
   visibleNodes: number;
@@ -229,6 +235,8 @@ export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
   version?: string;
+  /** Internal: version root path. Defaults to workspace root. */
+  versionRoot?: string;
   permissions?: FsPermissions;
   rootDir?: string;
   /** Maximum size of a single file write, in bytes. Default: 10 MiB. */

@@ -32,10 +32,35 @@ export interface SchemaOptions {
 }
 
 export interface BashGresSchema {
+  fsVersionRoots: ReturnType<typeof buildVersionRoots>;
   fsVersions: ReturnType<typeof buildVersions>;
   versionAncestors: ReturnType<typeof buildAncestors>;
   fsBlobs: ReturnType<typeof buildBlobs>;
   fsEntries: ReturnType<typeof buildEntries>;
+}
+
+function buildVersionRoots() {
+  return pgTable(
+    "fs_version_roots",
+    {
+      id: bigserial({ mode: "number" }).primaryKey(),
+      workspaceId: text("workspace_id").notNull(),
+      path: ltreeType("path").notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      uniqueIndex("unique_workspace_version_root_path").on(
+        table.workspaceId,
+        table.path,
+      ),
+      index("idx_fs_version_roots_path_gist").using(
+        "gist",
+        sql`${table.path} gist_ltree_ops(siglen=124)`,
+      ),
+    ],
+  );
 }
 
 function buildVersions() {
@@ -44,6 +69,7 @@ function buildVersions() {
     {
       id: bigserial({ mode: "number" }).primaryKey(),
       workspaceId: text("workspace_id").notNull(),
+      versionRootId: bigint("version_root_id", { mode: "number" }),
       label: text().notNull(),
       parentVersionId: bigint("parent_version_id", { mode: "number" }),
       createdAt: timestamp("created_at", { withTimezone: true })
@@ -51,12 +77,14 @@ function buildVersions() {
         .defaultNow(),
     },
     (table) => [
-      uniqueIndex("unique_workspace_version_label").on(
+      uniqueIndex("unique_workspace_version_root_label").on(
         table.workspaceId,
+        table.versionRootId,
         table.label,
       ),
       index("idx_fs_versions_parent").on(
         table.workspaceId,
+        table.versionRootId,
         table.parentVersionId,
       ),
     ],
@@ -190,6 +218,7 @@ export function createSchema(options: SchemaOptions = {}): BashGresSchema {
   }
 
   return {
+    fsVersionRoots: buildVersionRoots(),
     fsVersions: buildVersions(),
     versionAncestors: buildAncestors(),
     fsBlobs: buildBlobs(options),

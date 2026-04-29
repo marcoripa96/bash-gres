@@ -221,4 +221,74 @@ describe.each(TEST_ADAPTERS)("PgFileSystem versioning [%s]", (_name, factory) =>
       await expect(v1.deleteVersion("v1")).rejects.toThrow(/current version/);
     });
   });
+
+  describe("versioned directories", () => {
+    it("creates a scoped facade whose versions are isolated to that directory", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+
+      const dbMain = await fs.versioned("/database");
+      await dbMain.writeFile("/schema.sql", "main");
+      const dbDraft = await dbMain.fork("draft");
+      await dbDraft.writeFile("/schema.sql", "draft");
+      await dbDraft.writeFile("/new.sql", "new");
+
+      expect(await dbMain.readFile("/schema.sql")).toBe("main");
+      expect(await dbMain.exists("/new.sql")).toBe(false);
+      expect(await dbDraft.readFile("/schema.sql")).toBe("draft");
+      expect(await dbDraft.readFile("/new.sql")).toBe("new");
+      expect(await dbMain.listVersions()).toEqual(["draft", "main"]);
+    });
+
+    it("allows the same version label in different versioned directories", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      await fs.mkdir("/user", { versioned: true });
+
+      const database = await fs.versioned("/database");
+      const user = await fs.versioned("/user");
+
+      await database.fork("draft");
+      await user.fork("draft");
+
+      expect(await database.listVersions()).toEqual(["draft", "main"]);
+      expect(await user.listVersions()).toEqual(["draft", "main"]);
+    });
+
+    it("imports existing directory contents when making it versioned", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.writeFile("/database/schema.sql", "seed");
+
+      await fs.mkdir("/database", { versioned: true });
+      const database = await fs.versioned("/database");
+
+      expect(await database.readFile("/schema.sql")).toBe("seed");
+    });
+
+    it("rejects scoped facades for normal directories", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/tmp");
+
+      await expect(fs.versioned("/tmp")).rejects.toMatchObject({
+        code: "ENOTVERSIONED",
+      });
+    });
+
+    it("rejects nested versioned directories", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+
+      await expect(
+        fs.mkdir("/database/migrations", {
+          recursive: true,
+          versioned: true,
+        }),
+      ).rejects.toMatchObject({ code: "EINVAL" });
+    });
+  });
 });

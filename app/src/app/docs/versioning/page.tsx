@@ -11,11 +11,14 @@ export default function VersioningPage() {
           Every{" "}
           <code className="font-mono text-foreground/80">PgFileSystem</code>{" "}
           instance is bound to a{" "}
-          <code className="font-mono text-foreground/80">version</code> within
-          a workspace. Versions are copy-on-write overlays, so the same path can
-          hold different contents across versions without duplicating every row
-          on fork. Use them to keep draft work beside deployed labels, diff two
-          trees, merge changes, revert paths, or promote a snapshot.
+          <code className="font-mono text-foreground/80">version</code> inside an
+          active version root. The default version root is{" "}
+          <code className="font-mono text-foreground/80">/</code>, and any
+          non-nested directory can become its own version root with{" "}
+          <code className="font-mono text-foreground/80">mkdir(path, {"{ versioned: true }"})</code>.
+          Versions are copy-on-write overlays, so the same path can hold
+          different contents across versions without duplicating every row on
+          fork.
         </p>
       </header>
 
@@ -25,12 +28,12 @@ export default function VersioningPage() {
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
           The <code className="font-mono text-foreground/80">version</code>{" "}
-          option selects which version an instance reads from and writes to.
-          If omitted, it defaults to{" "}
+          option selects which version an instance reads from and writes to in
+          its active version root. If omitted, it defaults to{" "}
           <code className="font-mono text-foreground/80">&quot;main&quot;</code>.
         </p>
         <CodeBlock
-          code={`// Scoped to (workspaceId, "v2")
+          code={`// Scoped to (workspaceId, versionRoot: "/", version: "v2")
 const v2 = new PgFileSystem({
   db: sql,
   workspaceId: "workspace-1",
@@ -48,6 +51,42 @@ const v3 = new PgFileSystem({
 })
 await v3.exists("/config.json") // false`}
         />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          Versioned Directories
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          A versioned directory is a normal directory with an independent
+          version graph, similar to running <code className="font-mono text-foreground/80">git init</code>{" "}
+          inside it. Use <code className="font-mono text-foreground/80">versioned(path)</code>{" "}
+          to open a scoped facade; paths on that facade are relative to the
+          versioned directory.
+        </p>
+        <CodeBlock
+          code={`const fs = new PgFileSystem({ db: sql, workspaceId: "workspace-1" })
+await fs.init()
+
+await fs.mkdir("/database", { versioned: true })
+
+const dbMain = await fs.versioned("/database")
+await dbMain.writeFile("/schema.sql", "main")
+
+const dbDraft = await dbMain.fork("draft")
+await dbDraft.writeFile("/schema.sql", "draft")
+
+await dbMain.readFile("/schema.sql")  // "main"
+await dbDraft.readFile("/schema.sql") // "draft"
+await dbMain.versionRoot               // "/database"`}
+        />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Version labels are scoped to the version root, so{" "}
+          <code className="font-mono text-foreground/80">/database</code> and{" "}
+          <code className="font-mono text-foreground/80">/user</code> can both
+          have a <code className="font-mono text-foreground/80">draft</code>{" "}
+          version. Nested versioned directories are rejected.
+        </p>
       </section>
 
       <section className="space-y-4">
@@ -93,7 +132,7 @@ await v2.readFile("/readme.md") // "# v2 modified"`}
           List & Delete
         </h2>
         <CodeBlock
-          code={`// All versions present in this workspace
+          code={`// All versions present in the active version root
 const versions = await v1.listVersions()
 // ["v1", "v2", "v3"]
 
@@ -188,15 +227,16 @@ const promoted = await draft.promoteTo("live", {
           Deploy Pattern
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          BashGres exposes versions as data. You can either keep the live
-          pointer in your own config, or reserve a label like{" "}
+          BashGres exposes versions as data. You can keep the live pointer in
+          your own config, or reserve a label like{" "}
           <code className="font-mono text-foreground/80">live</code> and use
           <code className="font-mono text-foreground/80"> promoteTo()</code> to
-          atomically move that label to a detached draft.
+          atomically move that label to a detached draft. For a versioned
+          directory, do this through its scoped facade.
         </p>
         <CodeBlock
-          code={`// 1. Runtime reads use the live label
-const runtime = new PgFileSystem({ db: sql, workspaceId, version: "live" })
+          code={`// 1. Runtime reads use the live label inside /database
+const runtime = await fs.versioned("/database", { version: "live" })
 await runtime.readFile("/config.json")
 
 // 2. Start editing in a fresh version forked from live
@@ -226,6 +266,16 @@ await draft.promoteTo("live")`}
                 <td className="py-2 pr-4 font-mono">version</td>
                 <td className="py-2 pr-4 font-mono">readonly string</td>
                 <td className="py-2">The version this instance is bound to</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">versionRoot</td>
+                <td className="py-2 pr-4 font-mono">readonly string</td>
+                <td className="py-2">Absolute workspace path that owns this instance&apos;s version graph.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">versioned(path, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;PgFileSystem&gt;</td>
+                <td className="py-2">Open a scoped facade for a versioned directory. Throws <code className="font-mono">ENOTVERSIONED</code> for normal directories.</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">fork(name)</td>
@@ -275,7 +325,7 @@ await draft.promoteTo("live")`}
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">listVersions()</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;string[]&gt;</td>
-                <td className="py-2">Distinct versions present in the workspace</td>
+                <td className="py-2">Distinct versions present in the active version root</td>
               </tr>
               <tr>
                 <td className="py-2 pr-4 font-mono">deleteVersion(name)</td>

@@ -13,6 +13,7 @@ export {
   type WalkEntry,
   type SearchResult,
   type MkdirOptions,
+  type VersionedDirectoryOptions,
   type RmOptions,
   type CpOptions,
   type ReadFileRangeOptions,

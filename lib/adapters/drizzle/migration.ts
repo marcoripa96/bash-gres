@@ -4,7 +4,13 @@ export interface MigrationOptions {
   enableVectorSearch?: boolean;
 }
 
-const RLS_TABLES = ["fs_versions", "version_ancestors", "fs_entries", "fs_blobs"];
+const RLS_TABLES = [
+  "fs_version_roots",
+  "fs_versions",
+  "version_ancestors",
+  "fs_entries",
+  "fs_blobs",
+];
 
 /**
  * Returns SQL for a custom Drizzle migration covering what `createSchema()`

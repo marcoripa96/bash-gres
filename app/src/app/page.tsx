@@ -191,15 +191,17 @@ const stat = await fs.stat("/docs/guide.md")
 const tree = await fs.walk("/docs")`}
             />
             <CodeBlock
-              code={`// Named versions per workspace -- isolated working copies & deploy snapshots
-const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
-await v1.writeFile("/config.json", '{"env":"staging"}')
+              code={`// Versioned directories -- scoped working copies & deploy snapshots
+await fs.mkdir("/database", { versioned: true })
 
-const v2 = await v1.fork("v2")
-await v2.writeFile("/config.json", '{"env":"prod"}')
+const dbMain = await fs.versioned("/database")
+await dbMain.writeFile("/config.json", '{"env":"staging"}')
 
-await v1.readFile("/config.json") // '{"env":"staging"}' (untouched)
-await v1.listVersions()           // ["v1", "v2"]`}
+const dbDraft = await dbMain.fork("draft")
+await dbDraft.writeFile("/config.json", '{"env":"prod"}')
+
+await dbMain.readFile("/config.json") // '{"env":"staging"}' (untouched)
+await dbMain.listVersions()           // ["draft", "main"]`}
             />
             <CodeBlock
               code={`// Full-text search (BM25 via pg_textsearch)

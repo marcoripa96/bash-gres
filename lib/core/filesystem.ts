@@ -24,6 +24,7 @@ import type {
   ConflictEntry,
   WorkspaceUsage,
   WorkspaceUsageOptions,
+  VersionedDirectoryOptions,
 } from "./types.js";
 import { FsError, FsQuotaError, SqlError } from "./types.js";
 import { readonlySqlClient } from "./readonly.js";
@@ -136,6 +137,11 @@ interface UsageRow {
   logical_bytes: number | string;
 }
 
+interface VersionRootRow {
+  id: number | string;
+  path: string;
+}
+
 // -- PgFileSystem -----------------------------------------------------------
 
 export class PgFileSystem {
@@ -160,8 +166,10 @@ export class PgFileSystem {
   private embed?: (text: string) => Promise<number[]>;
   private embeddingDimensions?: number;
   private rootDir: string;
+  private versionRootPath: string;
   private readonly baseOptions: PgFileSystemOptions;
   private cachedVersionId: number | null = null;
+  private cachedVersionRootId: number | null = null;
   private blobsHasEmbeddingCache: boolean | null = null;
   /**
    * When non-null, this instance is a transaction-bound facade. All `withWorkspace()`
@@ -210,9 +218,11 @@ export class PgFileSystem {
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
     this.rootDir = normalizePath(options.rootDir ?? "/");
+    this.versionRootPath = normalizePath(options.versionRoot ?? "/");
     this.baseOptions = {
       ...options,
       workspaceId: this.workspaceId,
+      versionRoot: this.versionRootPath,
     };
   }
 
@@ -224,11 +234,17 @@ export class PgFileSystem {
     return this.versionLabel;
   }
 
+  /** Absolute workspace path that owns this instance's version graph. */
+  get versionRoot(): string {
+    return this.versionRootPath;
+  }
+
   async getUsage(options?: WorkspaceUsageOptions): Promise<WorkspaceUsage> {
     const scopeUser = options?.path ? normalizePath(options.path) : "/";
     this.guardRead(scopeUser);
     const scopeInternal = this.toInternalPath(scopeUser);
     return this.withWorkspace(async (tx) => {
+      const versionRootId = await this.getVersionRootId(tx);
       const versionId = await this.getCurrentVersionId(tx);
       const scopeLtree = pathToLtree(scopeInternal, this.workspaceId);
       const r = await tx.query<UsageRow>(
@@ -255,13 +271,19 @@ export class PgFileSystem {
            SELECT DISTINCT blob_hash
            FROM visible
            WHERE node_type = 'file' AND blob_hash IS NOT NULL
-         )
-         SELECT
-           (SELECT COUNT(*) FROM fs_versions WHERE workspace_id = $1) AS versions,
-           (SELECT COUNT(*) FROM fs_entries WHERE workspace_id = $1) AS entry_rows,
-           (SELECT COUNT(*) FROM fs_entries WHERE workspace_id = $1 AND node_type = $3) AS tombstone_rows,
-           (SELECT COUNT(*) FROM fs_blobs WHERE workspace_id = $1) AS blob_count,
-           (SELECT COALESCE(SUM(size_bytes), 0) FROM fs_blobs WHERE workspace_id = $1) AS stored_blob_bytes,
+          )
+          SELECT
+            (SELECT COUNT(*) FROM fs_versions WHERE workspace_id = $1 AND version_root_id = $5) AS versions,
+            (SELECT COUNT(*)
+             FROM fs_entries e
+             JOIN fs_versions v ON v.workspace_id = e.workspace_id AND v.id = e.version_id
+             WHERE e.workspace_id = $1 AND v.version_root_id = $5) AS entry_rows,
+            (SELECT COUNT(*)
+             FROM fs_entries e
+             JOIN fs_versions v ON v.workspace_id = e.workspace_id AND v.id = e.version_id
+             WHERE e.workspace_id = $1 AND v.version_root_id = $5 AND e.node_type = $3) AS tombstone_rows,
+            (SELECT COUNT(*) FROM fs_blobs WHERE workspace_id = $1) AS blob_count,
+            (SELECT COALESCE(SUM(size_bytes), 0) FROM fs_blobs WHERE workspace_id = $1) AS stored_blob_bytes,
            (SELECT COALESCE(SUM(b.size_bytes), 0)
             FROM referenced_blobs rb
             JOIN fs_blobs b ON b.workspace_id = $1 AND b.hash = rb.blob_hash) AS referenced_blob_bytes,
@@ -270,7 +292,7 @@ export class PgFileSystem {
            (SELECT COUNT(*) FROM visible WHERE node_type = 'directory') AS visible_directories,
            (SELECT COUNT(*) FROM visible WHERE node_type = 'symlink') AS visible_symlinks,
            (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes`,
-        [this.workspaceId, versionId, TOMBSTONE, scopeLtree],
+        [this.workspaceId, versionId, TOMBSTONE, scopeLtree, versionRootId],
       );
       const row = r.rows[0]!;
       return {
@@ -300,7 +322,7 @@ export class PgFileSystem {
   async init(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
-      const rootLtree = pathToLtree("/", this.workspaceId);
+      const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
       await tx.query(
         `INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
          VALUES ($1, $2, $3::ltree, 'directory', $4)
@@ -357,15 +379,150 @@ export class PgFileSystem {
     }
   }
 
+  // -- Version root resolution ------------------------------------------------
+
+  private async getVersionRootId(tx: SqlClient): Promise<number> {
+    if (this.cachedVersionRootId !== null) return this.cachedVersionRootId;
+    const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
+    const r = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_version_roots
+       WHERE workspace_id = $1 AND path = $2::ltree
+       LIMIT 1`,
+      [this.workspaceId, rootLtree],
+    );
+    if (r.rows.length > 0) {
+      this.cachedVersionRootId = Number(r.rows[0]!.id);
+      return this.cachedVersionRootId;
+    }
+
+    if (this.versionRootPath !== "/") {
+      throw new FsError(
+        "ENOTVERSIONED",
+        "not a versioned directory",
+        this.toUserPath(this.versionRootPath),
+      );
+    }
+
+    this.cachedVersionRootId = await this.createVersionRootRecord(tx, "/");
+    return this.cachedVersionRootId;
+  }
+
+  private async createVersionRootRecord(
+    tx: SqlClient,
+    internalPath: string,
+  ): Promise<number> {
+    const rootLtree = pathToLtree(internalPath, this.workspaceId);
+    const existing = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_version_roots
+       WHERE workspace_id = $1 AND path = $2::ltree
+       LIMIT 1`,
+      [this.workspaceId, rootLtree],
+    );
+    if (existing.rows.length > 0) return Number(existing.rows[0]!.id);
+
+    const created = await tx.query<{ id: number }>(
+      `INSERT INTO fs_version_roots (workspace_id, path)
+       VALUES ($1, $2::ltree)
+       ON CONFLICT (workspace_id, path) DO UPDATE SET path = EXCLUDED.path
+       RETURNING id`,
+      [this.workspaceId, rootLtree],
+    );
+    return Number(created.rows[0]!.id);
+  }
+
+  private async assertCanCreateVersionRoot(
+    tx: SqlClient,
+    internalPath: string,
+  ): Promise<void> {
+    if (internalPath === "/") return;
+    const rootLtree = pathToLtree("/", this.workspaceId);
+    const targetLtree = pathToLtree(internalPath, this.workspaceId);
+    const r = await tx.query<VersionRootRow>(
+      `SELECT id, path::text AS path
+       FROM fs_version_roots
+       WHERE workspace_id = $1
+         AND path != $2::ltree
+         AND path != $3::ltree
+         AND (path @> $3::ltree OR path <@ $3::ltree)
+       LIMIT 1`,
+      [this.workspaceId, rootLtree, targetLtree],
+    );
+    if (r.rows.length > 0) {
+      throw new FsError(
+        "EINVAL",
+        "nested versioned directories are not supported",
+        this.toUserPath(internalPath),
+      );
+    }
+  }
+
+  private async ensureVersionRootInitialized(
+    tx: SqlClient,
+    internalPath: string,
+  ): Promise<void> {
+    await this.assertCanCreateVersionRoot(tx, internalPath);
+    const versionRootId = await this.createVersionRootRecord(tx, internalPath);
+
+    const existingVersion = await tx.query<{ id: number }>(
+      `SELECT id FROM fs_versions
+       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+       LIMIT 1`,
+      [this.workspaceId, versionRootId, DEFAULT_VERSION],
+    );
+    if (existingVersion.rows.length > 0) return;
+
+    const created = await tx.query<{ id: number }>(
+      `INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
+       VALUES ($1, $2, $3, NULL)
+       RETURNING id`,
+      [this.workspaceId, versionRootId, DEFAULT_VERSION],
+    );
+    const versionId = Number(created.rows[0]!.id);
+    await tx.query(
+      `INSERT INTO version_ancestors (workspace_id, descendant_id, ancestor_id, depth)
+       VALUES ($1, $2, $2, 0)`,
+      [this.workspaceId, versionId],
+    );
+
+    const sourceVersionId = await this.getCurrentVersionId(tx);
+    const mountLtree = pathToLtree(internalPath, this.workspaceId);
+    await tx.query(
+      `INSERT INTO fs_entries (
+         workspace_id, version_id, path, blob_hash, node_type,
+         symlink_target, mode, size_bytes, mtime, created_at
+       )
+       SELECT
+         $1, $2,
+         src.path, src.blob_hash, src.node_type,
+         src.symlink_target, src.mode, src.size_bytes, src.mtime, now()
+       FROM (
+         SELECT DISTINCT ON (e.path)
+                e.path, e.blob_hash, e.node_type, e.symlink_target,
+                e.mode, e.size_bytes, e.mtime
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $3
+           AND e.path <@ $4::ltree
+         ORDER BY e.path, a.depth ASC
+       ) src
+       WHERE src.node_type <> 'tombstone'
+       ON CONFLICT (workspace_id, version_id, path) DO NOTHING`,
+      [this.workspaceId, versionId, sourceVersionId, mountLtree],
+    );
+  }
+
   // -- Version resolution -----------------------------------------------------
 
   private async getCurrentVersionId(tx: SqlClient): Promise<number> {
     if (this.cachedVersionId !== null) return this.cachedVersionId;
+    const versionRootId = await this.getVersionRootId(tx);
     const r = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND label = $2
+       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
        LIMIT 1`,
-      [this.workspaceId, this.versionLabel],
+      [this.workspaceId, versionRootId, this.versionLabel],
     );
     if (r.rows.length === 0) {
       throw new Error(
@@ -378,21 +535,22 @@ export class PgFileSystem {
 
   private async ensureVersion(tx: SqlClient): Promise<number> {
     if (this.cachedVersionId !== null) return this.cachedVersionId;
+    const versionRootId = await this.getVersionRootId(tx);
     const existing = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND label = $2
+       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
        LIMIT 1`,
-      [this.workspaceId, this.versionLabel],
+      [this.workspaceId, versionRootId, this.versionLabel],
     );
     if (existing.rows.length > 0) {
       this.cachedVersionId = Number(existing.rows[0].id);
       return this.cachedVersionId;
     }
     const created = await tx.query<{ id: number }>(
-      `INSERT INTO fs_versions (workspace_id, label, parent_version_id)
-       VALUES ($1, $2, NULL)
+      `INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
+       VALUES ($1, $2, $3, NULL)
        RETURNING id`,
-      [this.workspaceId, this.versionLabel],
+      [this.workspaceId, versionRootId, this.versionLabel],
     );
     const id = Number(created.rows[0]!.id);
     await tx.query(
@@ -410,11 +568,12 @@ export class PgFileSystem {
     tx: SqlClient,
     label: string,
   ): Promise<number | null> {
+    const versionRootId = await this.getVersionRootId(tx);
     const r = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND label = $2
+       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
        LIMIT 1`,
-      [this.workspaceId, label],
+      [this.workspaceId, versionRootId, label],
     );
     return r.rows.length > 0 ? Number(r.rows[0]!.id) : null;
   }
@@ -1604,8 +1763,66 @@ export class PgFileSystem {
     const internal = this.guardWrite(path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
+      if (options?.versioned) {
+        const existing = await this.resolveEntry(tx, internal);
+        if (existing && existing.node_type !== "directory") {
+          throw new FsError("ENOTDIR", "not a directory, mkdir", path);
+        }
+        if (!existing) {
+          await this.internalMkdir(tx, versionId, internal, {
+            recursive: options.recursive,
+          });
+        }
+        await this.ensureVersionRootInitialized(tx, internal);
+        return;
+      }
       await this.internalMkdir(tx, versionId, internal, options);
     });
+  }
+
+  async versioned(
+    path: string,
+    options?: VersionedDirectoryOptions,
+  ): Promise<PgFileSystem> {
+    const internal = this.guardRead(path);
+    const version = options?.version ?? DEFAULT_VERSION;
+    if (version.length === 0) {
+      throw new Error("versioned: version must be a non-empty string");
+    }
+
+    let versionRootId: number;
+    await this.withWorkspace(async (tx) => {
+      const rootLtree = pathToLtree(internal, this.workspaceId);
+      const r = await tx.query<{ id: number }>(
+        `SELECT id FROM fs_version_roots
+         WHERE workspace_id = $1 AND path = $2::ltree
+         LIMIT 1`,
+        [this.workspaceId, rootLtree],
+      );
+      if (r.rows.length === 0) {
+        throw new FsError(
+          "ENOTVERSIONED",
+          "not a versioned directory",
+          path,
+        );
+      }
+      versionRootId = Number(r.rows[0]!.id);
+    });
+
+    const scoped = new PgFileSystem({
+      ...this.baseOptions,
+      db: this.rawDb,
+      rootDir: internal,
+      versionRoot: internal,
+      version,
+    });
+    scoped.cachedVersionRootId = versionRootId!;
+    if (this.txClient) {
+      scoped.txClient = this.txClient;
+      scoped.postCommitHooks = this.postCommitHooks;
+      scoped.originInstance = this.originInstance ?? this;
+    }
+    return scoped;
   }
 
   async readdir(path: string): Promise<string[]> {
@@ -2184,6 +2401,7 @@ export class PgFileSystem {
     });
     facade.txClient = sqlTx;
     facade.cachedVersionId = this.cachedVersionId;
+    facade.cachedVersionRootId = this.cachedVersionRootId;
     facade.postCommitHooks = postCommitHooks;
     facade.originInstance = this;
     return facade;
@@ -2389,20 +2607,21 @@ export class PgFileSystem {
     }
 
     await this.withWorkspace(async (tx) => {
+      const versionRootId = await this.getVersionRootId(tx);
       const parentId = await this.getCurrentVersionId(tx);
       const existing = await tx.query(
         `SELECT 1 FROM fs_versions
-         WHERE workspace_id = $1 AND label = $2`,
-        [this.workspaceId, newVersion],
+         WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3`,
+        [this.workspaceId, versionRootId, newVersion],
       );
       if (existing.rows.length > 0) {
         throw new Error(`fork: version '${newVersion}' already exists`);
       }
       const created = await tx.query<{ id: number }>(
-        `INSERT INTO fs_versions (workspace_id, label, parent_version_id)
-         VALUES ($1, $2, $3)
+        `INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
+         VALUES ($1, $2, $3, $4)
          RETURNING id`,
-        [this.workspaceId, newVersion, parentId],
+        [this.workspaceId, versionRootId, newVersion, parentId],
       );
       const newId = Number(created.rows[0]!.id);
       await tx.query(
@@ -2562,11 +2781,12 @@ export class PgFileSystem {
 
   async listVersions(): Promise<string[]> {
     return this.withWorkspace(async (tx) => {
+      const versionRootId = await this.getVersionRootId(tx);
       const r = await tx.query<{ label: string }>(
         `SELECT label FROM fs_versions
-         WHERE workspace_id = $1
+         WHERE workspace_id = $1 AND version_root_id = $2
          ORDER BY label`,
-        [this.workspaceId],
+        [this.workspaceId, versionRootId],
       );
       return r.rows.map((row) => row.label);
     });
@@ -2579,11 +2799,12 @@ export class PgFileSystem {
       );
     }
     await this.withWorkspace(async (tx) => {
+      const versionRootId = await this.getVersionRootId(tx);
       const r = await tx.query<{ id: number }>(
         `SELECT id FROM fs_versions
-         WHERE workspace_id = $1 AND label = $2
+         WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
          LIMIT 1`,
-        [this.workspaceId, version],
+        [this.workspaceId, versionRootId, version],
       );
       if (r.rows.length === 0) return;
       const targetId = Number(r.rows[0]!.id);
@@ -2597,9 +2818,9 @@ export class PgFileSystem {
   ): Promise<void> {
     const children = await tx.query(
       `SELECT 1 FROM fs_versions
-       WHERE workspace_id = $1 AND parent_version_id = $2
+       WHERE workspace_id = $1 AND version_root_id = $3 AND parent_version_id = $2
        LIMIT 1`,
-      [this.workspaceId, versionId],
+      [this.workspaceId, versionId, await this.getVersionRootId(tx)],
     );
     if (children.rows.length > 0) {
       throw new Error(
@@ -2706,15 +2927,16 @@ export class PgFileSystem {
     newLabel: string,
     swap: boolean,
   ): Promise<RenameVersionResult> {
+    const versionRootId = await this.getVersionRootId(tx);
     const currentId = await this.getCurrentVersionId(tx);
 
     // Lock the target label row (if any) so a concurrent rename can't race
     // between our existence check and the UPDATEs below.
     const targetRows = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND label = $2
+       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
        FOR UPDATE`,
-      [this.workspaceId, newLabel],
+      [this.workspaceId, versionRootId, newLabel],
     );
 
     if (targetRows.rows.length === 0) {
@@ -3440,7 +3662,7 @@ function generatePrevLabel(newLabel: string, displacedId: number): string {
 }
 
 /**
- * Map a PostgreSQL unique-violation (`23505`) on `unique_workspace_version_label`
+ * Map a PostgreSQL unique-violation (`23505`) on the version-label index
  * to a clear public error. Other errors pass through unchanged.
  */
 function mapVersionLabelUniqueViolation(e: unknown, label: string): unknown {
@@ -3448,8 +3670,10 @@ function mapVersionLabelUniqueViolation(e: unknown, label: string): unknown {
     e instanceof SqlError &&
     e.code === "23505" &&
     (e.constraint === "unique_workspace_version_label" ||
+      e.constraint === "unique_workspace_version_root_label" ||
       (e.detail ?? "").includes("workspace_id") ||
-      e.message.includes("unique_workspace_version_label"))
+      e.message.includes("unique_workspace_version_label") ||
+      e.message.includes("unique_workspace_version_root_label"))
   ) {
     return new Error(
       `renameVersion: label '${label}' is already used by another version.`,

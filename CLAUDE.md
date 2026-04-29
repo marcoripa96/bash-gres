@@ -47,11 +47,12 @@ await bash.exec("echo hello > /file.txt");
 
 ## Database
 
-- **Table**: single `fs_nodes` table with ltree paths, workspace isolation, self-referencing parent_id (ON DELETE RESTRICT)
+- **Tables**: `fs_version_roots`, `fs_versions`, `version_ancestors`, `fs_entries`, `fs_blobs`
 - **Extensions**: `ltree`, `pg_textsearch` (v1.0.0), optionally `pgvector`
-- **Indexes**: GiST on ltree, BM25 on (name, content), partial index for directories, covering index for stat
+- **Indexes**: GiST on ltree paths, version-root label uniqueness, ancestor closure depth/reverse indexes, blob hash, optional BM25/HNSW
 - **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set via `SET LOCAL` in every transaction
 - **Workspace ID**: text (UUID by default), scoped per `PgFileSystem` instance
+- **Version root**: `/` by default; `mkdir(path, { versioned: true })` creates a non-nested directory-level version root opened via `fs.versioned(path)`
 
 ## Commands
 

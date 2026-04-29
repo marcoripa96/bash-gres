@@ -7,7 +7,8 @@ PostgreSQL-backed virtual filesystem for AI agents. Implements the [just-bash](h
 - Full bash environment via [just-bash](https://github.com/vercel-labs/just-bash): 60+ commands, pipes, redirects, variables, loops
 - Node.js `fs`-compatible API: readFile, writeFile, mkdir, cp, mv, rm, symlink, stat, walk, glob
 - Workspace isolation via PostgreSQL Row-Level Security
-- Copy-on-write versions per workspace: fork, diff, merge, revert, promote, delete
+- Copy-on-write versions per version root: fork, diff, merge, revert, promote, delete
+- Versioned directories via `mkdir(path, { versioned: true })` and scoped facades
 - BM25 full-text search via `pg_textsearch`
 - Optional pgvector semantic and hybrid search
 - Bring your own driver: `postgres.js`, `node-postgres (pg)`, or Drizzle ORM
@@ -110,8 +111,8 @@ usage.logicalBytes     // visible file + symlink bytes in fs.version
 usage.referencedBlobBytes // deduplicated blob bytes referenced by visible files
 usage.storedBlobBytes  // deduplicated blob bytes stored for the workspace
 usage.blobCount        // stored blob rows
-usage.versions         // version labels in the workspace
-usage.entryRows        // fs_entries rows across all versions, including tombstones
+usage.versions         // version labels in the active version root
+usage.entryRows        // fs_entries rows in the active version root, including tombstones
 usage.visibleNodes     // visible nodes in fs.version, including root
 usage.limits           // { maxFiles, maxFileSize, maxWorkspaceBytes? }
 ```
@@ -139,7 +140,9 @@ try {
 
 ## Versioning
 
-Each `PgFileSystem` instance is bound to a `version` (default `"main"`). Versions within a workspace are copy-on-write overlays: the same path can hold different contents, and `fork()` is O(1) because it links the new version to its parent through a closure table without copying entry rows. Reads walk that closure to the nearest ancestor with a row at the requested path.
+Each `PgFileSystem` instance is bound to a `version` (default `"main"`) inside an active **version root**. By default the version root is `/`, preserving workspace-wide versioning. You can also make any non-nested directory versionable and work through a scoped facade rooted at that directory.
+
+Versions are copy-on-write overlays: the same path can hold different contents, and `fork()` is O(1) because it links the new version to its parent through a closure table without copying entry rows. Reads walk that closure to the nearest ancestor with a row at the requested path.
 
 This is a **live ancestor overlay**, not a historical snapshot. A write to a parent version after a child has been forked can still affect the child's visible view at any path the child has not shadowed. Once the child writes (or deletes) a path, that path is shielded from later parent writes. To freeze a checkpoint independent of its parents, fork and then `detach()`.
 
@@ -156,6 +159,29 @@ await v2.readFile("/config.json") // '{"env":"prod"}'
 await v1.listVersions()     // ["v1", "v2"]
 await v1.deleteVersion("v2") // drops every row in v2
 ```
+
+### Versioned Directories
+
+Use `mkdir(path, { versioned: true })` to make a directory an independent version root, similar to running `git init` inside that directory. The directory remains a normal filesystem directory, but version operations on its scoped facade only affect that subtree.
+
+```ts
+const fs = new PgFileSystem({ db: sql, workspaceId: "app" })
+await fs.init()
+
+await fs.mkdir("/database", { versioned: true })
+
+const dbMain = await fs.versioned("/database")
+await dbMain.writeFile("/schema.sql", "main")
+
+const dbDraft = await dbMain.fork("draft")
+await dbDraft.writeFile("/schema.sql", "draft")
+
+await dbMain.readFile("/schema.sql")  // "main"
+await dbDraft.readFile("/schema.sql") // "draft"
+await dbMain.listVersions()           // ["draft", "main"]
+```
+
+Version labels are scoped to the versioned directory, so `/database` and `/user` can both have a `draft` version. Nested versioned directories are rejected.
 
 Versioning primitives include:
 

@@ -1,13 +1,21 @@
 import type { SqlClient, SetupOptions } from "./types.js";
 
 const TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS fs_version_roots (
+    id            bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    workspace_id  text NOT NULL CHECK (length(workspace_id) > 0),
+    path          ltree NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT unique_workspace_version_root_path UNIQUE (workspace_id, path)
+);
+
 CREATE TABLE IF NOT EXISTS fs_versions (
     id                 bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     workspace_id       text NOT NULL CHECK (length(workspace_id) > 0),
+    version_root_id    bigint REFERENCES fs_version_roots(id) ON DELETE RESTRICT,
     label              text NOT NULL CHECK (length(label) > 0),
     parent_version_id  bigint REFERENCES fs_versions(id) ON DELETE RESTRICT,
-    created_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT unique_workspace_version_label UNIQUE (workspace_id, label)
+    created_at         timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS version_ancestors (
@@ -43,7 +51,49 @@ CREATE TABLE IF NOT EXISTS fs_entries (
 ) WITH (fillfactor = 100);
 `;
 
+const MIGRATIONS_DDL = `
+DO $$ BEGIN
+  ALTER TABLE fs_versions ADD COLUMN version_root_id bigint;
+EXCEPTION WHEN duplicate_column THEN
+  NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE fs_versions
+    ADD CONSTRAINT fs_versions_version_root_id_fkey
+    FOREIGN KEY (version_root_id) REFERENCES fs_version_roots(id) ON DELETE RESTRICT;
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END $$;
+
+ALTER TABLE fs_versions DROP CONSTRAINT IF EXISTS unique_workspace_version_label;
+DROP INDEX IF EXISTS idx_fs_versions_parent;
+
+INSERT INTO fs_version_roots (workspace_id, path)
+SELECT DISTINCT ON (workspace_id) workspace_id, path
+FROM fs_entries
+WHERE nlevel(path) = 1
+ORDER BY workspace_id, path::text
+ON CONFLICT (workspace_id, path) DO NOTHING;
+
+UPDATE fs_versions v
+SET version_root_id = r.id
+FROM fs_version_roots r
+WHERE v.version_root_id IS NULL
+  AND r.workspace_id = v.workspace_id
+  AND nlevel(r.path) = 1;
+`;
+
 const INDEXES_DDL = `
+-- Version roots by mount path
+CREATE INDEX IF NOT EXISTS idx_fs_version_roots_path_gist
+  ON fs_version_roots USING GIST (path gist_ltree_ops(siglen=124));
+
+-- Version labels are unique within a version root, not the whole workspace
+CREATE UNIQUE INDEX IF NOT EXISTS unique_workspace_version_root_label
+  ON fs_versions (workspace_id, version_root_id, label)
+  WHERE version_root_id IS NOT NULL;
+
 -- Visibility lookup: per-workspace, per-path, ordered by version
 CREATE INDEX IF NOT EXISTS idx_fs_entries_path_version
   ON fs_entries (workspace_id, path, version_id);
@@ -66,7 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_version_ancestors_reverse
 
 -- Versions by parent (descendant-existence checks)
 CREATE INDEX IF NOT EXISTS idx_fs_versions_parent
-  ON fs_versions (workspace_id, parent_version_id);
+  ON fs_versions (workspace_id, version_root_id, parent_version_id);
 `;
 
 const FTS_INDEX_DDL = `
@@ -138,6 +188,7 @@ export async function setup(
   }
 
   await client.query(TABLE_DDL);
+  await client.query(MIGRATIONS_DDL);
   await client.query(INDEXES_DDL);
 
   if (enableFullTextSearch) {
@@ -145,7 +196,7 @@ export async function setup(
   }
 
   if (enableRLS) {
-    for (const table of ["fs_versions", "version_ancestors", "fs_entries", "fs_blobs"]) {
+    for (const table of ["fs_version_roots", "fs_versions", "version_ancestors", "fs_entries", "fs_blobs"]) {
       await client.query(rlsDdl(table));
     }
   }

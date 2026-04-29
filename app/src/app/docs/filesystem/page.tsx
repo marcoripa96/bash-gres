@@ -48,10 +48,13 @@ await ws2.exists("/data.txt") // false, different workspace`}
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
           Each instance is also scoped to a{" "}
-          <code className="font-mono text-foreground/80">version</code> within
-          the workspace (default:{" "}
+          <code className="font-mono text-foreground/80">version</code> inside
+          an active version root (default:{" "}
           <code className="font-mono text-foreground/80">&quot;main&quot;</code>
-          ). Versions are fully isolated, forkable, and deletable. See{" "}
+          ). The workspace root is versioned by default, and directories can be
+          made independently versioned with{" "}
+          <code className="font-mono text-foreground/80">mkdir(path, {"{ versioned: true }"})</code>.
+          See{" "}
           <a
             href="/docs/versioning"
             className="underline underline-offset-2 hover:text-foreground transition-colors"
@@ -61,13 +64,16 @@ await ws2.exists("/data.txt") // false, different workspace`}
           for the full API.
         </p>
         <CodeBlock
-          code={`const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
-await v1.writeFile("/config.json", '{"env":"staging"}')
+          code={`const fs = new PgFileSystem({ db: sql, workspaceId: "app" })
+await fs.mkdir("/database", { versioned: true })
 
-const v2 = await v1.fork("v2")
-await v2.writeFile("/config.json", '{"env":"prod"}')
+const dbMain = await fs.versioned("/database")
+await dbMain.writeFile("/config.json", '{"env":"staging"}')
 
-await v1.readFile("/config.json") // '{"env":"staging"}' -- untouched`}
+const dbDraft = await dbMain.fork("draft")
+await dbDraft.writeFile("/config.json", '{"env":"prod"}')
+
+await dbMain.readFile("/config.json") // '{"env":"staging"}' -- untouched`}
         />
       </section>
 
@@ -111,6 +117,10 @@ const buffer = await fs.readFileBuffer("/docs/image.png")`}
         <CodeBlock
           code={`// Create directory (with recursive option)
 await fs.mkdir("/docs/images", { recursive: true })
+
+// Create an independent version root at a directory
+await fs.mkdir("/database", { versioned: true })
+const database = await fs.versioned("/database")
 
 // List directory names
 const names = await fs.readdir("/docs")
@@ -220,10 +230,10 @@ const real = await fs.realpath("/link")`}
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
           <code className="font-mono text-foreground/80">getUsage()</code>{" "}
-          reports workspace-wide storage usage and current-version logical
+          reports workspace-wide storage usage and active-version-root logical
           usage. Pass a path to scope visible counts to a subtree. Stored blob
-          bytes are deduplicated across copy-on-write versions, while logical
-          bytes count the visible files and symlinks in the selected path.
+          bytes are deduplicated across the workspace, while logical bytes count
+          the visible files and symlinks in the selected path.
         </p>
         <CodeBlock
           code={`const usage = await fs.getUsage()
@@ -233,8 +243,8 @@ usage.logicalBytes     // visible bytes in fs.version
 usage.referencedBlobBytes // deduped visible file blobs for the path
 usage.storedBlobBytes  // deduplicated workspace blob bytes
 usage.blobCount        // stored blob rows
-usage.versions         // version labels in the workspace
-usage.entryRows        // fs_entries rows, including tombstones
+usage.versions         // version labels in the active version root
+usage.entryRows        // fs_entries rows in the active version root
 usage.visibleNodes     // visible nodes in fs.version, including root
 usage.limits           // { maxFiles, maxFileSize, maxWorkspaceBytes? }`}
         />
