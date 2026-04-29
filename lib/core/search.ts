@@ -1,5 +1,10 @@
-import type { SqlClient, SearchResult } from "./types.js";
+import type { SqlClient, SearchResult, SqlParam } from "./types.js";
 import { pathToLtree, ltreeToPath, fileName } from "./path-encoding.js";
+import {
+  emptyExcludes,
+  excludeWhereSql,
+  type CompiledExcludes,
+} from "./exclude.js";
 
 const MAX_SEARCH_LIMIT = 100;
 const VISIBILITY_OVERSAMPLE = 4;
@@ -31,6 +36,12 @@ export function validateEmbedding(
   }
 }
 
+interface SearchOpts {
+  path?: string;
+  limit?: number;
+  excludes?: CompiledExcludes;
+}
+
 /**
  * BM25 full-text search at version V.
  *
@@ -47,11 +58,25 @@ export async function fullTextSearch(
   workspaceId: string,
   versionId: number,
   query: string,
-  opts?: { path?: string; limit?: number },
+  opts?: SearchOpts,
 ): Promise<SearchResult[]> {
   const limit = clampLimit(opts?.limit);
   const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
   const fetchLimit = limit * VISIBILITY_OVERSAMPLE;
+
+  const baseParams: SqlParam[] = [
+    query,
+    workspaceId,
+    versionId,
+    scopeLtree,
+    fetchLimit,
+    limit,
+  ];
+  const exc = excludeWhereSql(
+    opts?.excludes ?? emptyExcludes(),
+    "e.path",
+    baseParams.length + 1,
+  );
 
   const result = await client.query<{
     path: string;
@@ -77,6 +102,7 @@ export async function fullTextSearch(
        WHERE e.workspace_id = $2
          AND a.descendant_id = $3
          AND e.path <@ $4::ltree
+         AND ${exc.sql}
        ORDER BY e.path, a.depth ASC
      )
      SELECT v.path, c.rank
@@ -85,7 +111,7 @@ export async function fullTextSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $6`,
-    [query, workspaceId, versionId, scopeLtree, fetchLimit, limit],
+    [...baseParams, ...exc.params],
   );
 
   return result.rows.map((r) => {
@@ -103,13 +129,27 @@ export async function semanticSearch(
   workspaceId: string,
   versionId: number,
   embedding: number[],
-  opts?: { path?: string; limit?: number },
+  opts?: SearchOpts,
 ): Promise<SearchResult[]> {
   const limit = clampLimit(opts?.limit);
   const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
   validateEmbedding(embedding);
   const embeddingStr = `[${embedding.join(",")}]`;
   const fetchLimit = limit * VISIBILITY_OVERSAMPLE;
+
+  const baseParams: SqlParam[] = [
+    embeddingStr,
+    workspaceId,
+    versionId,
+    scopeLtree,
+    fetchLimit,
+    limit,
+  ];
+  const exc = excludeWhereSql(
+    opts?.excludes ?? emptyExcludes(),
+    "e.path",
+    baseParams.length + 1,
+  );
 
   const result = await client.query<{
     path: string;
@@ -133,6 +173,7 @@ export async function semanticSearch(
        WHERE e.workspace_id = $2
          AND a.descendant_id = $3
          AND e.path <@ $4::ltree
+         AND ${exc.sql}
        ORDER BY e.path, a.depth ASC
      )
      SELECT v.path, c.rank
@@ -141,7 +182,7 @@ export async function semanticSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $6`,
-    [embeddingStr, workspaceId, versionId, scopeLtree, fetchLimit, limit],
+    [...baseParams, ...exc.params],
   );
 
   return result.rows.map((r) => {
@@ -154,18 +195,18 @@ export async function semanticSearch(
   });
 }
 
+interface HybridOpts extends SearchOpts {
+  textWeight?: number;
+  vectorWeight?: number;
+}
+
 export async function hybridSearch(
   client: SqlClient,
   workspaceId: string,
   versionId: number,
   query: string,
   embedding: number[],
-  opts?: {
-    path?: string;
-    textWeight?: number;
-    vectorWeight?: number;
-    limit?: number;
-  },
+  opts?: HybridOpts,
 ): Promise<SearchResult[]> {
   const limit = clampLimit(opts?.limit);
   const textWeight = opts?.textWeight ?? 0.4;
@@ -179,6 +220,23 @@ export async function hybridSearch(
   validateEmbedding(embedding);
   const embeddingStr = `[${embedding.join(",")}]`;
   const fetchLimit = limit * VISIBILITY_OVERSAMPLE;
+
+  const baseParams: SqlParam[] = [
+    textWeight,
+    query,
+    vectorWeight,
+    embeddingStr,
+    workspaceId,
+    versionId,
+    scopeLtree,
+    fetchLimit,
+    limit,
+  ];
+  const exc = excludeWhereSql(
+    opts?.excludes ?? emptyExcludes(),
+    "e.path",
+    baseParams.length + 1,
+  );
 
   const result = await client.query<{
     path: string;
@@ -206,6 +264,7 @@ export async function hybridSearch(
        WHERE e.workspace_id = $5
          AND a.descendant_id = $6
          AND e.path <@ $7::ltree
+         AND ${exc.sql}
        ORDER BY e.path, a.depth ASC
      )
      SELECT v.path, c.rank
@@ -214,17 +273,7 @@ export async function hybridSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $9`,
-    [
-      textWeight,
-      query,
-      vectorWeight,
-      embeddingStr,
-      workspaceId,
-      versionId,
-      scopeLtree,
-      fetchLimit,
-      limit,
-    ],
+    [...baseParams, ...exc.params],
   );
 
   return result.rows.map((r) => {

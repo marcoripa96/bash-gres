@@ -41,6 +41,12 @@ import {
   hybridSearch,
   validateEmbedding,
 } from "./search.js";
+import {
+  compileExcludes,
+  excludeWhereSql,
+  isExcluded,
+  type CompiledExcludes,
+} from "./exclude.js";
 
 // -- Row shapes -------------------------------------------------------------
 
@@ -167,6 +173,7 @@ export class PgFileSystem {
   private embeddingDimensions?: number;
   private rootDir: string;
   private versionRootPath: string;
+  private excludes: CompiledExcludes;
   private readonly baseOptions: PgFileSystemOptions;
   private cachedVersionId: number | null = null;
   private cachedVersionRootId: number | null = null;
@@ -219,6 +226,11 @@ export class PgFileSystem {
     this.embeddingDimensions = options.embeddingDimensions;
     this.rootDir = normalizePath(options.rootDir ?? "/");
     this.versionRootPath = normalizePath(options.versionRoot ?? "/");
+    this.excludes = compileExcludes(
+      options.exclude,
+      this.rootDir,
+      this.workspaceId,
+    );
     this.baseOptions = {
       ...options,
       workspaceId: this.workspaceId,
@@ -247,6 +259,14 @@ export class PgFileSystem {
       const versionRootId = await this.getVersionRootId(tx);
       const versionId = await this.getCurrentVersionId(tx);
       const scopeLtree = pathToLtree(scopeInternal, this.workspaceId);
+      const baseParams: SqlParam[] = [
+        this.workspaceId,
+        versionId,
+        TOMBSTONE,
+        scopeLtree,
+        versionRootId,
+      ];
+      const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
       const r = await tx.query<UsageRow>(
         `WITH visible_raw AS (
            SELECT DISTINCT ON (e.path)
@@ -260,6 +280,7 @@ export class PgFileSystem {
            WHERE e.workspace_id = $1
              AND a.descendant_id = $2
              AND e.path <@ $4::ltree
+             AND ${exc.sql}
            ORDER BY e.path, a.depth ASC
          ),
          visible AS (
@@ -292,7 +313,7 @@ export class PgFileSystem {
            (SELECT COUNT(*) FROM visible WHERE node_type = 'directory') AS visible_directories,
            (SELECT COUNT(*) FROM visible WHERE node_type = 'symlink') AS visible_symlinks,
            (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes`,
-        [this.workspaceId, versionId, TOMBSTONE, scopeLtree, versionRootId],
+        [...baseParams, ...exc.params],
       );
       const row = r.rows[0]!;
       return {
@@ -646,6 +667,8 @@ export class PgFileSystem {
     tx: SqlClient,
     versionId: number,
   ): Promise<number> {
+    const baseParams: SqlParam[] = [this.workspaceId, versionId, TOMBSTONE];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     const r = await tx.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM (
          SELECT DISTINCT ON (e.path) e.node_type
@@ -653,9 +676,10 @@ export class PgFileSystem {
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
          WHERE e.workspace_id = $1 AND a.descendant_id = $2
+           AND ${exc.sql}
          ORDER BY e.path, a.depth ASC
        ) v WHERE node_type != $3`,
-      [this.workspaceId, versionId, TOMBSTONE],
+      [...baseParams, ...exc.params],
     );
     return Number(r.rows[0]?.count ?? 0);
   }
@@ -671,6 +695,9 @@ export class PgFileSystem {
     tx: SqlClient,
     posixPath: string,
   ): Promise<EntryRow | null> {
+    if (!this.excludes.empty && isExcluded(this.excludes, posixPath)) {
+      return null;
+    }
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(posixPath, this.workspaceId);
     const r = await tx.query<EntryRow>(
@@ -741,6 +768,8 @@ export class PgFileSystem {
   ): Promise<DirChildRow[]> {
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(parentPosix, this.workspaceId);
+    const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     const r = await tx.query<DirChildRow>(
       `WITH visible AS (
          SELECT DISTINCT ON (e.path)
@@ -759,10 +788,11 @@ export class PgFileSystem {
            AND e.path <@ $3::ltree
            AND e.path != $3::ltree
            AND nlevel(e.path) = nlevel($3::ltree) + 1
+           AND ${exc.sql}
          ORDER BY e.path, a.depth ASC
        )
        SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
-      [this.workspaceId, versionId, lt, TOMBSTONE],
+      [...baseParams, ...exc.params],
     );
     return r.rows;
   }
@@ -778,6 +808,13 @@ export class PgFileSystem {
     versionId: number,
     scopeLtree: string,
   ): Promise<Map<string, InternalEntryShape>> {
+    const baseParams: SqlParam[] = [
+      this.workspaceId,
+      versionId,
+      scopeLtree,
+      TOMBSTONE,
+    ];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     const r = await tx.query<{
       path: string;
       node_type: string;
@@ -802,11 +839,12 @@ export class PgFileSystem {
          WHERE e.workspace_id = $1
            AND a.descendant_id = $2
            AND e.path <@ $3::ltree
+           AND ${exc.sql}
          ORDER BY e.path, a.depth ASC
        )
        SELECT path, node_type, blob_hash, symlink_target, mode, size_bytes, mtime
        FROM visible WHERE node_type != $4`,
-      [this.workspaceId, versionId, scopeLtree, TOMBSTONE],
+      [...baseParams, ...exc.params],
     );
     const map = new Map<string, InternalEntryShape>();
     for (const row of r.rows) {
@@ -830,6 +868,8 @@ export class PgFileSystem {
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(rootPosix, this.workspaceId);
     const filter = includeRoot ? "" : "AND e.path != $3::ltree";
+    const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     const r = await tx.query<SubtreeRow>(
       `WITH visible AS (
          SELECT DISTINCT ON (e.path)
@@ -848,10 +888,11 @@ export class PgFileSystem {
            AND a.descendant_id = $2
            AND e.path <@ $3::ltree
            ${filter}
+           AND ${exc.sql}
          ORDER BY e.path, a.depth ASC
        )
        SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
-      [this.workspaceId, versionId, lt, TOMBSTONE],
+      [...baseParams, ...exc.params],
     );
     return r.rows;
   }
@@ -885,6 +926,8 @@ export class PgFileSystem {
 
   private async validateNodeCount(tx: SqlClient): Promise<void> {
     const versionId = await this.getCurrentVersionId(tx);
+    const baseParams: SqlParam[] = [this.workspaceId, versionId, TOMBSTONE];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     const r = await tx.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM (
          SELECT DISTINCT ON (e.path) e.node_type
@@ -892,9 +935,10 @@ export class PgFileSystem {
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
          WHERE e.workspace_id = $1 AND a.descendant_id = $2
+           AND ${exc.sql}
          ORDER BY e.path, a.depth ASC
        ) v WHERE node_type != $3`,
-      [this.workspaceId, versionId, TOMBSTONE],
+      [...baseParams, ...exc.params],
     );
     if (r.rows[0] && r.rows[0].count >= this.maxFiles) {
       throw new Error(
@@ -932,6 +976,36 @@ export class PgFileSystem {
 
   private guardWrite(userPath: string): string {
     return this.toInternalPath(normalizePath(userPath));
+  }
+
+  /**
+   * Build the SQL fragment that filters out excluded paths from a result set.
+   * Returns `{ sql: "TRUE", params: [] }` when no patterns are configured.
+   *
+   * `pathExpr` names the ltree path column in the surrounding query
+   * (e.g. `e.path`, `path`, `src.path`). `nextParamIdx` is the next free `$N`.
+   */
+  private buildExcludeClause(
+    pathExpr: string,
+    nextParamIdx: number,
+  ): { sql: string; params: SqlParam[] } {
+    return excludeWhereSql(this.excludes, pathExpr, nextParamIdx);
+  }
+
+  /**
+   * Throw `ENOENT` if `internalPath` matches an exclude pattern. Used by every
+   * public write method so that excluded paths are invisible to writers, not
+   * merely shadowed at read time.
+   */
+  private guardExcludedWrite(
+    internalPath: string,
+    op: string,
+    userPath: string,
+  ): void {
+    if (this.excludes.empty) return;
+    if (isExcluded(this.excludes, internalPath)) {
+      throw new FsError("ENOENT", `no such file or directory, ${op}`, userPath);
+    }
   }
 
   private guardRootBoundary(internalPath: string): void {
@@ -1621,6 +1695,7 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
+    this.guardExcludedWrite(internal, "open", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
@@ -1637,6 +1712,7 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
+    this.guardExcludedWrite(internal, "open", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
@@ -1761,6 +1837,7 @@ export class PgFileSystem {
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
     const internal = this.guardWrite(path);
+    this.guardExcludedWrite(internal, "mkdir", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       if (options?.versioned) {
@@ -1877,6 +1954,7 @@ export class PgFileSystem {
 
   async rm(path: string, options?: RmOptions): Promise<void> {
     const internal = this.guardWrite(path);
+    this.guardExcludedWrite(internal, "rm", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntry(tx, internal);
@@ -1907,6 +1985,7 @@ export class PgFileSystem {
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
     const srcInternal = this.guardRead(src);
     const destInternal = this.guardWrite(dest);
+    this.guardExcludedWrite(destInternal, "cp", dest);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       await this.internalCp(tx, versionId, srcInternal, destInternal, options);
@@ -1916,6 +1995,8 @@ export class PgFileSystem {
   async mv(src: string, dest: string): Promise<void> {
     const srcInternal = this.guardWrite(src);
     const destInternal = this.guardWrite(dest);
+    this.guardExcludedWrite(srcInternal, "mv", src);
+    this.guardExcludedWrite(destInternal, "mv", dest);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const srcPath = srcInternal;
@@ -2019,6 +2100,7 @@ export class PgFileSystem {
       );
     }
     const internal = this.guardWrite(path);
+    this.guardExcludedWrite(internal, "chmod", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntryFollowSymlink(tx, internal);
@@ -2037,6 +2119,7 @@ export class PgFileSystem {
 
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
     const internal = this.guardWrite(path);
+    this.guardExcludedWrite(internal, "utimes", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntryFollowSymlink(tx, internal);
@@ -2073,6 +2156,7 @@ export class PgFileSystem {
 
   async symlink(target: string, linkPath: string): Promise<void> {
     const internal = this.guardWrite(linkPath);
+    this.guardExcludedWrite(internal, "symlink", linkPath);
 
     if (target.includes("\0")) {
       throw new Error("Paths cannot contain null bytes");
@@ -2116,6 +2200,7 @@ export class PgFileSystem {
   async link(existingPath: string, newPath: string): Promise<void> {
     const srcInternal = this.guardRead(existingPath);
     const destInternal = this.guardWrite(newPath);
+    this.guardExcludedWrite(destInternal, "link", newPath);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const srcEntry = await this.resolveEntry(tx, srcInternal);
@@ -2212,7 +2297,7 @@ export class PgFileSystem {
         this.workspaceId,
         versionId,
         query,
-        { ...opts, path: internalScope },
+        { ...opts, path: internalScope, excludes: this.excludes },
       );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
@@ -2235,7 +2320,7 @@ export class PgFileSystem {
         this.workspaceId,
         versionId,
         embedding,
-        { ...opts, path: internalScope },
+        { ...opts, path: internalScope, excludes: this.excludes },
       );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
@@ -2264,7 +2349,7 @@ export class PgFileSystem {
         versionId,
         query,
         embedding,
-        { ...opts, path: internalScope },
+        { ...opts, path: internalScope, excludes: this.excludes },
       );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
@@ -2293,7 +2378,7 @@ export class PgFileSystem {
         `a.descendant_id = $2`,
         queryPlan.exact ? `e.path = $3::ltree` : `e.path <@ $3::ltree`,
       ];
-      const params: (string | number)[] = [
+      const params: SqlParam[] = [
         this.workspaceId,
         versionId,
         scopeLtree,
@@ -2312,6 +2397,10 @@ export class PgFileSystem {
         );
         params.push(encodeBasenameForLtree(queryPlan.basename));
       }
+
+      const exc = this.buildExcludeClause("e.path", params.length + 1);
+      where.push(exc.sql);
+      params.push(...exc.params);
 
       const sql = `
         WITH visible AS (
@@ -2499,6 +2588,8 @@ export class PgFileSystem {
       params.push(page.limit);
       limitClause = `LIMIT $${params.length}`;
     }
+    const exc = this.buildExcludeClause("e.path", params.length + 1);
+    params.push(...exc.params);
     const sql = `
       WITH ours_raw AS (
         SELECT DISTINCT ON (e.path)
@@ -2515,6 +2606,7 @@ export class PgFileSystem {
         WHERE e.workspace_id = $1
           AND a.descendant_id = $2
           AND e.path <@ $4::ltree
+          AND ${exc.sql}
         ORDER BY e.path, a.depth ASC
       ),
       ours AS (SELECT * FROM ours_raw WHERE node_type != 'tombstone'),
@@ -2533,6 +2625,7 @@ export class PgFileSystem {
         WHERE e.workspace_id = $1
           AND a.descendant_id = $3
           AND e.path <@ $4::ltree
+          AND ${exc.sql}
         ORDER BY e.path, a.depth ASC
       ),
       theirs AS (SELECT * FROM theirs_raw WHERE node_type != 'tombstone')

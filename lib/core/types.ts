@@ -239,6 +239,16 @@ export interface PgFileSystemOptions {
   versionRoot?: string;
   permissions?: FsPermissions;
   rootDir?: string;
+  /**
+   * Gitignore-like patterns whose paths are hidden from this instance. Excluded
+   * paths return `ENOENT` on read and write. Compiled once per instance and
+   * pushed down as `WHERE NOT (...)` on every read query.
+   *
+   * Supported syntax (subset of gitignore): `name`, `name/`, `/name`, `*.ext`,
+   * `dir/*.tmp`, `**\/foo`. Negation (`!pat`) and dir-only enforcement on
+   * trailing slashes are not implemented.
+   */
+  exclude?: string[];
   /** Maximum size of a single file write, in bytes. Default: 10 MiB. */
   maxFileSize?: number;
   /** If set, `readFile` rejects files larger than this many bytes. Default: unlimited. */
