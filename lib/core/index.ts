@@ -39,3 +39,5 @@ export {
   decodeLabel,
   normalizePath,
 } from "./path-encoding.js";
+export type { FsCache } from "./cache.js";
+export { InMemoryFsCache, type InMemoryFsCacheOptions } from "./cache-memory.js";

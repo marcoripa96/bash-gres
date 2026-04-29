@@ -225,12 +225,24 @@ export interface WorkspaceUsageOptions {
   path?: string;
 }
 
+import type { FsCache } from "./cache.js";
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
   version?: string;
   permissions?: FsPermissions;
   rootDir?: string;
+  /**
+   * Optional read-side cache. When provided, read operations consult the cache
+   * first; mutations clear all entries for the current workspace+version after
+   * the underlying transaction commits. Reads issued inside a `transaction(fn)`
+   * facade bypass the cache entirely so the facade sees its own uncommitted
+   * writes.
+   */
+  cache?: FsCache;
+  /** Optional TTL applied to all cache entries this filesystem writes. */
+  cacheTtlMs?: number;
   /** Maximum size of a single file write, in bytes. Default: 10 MiB. */
   maxFileSize?: number;
   /** If set, `readFile` rejects files larger than this many bytes. Default: unlimited. */

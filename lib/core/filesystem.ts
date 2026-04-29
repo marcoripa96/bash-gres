@@ -26,6 +26,7 @@ import type {
   WorkspaceUsageOptions,
 } from "./types.js";
 import { FsError, FsQuotaError, SqlError } from "./types.js";
+import type { FsCache } from "./cache.js";
 import { readonlySqlClient } from "./readonly.js";
 import {
   pathToLtree,
@@ -106,6 +107,76 @@ const TOMBSTONE = "tombstone";
 const DIFF_DEFAULT_BATCH_SIZE = 500;
 const DIFF_MAX_BATCH_SIZE = 5000;
 
+/** First byte of a cached `readFile` payload: source was the `content` (text) column. */
+const RF_TAG_TEXT = 0x00;
+/** First byte of a cached `readFile` payload: source was the `binary_data` column. */
+const RF_TAG_BINARY = 0x01;
+
+/**
+ * `JSON.parse` reviver that converts ISO date strings under the `mtime` key
+ * back into `Date` instances. Used by `cacheGetJson` because `FsStat`,
+ * `DirentStatEntry`, and `WalkEntry` carry `Date` fields that `JSON.stringify`
+ * collapses into strings.
+ */
+function reviveMtime(key: string, value: unknown): unknown {
+  if (key === "mtime" && typeof value === "string") return new Date(value);
+  return value;
+}
+
+/** Cached representation of an empty file's content (tag-only, no payload). */
+const RF_EMPTY = new Uint8Array([RF_TAG_TEXT]);
+
+/**
+ * Slice 1-indexed inclusive line ranges out of a UTF-8 text buffer. Mirrors
+ * the SQL implementation in `readFileLines`: a trailing `\n` does not produce
+ * a phantom empty final line, so `total` matches the SQL `array_length(lines)`
+ * count after the trim. Out-of-range slices yield `""` exactly as PG array
+ * slicing does.
+ */
+function sliceTextLines(
+  text: string,
+  start: number,
+  limit: number | undefined,
+): ReadFileLinesResult {
+  let lines = text.split("\n");
+  if (text.endsWith("\n") && lines.length > 0) {
+    lines = lines.slice(0, -1);
+  }
+  const total = lines.length;
+  const startIdx = start - 1;
+  const endIdx = limit !== undefined ? startIdx + limit : lines.length;
+  if (startIdx >= lines.length || startIdx < 0) {
+    return { content: "", total };
+  }
+  return {
+    content: lines.slice(startIdx, endIdx).join("\n"),
+    total,
+  };
+}
+
+/**
+ * Pack a `BlobRow` into the cache representation: 1-byte tag (`RF_TAG_TEXT`
+ * for `content`, `RF_TAG_BINARY` for `binary_data`) followed by the raw
+ * payload. The tag lets `readFileLines` distinguish text from binary on cache
+ * hit without re-reading the row.
+ */
+function encodeReadFileBlob(blob: BlobRow): Uint8Array {
+  if (blob.content !== null) {
+    const payload = new TextEncoder().encode(blob.content);
+    const out = new Uint8Array(1 + payload.byteLength);
+    out[0] = RF_TAG_TEXT;
+    out.set(payload, 1);
+    return out;
+  }
+  if (blob.binary_data !== null) {
+    const out = new Uint8Array(1 + blob.binary_data.byteLength);
+    out[0] = RF_TAG_BINARY;
+    out.set(blob.binary_data, 1);
+    return out;
+  }
+  return RF_EMPTY;
+}
+
 interface DiffRow {
   path: string;
   o_type: string | null;
@@ -161,6 +232,8 @@ export class PgFileSystem {
   private embeddingDimensions?: number;
   private rootDir: string;
   private readonly baseOptions: PgFileSystemOptions;
+  private readonly cache: FsCache | undefined;
+  private readonly cacheTtlMs: number | undefined;
   private cachedVersionId: number | null = null;
   private blobsHasEmbeddingCache: boolean | null = null;
   /**
@@ -209,6 +282,8 @@ export class PgFileSystem {
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
+    this.cache = options.cache;
+    this.cacheTtlMs = options.cacheTtlMs;
     this.rootDir = normalizePath(options.rootDir ?? "/");
     this.baseOptions = {
       ...options,
@@ -298,7 +373,7 @@ export class PgFileSystem {
   }
 
   async init(): Promise<void> {
-    await this.withWorkspace(async (tx) => {
+    await this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree("/", this.workspaceId);
       await tx.query(
@@ -355,6 +430,99 @@ export class PgFileSystem {
       }
       throw e;
     }
+  }
+
+  // -- Cache helpers ----------------------------------------------------------
+
+  /**
+   * Read-side cache is bypassed when this instance is a transaction-bound
+   * facade so the facade sees its own uncommitted writes (read-your-writes
+   * inside `transaction(fn)`).
+   */
+  private cacheable(): boolean {
+    return this.cache !== undefined && this.txClient === null;
+  }
+
+  /**
+   * Compose a cache key. Mandatorily prefixed with `workspaceId` and the
+   * current `versionLabel` so that two `PgFileSystem` instances sharing the
+   * same `FsCache` adapter cannot read each other's entries across workspaces
+   * or versions.
+   */
+  private cacheKey(parts: readonly string[]): string {
+    return [this.workspaceId, this.versionLabel, ...parts].join("");
+  }
+
+  private cachePrefix(): string {
+    return `${this.workspaceId}${this.versionLabel}`;
+  }
+
+  private async cacheGetBytes(
+    parts: readonly string[],
+  ): Promise<Uint8Array | null> {
+    if (!this.cacheable()) return null;
+    return this.cache!.get(this.cacheKey(parts));
+  }
+
+  private async cachePutBytes(
+    parts: readonly string[],
+    value: Uint8Array,
+  ): Promise<void> {
+    if (!this.cacheable()) return;
+    await this.cache!.set(this.cacheKey(parts), value, this.cacheTtlMs);
+  }
+
+  private async cacheGetJson<T>(parts: readonly string[]): Promise<T | null> {
+    const bytes = await this.cacheGetBytes(parts);
+    if (!bytes) return null;
+    return JSON.parse(new TextDecoder().decode(bytes), reviveMtime) as T;
+  }
+
+  private async cachePutJson(
+    parts: readonly string[],
+    value: unknown,
+  ): Promise<void> {
+    if (!this.cacheable()) return;
+    const bytes = new TextEncoder().encode(JSON.stringify(value));
+    await this.cachePutBytes(parts, bytes);
+  }
+
+  /**
+   * Schedule a cache `clear(prefix)` after the current SQL work commits. Used
+   * for both the current workspace+version (default prefix from
+   * `cachePrefix()`) and other prefixes when a mutation invalidates a
+   * non-current scope (e.g. `deleteVersion` clears the deleted version's
+   * prefix). Top-level mutations fire immediately; tx-bound facade mutations
+   * queue the call on `postCommitHooks` so rollback skips it.
+   */
+  private scheduleCacheClear(prefix: string): void {
+    if (!this.cache) return;
+    const cache = this.cache;
+    const cb = (): void => {
+      void cache.clear(prefix);
+    };
+    if (this.txClient && this.postCommitHooks) {
+      this.postCommitHooks.push(cb);
+    } else {
+      cb();
+    }
+  }
+
+  private scheduleCacheInvalidation(): void {
+    this.scheduleCacheClear(this.cachePrefix());
+  }
+
+  /**
+   * Like `withWorkspace`, but schedules a cache invalidation for the current
+   * workspace+version after the SQL work succeeds. Use this for any operation
+   * that mutates the visible filesystem state.
+   */
+  private async mutatingWithWorkspace<T>(
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    const result = await this.withWorkspace(fn);
+    this.scheduleCacheInvalidation();
+    return result;
   }
 
   // -- Version resolution -----------------------------------------------------
@@ -1274,6 +1442,18 @@ export class PgFileSystem {
     _options?: { encoding?: string | null } | string,
   ): Promise<string> {
     const internal = this.guardRead(path);
+    const cached = await this.cacheGetBytes(["rf", internal]);
+    if (cached !== null && cached.byteLength >= 1) {
+      const payloadLen = cached.byteLength - 1;
+      if (this.maxReadSize !== undefined && payloadLen > this.maxReadSize) {
+        throw new FsError(
+          "E2BIG",
+          `file too large to read (${payloadLen} bytes, max ${this.maxReadSize}). Use readFileRange with { offset, limit } to read in chunks`,
+          path,
+        );
+      }
+      return new TextDecoder().decode(cached.subarray(1));
+    }
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
@@ -1292,9 +1472,16 @@ export class PgFileSystem {
         );
       }
 
-      if (!node.blob_hash) return "";
+      if (!node.blob_hash) {
+        await this.cachePutBytes(["rf", internal], RF_EMPTY);
+        return "";
+      }
       const blob = await this.getBlob(tx, node.blob_hash);
-      if (!blob) return "";
+      if (!blob) {
+        await this.cachePutBytes(["rf", internal], RF_EMPTY);
+        return "";
+      }
+      await this.cachePutBytes(["rf", internal], encodeReadFileBlob(blob));
       if (blob.content !== null) return blob.content;
       if (blob.binary_data !== null)
         return new TextDecoder().decode(blob.binary_data);
@@ -1360,6 +1547,36 @@ export class PgFileSystem {
     options?: ReadFileLinesOptions,
   ): Promise<ReadFileLinesResult> {
     const internal = this.guardRead(path);
+
+    const start = options?.offset ?? 1;
+    if (start < 1)
+      throw new FsError(
+        "EINVAL",
+        `readFileLines: offset must be >= 1 (got ${start})`,
+        path,
+      );
+    const limit = options?.limit;
+    if (limit !== undefined && limit < 1)
+      throw new FsError(
+        "EINVAL",
+        `readFileLines: limit must be >= 1 (got ${limit})`,
+        path,
+      );
+
+    const cached = await this.cacheGetBytes(["rf", internal]);
+    if (cached !== null && cached.byteLength >= 1) {
+      const tag = cached[0];
+      if (tag === RF_TAG_BINARY) {
+        throw new FsError(
+          "EINVAL",
+          "readFileLines is text-only; use readFileRange for binary files",
+          path,
+        );
+      }
+      const text = new TextDecoder().decode(cached.subarray(1));
+      return sliceTextLines(text, start, limit);
+    }
+
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
@@ -1369,20 +1586,6 @@ export class PgFileSystem {
           path,
         );
 
-      const start = options?.offset ?? 1;
-      if (start < 1)
-        throw new FsError(
-          "EINVAL",
-          `readFileLines: offset must be >= 1 (got ${start})`,
-          path,
-        );
-      const limit = options?.limit;
-      if (limit !== undefined && limit < 1)
-        throw new FsError(
-          "EINVAL",
-          `readFileLines: limit must be >= 1 (got ${limit})`,
-          path,
-        );
       const end = limit !== undefined ? start + limit - 1 : null;
 
       if (!node.blob_hash) return { content: "", total: 0 };
@@ -1439,6 +1642,10 @@ export class PgFileSystem {
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const internal = this.guardRead(path);
+    const cached = await this.cacheGetBytes(["rf", internal]);
+    if (cached !== null && cached.byteLength >= 1) {
+      return cached.subarray(1);
+    }
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
@@ -1447,9 +1654,16 @@ export class PgFileSystem {
           "illegal operation on a directory, read",
           path,
         );
-      if (!node.blob_hash) return new Uint8Array(0);
+      if (!node.blob_hash) {
+        await this.cachePutBytes(["rf", internal], RF_EMPTY);
+        return new Uint8Array(0);
+      }
       const blob = await this.getBlob(tx, node.blob_hash);
-      if (!blob) return new Uint8Array(0);
+      if (!blob) {
+        await this.cachePutBytes(["rf", internal], RF_EMPTY);
+        return new Uint8Array(0);
+      }
+      await this.cachePutBytes(["rf", internal], encodeReadFileBlob(blob));
       if (blob.binary_data !== null) return blob.binary_data;
       if (blob.content !== null) return new TextEncoder().encode(blob.content);
       return new Uint8Array(0);
@@ -1462,7 +1676,7 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
       if (parent !== "/") {
@@ -1478,7 +1692,7 @@ export class PgFileSystem {
     _options?: { encoding?: string } | string,
   ): Promise<void> {
     const internal = this.guardWrite(path);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = parentPath(internal);
       if (parent !== "/") {
@@ -1539,39 +1753,55 @@ export class PgFileSystem {
 
   async exists(path: string): Promise<boolean> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const cached = await this.cacheGetBytes(["exists", internal]);
+    if (cached) return cached[0] === 1;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntry(tx, internal);
       return node !== null;
     });
+    await this.cachePutBytes(["exists", internal], new Uint8Array([result ? 1 : 0]));
+    return result;
   }
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetJson<FsStat>(["stat", internal]);
+    if (hit) return hit;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       return {
         ...this.statFromEntry(node),
         isSymbolicLink: false,
       };
     });
+    await this.cachePutJson(["stat", internal], result);
+    return result;
   }
 
   async lstat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetJson<FsStat>(["lstat", internal]);
+    if (hit) return hit;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntry(tx, internal);
       if (!node)
         throw new FsError("ENOENT", "no such file or directory, lstat", path);
       return this.statFromEntry(node);
     });
+    await this.cachePutJson(["lstat", internal], result);
+    return result;
   }
 
   async realpath(path: string): Promise<string> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetBytes(["realpath", internal]);
+    if (hit) return new TextDecoder().decode(hit);
+    const result = await this.withWorkspace(async (tx) => {
       const resolved = await this.internalRealpath(tx, internal);
       return this.toUserPath(resolved);
     });
+    await this.cachePutBytes(["realpath", internal], new TextEncoder().encode(result));
+    return result;
   }
 
   private async internalRealpath(
@@ -1602,7 +1832,7 @@ export class PgFileSystem {
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
     const internal = this.guardWrite(path);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       await this.internalMkdir(tx, versionId, internal, options);
     });
@@ -1610,7 +1840,9 @@ export class PgFileSystem {
 
   async readdir(path: string): Promise<string[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetJson<string[]>(["readdir", internal]);
+    if (hit) return hit;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -1618,11 +1850,18 @@ export class PgFileSystem {
       const children = await this.listVisibleChildren(tx, realPath);
       return children.map((c) => fileName(ltreeToPath(c.path)));
     });
+    await this.cachePutJson(["readdir", internal], result);
+    return result;
   }
 
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetJson<DirentEntry[]>([
+      "readdirft",
+      internal,
+    ]);
+    if (hit) return hit;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -1630,11 +1869,18 @@ export class PgFileSystem {
       const children = await this.listVisibleChildren(tx, realPath);
       return children.map((c) => this.mapDirChildToDirent(c));
     });
+    await this.cachePutJson(["readdirft", internal], result);
+    return result;
   }
 
   async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetJson<DirentStatEntry[]>([
+      "readdirstat",
+      internal,
+    ]);
+    if (hit) return hit;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -1642,11 +1888,15 @@ export class PgFileSystem {
       const children = await this.listVisibleChildren(tx, realPath);
       return children.map((c) => this.mapDirChildToStatEntry(c));
     });
+    await this.cachePutJson(["readdirstat", internal], result);
+    return result;
   }
 
   async walk(path: string): Promise<WalkEntry[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    const hit = await this.cacheGetJson<WalkEntry[]>(["walk", internal]);
+    if (hit) return hit;
+    const result = await this.withWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -1654,13 +1904,15 @@ export class PgFileSystem {
       const rows = await this.listVisibleSubtree(tx, realPath, false);
       return rows.map((r) => this.mapSubtreeToWalk(r));
     });
+    await this.cachePutJson(["walk", internal], result);
+    return result;
   }
 
   // -- Public API: Mutation ---------------------------------------------------
 
   async rm(path: string, options?: RmOptions): Promise<void> {
     const internal = this.guardWrite(path);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntry(tx, internal);
       if (!node) {
@@ -1690,7 +1942,7 @@ export class PgFileSystem {
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
     const srcInternal = this.guardRead(src);
     const destInternal = this.guardWrite(dest);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       await this.internalCp(tx, versionId, srcInternal, destInternal, options);
     });
@@ -1699,7 +1951,7 @@ export class PgFileSystem {
   async mv(src: string, dest: string): Promise<void> {
     const srcInternal = this.guardWrite(src);
     const destInternal = this.guardWrite(dest);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const srcPath = srcInternal;
       const destPath = destInternal;
@@ -1802,7 +2054,7 @@ export class PgFileSystem {
       );
     }
     const internal = this.guardWrite(path);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       await this.upsertEntry(
@@ -1820,7 +2072,7 @@ export class PgFileSystem {
 
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
     const internal = this.guardWrite(path);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       const lt = pathToLtree(ltreeToPath(node.path), this.workspaceId);
@@ -1866,7 +2118,7 @@ export class PgFileSystem {
       );
     }
 
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const parent = await this.resolveEntry(tx, parentPath(internal));
       if (!parent)
@@ -1899,7 +2151,7 @@ export class PgFileSystem {
   async link(existingPath: string, newPath: string): Promise<void> {
     const srcInternal = this.guardRead(existingPath);
     const destInternal = this.guardWrite(newPath);
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const srcEntry = await this.resolveEntry(tx, srcInternal);
       if (!srcEntry)
@@ -2589,6 +2841,9 @@ export class PgFileSystem {
       const targetId = Number(r.rows[0]!.id);
       await this.deleteVersionById(tx, targetId);
     });
+    // Drop cached entries for the deleted label; any sibling instance still
+    // pointing at it would otherwise serve stale data on subsequent reads.
+    this.scheduleCacheClear(`${this.workspaceId}\x01${version}\x01`);
   }
 
   private async deleteVersionById(
@@ -2683,9 +2938,13 @@ export class PgFileSystem {
       return { label: newLabel };
     }
     const swap = opts?.swap ?? false;
+    const oldPrefix = this.cachePrefix();
     const result = await this.withWorkspace((tx) =>
       this.internalRenameVersion(tx, newLabel, swap),
     );
+    // Cache entries under the old label become orphaned once the rename
+    // commits — clear them. Capture the prefix before mutating versionLabel.
+    this.scheduleCacheClear(oldPrefix);
     // Update the active label on this instance. For top-level calls the SQL
     // has already committed; for tx-bound facades it has not, but the facade
     // is single-shot and is discarded when the outer transaction resolves.
@@ -2873,7 +3132,7 @@ export class PgFileSystem {
       }
     }
 
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const ourId = await this.getCurrentVersionId(tx);
       const theirId = await this.requireVersionIdByLabel(tx, source);
       const scopeLtree = pathToLtree(internalScope, this.workspaceId);
@@ -3116,7 +3375,7 @@ export class PgFileSystem {
       pathFilters.push(this.toInternalPath(normalizePath(p)));
     }
 
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const ourId = await this.getCurrentVersionId(tx);
       const theirId = await this.requireVersionIdByLabel(tx, source);
       const rootLtree = pathToLtree("/", this.workspaceId);
@@ -3232,7 +3491,7 @@ export class PgFileSystem {
       }
     }
 
-    return this.withWorkspace(async (tx) => {
+    return this.mutatingWithWorkspace(async (tx) => {
       const ourId = await this.getCurrentVersionId(tx);
       const theirId = await this.requireVersionIdByLabel(tx, target);
       const scopeLtree = pathToLtree(internalScope, this.workspaceId);
@@ -3408,6 +3667,7 @@ export class PgFileSystem {
       await this.deleteVersionById(tx, versionId);
     });
     this.cachedVersionId = null;
+    this.scheduleCacheInvalidation();
   }
 }
 
