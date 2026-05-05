@@ -208,7 +208,7 @@ export class PgFileSystem {
   private originInstance: PgFileSystem | null = null;
 
   private readonly mounts: ResolvedMount[];
-  private readonly mountedFsCache = new Map<string, PgFileSystem>();
+  private readonly mountVersionCache = new Map<string, number | null>();
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -381,12 +381,14 @@ export class PgFileSystem {
     client: SqlClient,
     fn: (tx: SqlClient) => Promise<T>,
   ): Promise<T> {
+    const allIds = [this.workspaceId, ...this.mounts.map((m) => m.sourceWorkspaceId)];
+    const uniqueIds = [...new Set(allIds)].join(",");
     return client.transaction(async (tx) => {
       await tx.query(
         `SELECT
            set_config('app.workspace_id', $1, true),
            set_config('statement_timeout', $2, true)`,
-        [this.workspaceId, String(this.statementTimeoutMs)],
+        [uniqueIds, String(this.statementTimeoutMs)],
       );
       return fn(tx);
     });
@@ -718,18 +720,26 @@ export class PgFileSystem {
     return result;
   }
 
-  private getMountedFs(mount: ResolvedMount): PgFileSystem {
-    const key = `${mount.sourceWorkspaceId}:${mount.sourceVersion}`;
-    let fs = this.mountedFsCache.get(key);
-    if (!fs) {
-      fs = new PgFileSystem({
-        db: this.rawDb,
-        workspaceId: mount.sourceWorkspaceId,
-        version: mount.sourceVersion,
-      });
-      this.mountedFsCache.set(key, fs);
-    }
-    return fs;
+  private async getMountVersionId(
+    tx: SqlClient,
+    wsId: string,
+    versionLabel: string,
+  ): Promise<number | null> {
+    const key = `${wsId}:${versionLabel}`;
+    if (this.mountVersionCache.has(key)) return this.mountVersionCache.get(key)!;
+    const r = await tx.query<{ id: number }>(
+      `SELECT v.id FROM fs_versions v
+       JOIN fs_version_roots r ON r.id = v.version_root_id
+       WHERE v.workspace_id = $1
+         AND r.workspace_id = $1
+         AND nlevel(r.path) = 1
+         AND v.label = $2
+       LIMIT 1`,
+      [wsId, versionLabel],
+    );
+    const id = r.rows.length > 0 ? Number(r.rows[0]!.id) : null;
+    this.mountVersionCache.set(key, id);
+    return id;
   }
 
   /**
@@ -832,6 +842,71 @@ export class PgFileSystem {
       [this.workspaceId, lt, versionId],
     );
     const row = r.rows[0];
+    if (row && row.node_type !== TOMBSTONE) return row;
+
+    // Primary miss — check mount sources within the same transaction.
+    if (this.mounts.length === 0) return null;
+    const mountInfo = this.findMountForPath(posixPath);
+    if (!mountInfo) return null;
+
+    const srcVersionId = await this.getMountVersionId(
+      tx,
+      mountInfo.mount.sourceWorkspaceId,
+      mountInfo.mount.sourceVersion,
+    );
+    if (srcVersionId === null) return null;
+
+    const srcLt = pathToLtree(mountInfo.sourcePath, mountInfo.mount.sourceWorkspaceId);
+    const sr = await tx.query<EntryRow>(
+      `SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
+              e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
+       FROM version_ancestors a
+       INNER JOIN LATERAL (
+         SELECT * FROM fs_entries
+         WHERE workspace_id = $1
+           AND version_id = a.ancestor_id
+           AND path = $2::ltree
+         LIMIT 1
+       ) e ON true
+       WHERE a.workspace_id = $1
+         AND a.descendant_id = $3
+       ORDER BY a.depth ASC
+       LIMIT 1`,
+      [mountInfo.mount.sourceWorkspaceId, srcLt, srcVersionId],
+    );
+    const srcRow = sr.rows[0];
+    if (!srcRow || srcRow.node_type === TOMBSTONE) return null;
+    return srcRow;
+  }
+
+  /** Like resolveEntry but only checks the primary workspace — used by write operations. */
+  private async resolvePrimaryEntry(
+    tx: SqlClient,
+    posixPath: string,
+  ): Promise<EntryRow | null> {
+    if (!this.excludes.empty && isExcluded(this.excludes, posixPath)) {
+      return null;
+    }
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(posixPath, this.workspaceId);
+    const r = await tx.query<EntryRow>(
+      `SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
+              e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
+       FROM version_ancestors a
+       INNER JOIN LATERAL (
+         SELECT * FROM fs_entries
+         WHERE workspace_id = $1
+           AND version_id = a.ancestor_id
+           AND path = $2::ltree
+         LIMIT 1
+       ) e ON true
+       WHERE a.workspace_id = $1
+         AND a.descendant_id = $3
+       ORDER BY a.depth ASC
+       LIMIT 1`,
+      [this.workspaceId, lt, versionId],
+    );
+    const row = r.rows[0];
     if (!row || row.node_type === TOMBSTONE) return null;
     return row;
   }
@@ -863,18 +938,52 @@ export class PgFileSystem {
   private async getBlob(
     tx: SqlClient,
     hash: Uint8Array,
+    workspaceId: string = this.workspaceId,
   ): Promise<BlobRow | null> {
     const r = await tx.query<BlobRow>(
       `SELECT hash, content, binary_data, size_bytes
        FROM fs_blobs
        WHERE workspace_id = $1 AND hash = $2
        LIMIT 1`,
-      [this.workspaceId, hash],
+      [workspaceId, hash],
     );
     return r.rows[0] ?? null;
   }
 
   // -- Visible directory listing ---------------------------------------------
+
+  private async listVisibleChildrenForWorkspace(
+    tx: SqlClient,
+    wsId: string,
+    versionId: number,
+    parentPosix: string,
+  ): Promise<DirChildRow[]> {
+    const lt = pathToLtree(parentPosix, wsId);
+    const r = await tx.query<DirChildRow>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path::text AS path,
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes,
+           e.mtime
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           AND e.path != $3::ltree
+           AND nlevel(e.path) = nlevel($3::ltree) + 1
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
+      [wsId, versionId, lt, TOMBSTONE],
+    );
+    return r.rows;
+  }
 
   private async listVisibleChildren(
     tx: SqlClient,
@@ -972,6 +1081,41 @@ export class PgFileSystem {
       });
     }
     return map;
+  }
+
+  private async listVisibleSubtreeForWorkspace(
+    tx: SqlClient,
+    wsId: string,
+    versionId: number,
+    rootPosix: string,
+    includeRoot = false,
+  ): Promise<SubtreeRow[]> {
+    const lt = pathToLtree(rootPosix, wsId);
+    const filter = includeRoot ? "" : "AND e.path != $3::ltree";
+    const r = await tx.query<SubtreeRow>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path::text AS path,
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes,
+           e.mtime,
+           nlevel(e.path) - nlevel($3::ltree) AS depth_in_subtree
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           ${filter}
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
+      [wsId, versionId, lt, TOMBSTONE],
+    );
+    return r.rows;
   }
 
   private async listVisibleSubtree(
@@ -1463,7 +1607,7 @@ export class PgFileSystem {
       let current = "/";
       for (const segment of segments) {
         current = current === "/" ? `/${segment}` : `${current}/${segment}`;
-        const visible = await this.resolveEntry(tx, current);
+        const visible = await this.resolvePrimaryEntry(tx, current);
         if (visible) {
           if (visible.node_type !== "directory") {
             throw new FsError("ENOTDIR", "not a directory, mkdir", current);
@@ -1483,10 +1627,10 @@ export class PgFileSystem {
         );
       }
     } else {
-      const existing = await this.resolveEntry(tx, path);
+      const existing = await this.resolvePrimaryEntry(tx, path);
       if (existing)
         throw new FsError("EEXIST", "file already exists, mkdir", path);
-      const parent = await this.resolveEntry(tx, parentPath(path));
+      const parent = await this.resolvePrimaryEntry(tx, parentPath(path));
       if (!parent)
         throw new FsError("ENOENT", "no such file or directory, mkdir", path);
       if (parent.node_type !== "directory")
@@ -1582,13 +1726,13 @@ export class PgFileSystem {
 
     // file: share the blob (same blob_hash), insert new entry at dest
     if (srcEntry.blob_hash) {
-      // confirm parent dir exists
-      const parentEntry = await this.resolveEntry(tx, parentPath(dest));
+      // confirm parent dir exists in primary workspace
+      const parentEntry = await this.resolvePrimaryEntry(tx, parentPath(dest));
       if (!parentEntry)
         throw new FsError("ENOENT", "no such file or directory, cp", dest);
       if (parentEntry.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, cp", dest);
-      const existing = await this.resolveEntry(tx, dest);
+      const existing = await this.resolvePrimaryEntry(tx, dest);
       if (existing?.node_type === "directory")
         throw new FsError(
           "EISDIR",
@@ -1640,17 +1784,12 @@ export class PgFileSystem {
       }
 
       if (!node.blob_hash) return "";
-      const blob = await this.getBlob(tx, node.blob_hash);
+      const blob = await this.getBlob(tx, node.blob_hash, node.workspace_id);
       if (!blob) return "";
       if (blob.content !== null) return blob.content;
       if (blob.binary_data !== null)
         return new TextDecoder().decode(blob.binary_data);
       return "";
-    }).catch(async (e: unknown) => {
-      if (!(e instanceof FsError && e.code === "ENOENT") || this.mounts.length === 0) throw e;
-      const mount = this.findMountForPath(internal);
-      if (mount) return this.getMountedFs(mount.mount).readFile(mount.sourcePath, _options);
-      throw e;
     });
   }
 
@@ -1680,7 +1819,7 @@ export class PgFileSystem {
           : `substring(binary_data FROM $3)`;
 
       const params: (string | number | Uint8Array)[] = [
-        this.workspaceId,
+        node.workspace_id,
         node.blob_hash,
         sqlOffset,
       ];
@@ -1704,11 +1843,6 @@ export class PgFileSystem {
       if (chunk.chunk_binary !== null)
         return new TextDecoder().decode(chunk.chunk_binary);
       return "";
-    }).catch(async (e: unknown) => {
-      if (!(e instanceof FsError && e.code === "ENOENT") || this.mounts.length === 0) throw e;
-      const mount = this.findMountForPath(internal);
-      if (mount) return this.getMountedFs(mount.mount).readFileRange(mount.sourcePath, options);
-      throw e;
     });
   }
 
@@ -1746,7 +1880,7 @@ export class PgFileSystem {
 
       const sliceExpr = end !== null ? "lines[$3:$4]" : "lines[$3:]";
       const params: (string | number | Uint8Array)[] = [
-        this.workspaceId,
+        node.workspace_id,
         node.blob_hash,
         start,
       ];
@@ -1791,11 +1925,6 @@ export class PgFileSystem {
         );
       }
       return { content: row.chunk ?? "", total: row.total ?? 0 };
-    }).catch(async (e: unknown) => {
-      if (!(e instanceof FsError && e.code === "ENOENT") || this.mounts.length === 0) throw e;
-      const mount = this.findMountForPath(internal);
-      if (mount) return this.getMountedFs(mount.mount).readFileLines(mount.sourcePath, options);
-      throw e;
     });
   }
 
@@ -1810,16 +1939,11 @@ export class PgFileSystem {
           path,
         );
       if (!node.blob_hash) return new Uint8Array(0);
-      const blob = await this.getBlob(tx, node.blob_hash);
+      const blob = await this.getBlob(tx, node.blob_hash, node.workspace_id);
       if (!blob) return new Uint8Array(0);
       if (blob.binary_data !== null) return blob.binary_data;
       if (blob.content !== null) return new TextEncoder().encode(blob.content);
       return new Uint8Array(0);
-    }).catch(async (e: unknown) => {
-      if (!(e instanceof FsError && e.code === "ENOENT") || this.mounts.length === 0) throw e;
-      const mount = this.findMountForPath(internal);
-      if (mount) return this.getMountedFs(mount.mount).readFileBuffer(mount.sourcePath);
-      throw e;
     });
   }
 
@@ -1879,7 +2003,7 @@ export class PgFileSystem {
       }
 
       const blob = existing.blob_hash
-        ? await this.getBlob(tx, existing.blob_hash)
+        ? await this.getBlob(tx, existing.blob_hash, existing.workspace_id)
         : null;
       const existingText = blob?.content ?? null;
       const existingBytes =
@@ -1908,26 +2032,24 @@ export class PgFileSystem {
 
   async exists(path: string): Promise<boolean> {
     const internal = this.guardRead(path);
-    const found = await this.withWorkspace(async (tx) => {
-      return (await this.resolveEntry(tx, internal)) !== null;
+    return this.withWorkspace(async (tx) => {
+      const found = (await this.resolveEntry(tx, internal)) !== null;
+      if (found) return true;
+      if (this.mounts.length > 0 && this.isSyntheticDirectory(internal)) return true;
+      return false;
     });
-    if (found || this.mounts.length === 0) return found;
-    const mount = this.findMountForPath(internal);
-    if (mount) return this.getMountedFs(mount.mount).exists(mount.sourcePath);
-    return this.isSyntheticDirectory(internal);
   }
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
+      const node = await this.resolveEntryFollowSymlink(tx, internal).catch((e: unknown) => {
+        if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0 && this.isSyntheticDirectory(internal))
+          return null;
+        throw e;
+      });
+      if (node === null) return this.syntheticDirStat();
       return { ...this.statFromEntry(node), isSymbolicLink: false };
-    }).catch(async (e: unknown) => {
-      if (!(e instanceof FsError && e.code === "ENOENT") || this.mounts.length === 0) throw e;
-      const mount = this.findMountForPath(internal);
-      if (mount) return this.getMountedFs(mount.mount).stat(mount.sourcePath);
-      if (this.isSyntheticDirectory(internal)) return this.syntheticDirStat();
-      throw e;
     });
   }
 
@@ -1935,15 +2057,11 @@ export class PgFileSystem {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
       const node = await this.resolveEntry(tx, internal);
-      if (!node)
+      if (!node) {
+        if (this.mounts.length > 0 && this.isSyntheticDirectory(internal)) return this.syntheticDirStat();
         throw new FsError("ENOENT", "no such file or directory, lstat", path);
+      }
       return this.statFromEntry(node);
-    }).catch(async (e: unknown) => {
-      if (!(e instanceof FsError && e.code === "ENOENT") || this.mounts.length === 0) throw e;
-      const mount = this.findMountForPath(internal);
-      if (mount) return this.getMountedFs(mount.mount).lstat(mount.sourcePath);
-      if (this.isSyntheticDirectory(internal)) return this.syntheticDirStat();
-      throw e;
     });
   }
 
@@ -1987,7 +2105,7 @@ export class PgFileSystem {
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       if (options?.versioned) {
-        const existing = await this.resolveEntry(tx, internal);
+        const existing = await this.resolvePrimaryEntry(tx, internal);
         if (existing && existing.node_type !== "directory") {
           throw new FsError("ENOTDIR", "not a directory, mkdir", path);
         }
@@ -2050,259 +2168,273 @@ export class PgFileSystem {
 
   async readdir(path: string): Promise<string[]> {
     const internal = this.guardRead(path);
-
-    let primaryNames: string[] | null = null;
-    let caughtEnoent: FsError | null = null;
-    try {
-      primaryNames = await this.withWorkspace(async (tx) => {
-        const node = await this.resolveEntryFollowSymlink(tx, internal);
-        if (node.node_type !== "directory")
-          throw new FsError("ENOTDIR", "not a directory, scandir", path);
-        const realPath = ltreeToPath(node.path);
-        const children = await this.listVisibleChildren(tx, realPath);
-        return children.map((c) => fileName(ltreeToPath(c.path)));
-      });
-    } catch (e) {
-      if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0) {
-        caughtEnoent = e;
-      } else {
+    return this.withWorkspace(async (tx) => {
+      let node: EntryRow | null = null;
+      try {
+        node = await this.resolveEntryFollowSymlink(tx, internal);
+      } catch (e) {
+        if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0 && this.isSyntheticDirectory(internal)) {
+          return this.getMountInjectedChildNames(internal).sort();
+        }
         throw e;
       }
-    }
 
-    if (primaryNames !== null && this.mounts.length === 0) return primaryNames;
+      if (node.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
 
-    const injected = this.getMountInjectedChildNames(internal);
+      const sourcePosix = ltreeToPath(node.path);
+      let children: DirChildRow[];
 
-    if (primaryNames === null) {
-      const mount = this.findMountForPath(internal);
-      if (mount) {
-        const sourceNames = await this.getMountedFs(mount.mount).readdir(mount.sourcePath);
-        const merged = new Set([...sourceNames, ...injected]);
-        return Array.from(merged).sort();
+      if (node.workspace_id !== this.workspaceId) {
+        const mountInfo = this.findMountForPath(internal)!;
+        const srcVersionId = await this.getMountVersionId(tx, mountInfo.mount.sourceWorkspaceId, mountInfo.mount.sourceVersion);
+        children = srcVersionId !== null
+          ? await this.listVisibleChildrenForWorkspace(tx, mountInfo.mount.sourceWorkspaceId, srcVersionId, sourcePosix)
+          : [];
+      } else {
+        children = await this.listVisibleChildren(tx, sourcePosix);
+        if (this.mounts.length > 0) {
+          const primaryNames = new Set(children.map((c) => fileName(ltreeToPath(c.path))));
+          for (const mount of this.mounts.filter((m) => m.targetPath === internal)) {
+            const srcVersionId = await this.getMountVersionId(tx, mount.sourceWorkspaceId, mount.sourceVersion);
+            if (srcVersionId === null) continue;
+            const src = await this.listVisibleChildrenForWorkspace(tx, mount.sourceWorkspaceId, srcVersionId, mount.sourcePath);
+            for (const c of src) {
+              const n = fileName(ltreeToPath(c.path));
+              if (!primaryNames.has(n)) { children.push(c); primaryNames.add(n); }
+            }
+          }
+        }
       }
-      if (injected.length > 0) return [...injected].sort();
-      throw caughtEnoent!;
-    }
 
-    // Also merge children from any mount whose target is exactly this directory.
-    const directMounts = this.mounts.filter((m) => m.targetPath === internal);
-    const primarySet = new Set(primaryNames);
-    const extra: string[] = [];
-    for (const mount of directMounts) {
-      const sourceNames = await this.getMountedFs(mount).readdir(mount.sourcePath).catch(() => [] as string[]);
-      for (const n of sourceNames) {
-        if (!primarySet.has(n)) extra.push(n);
+      const names = new Set(children.map((c) => fileName(ltreeToPath(c.path))));
+      if (this.mounts.length > 0) {
+        for (const n of this.getMountInjectedChildNames(internal)) names.add(n);
       }
-    }
-    for (const n of injected) {
-      if (!primarySet.has(n)) extra.push(n);
-    }
-    if (extra.length === 0) return primaryNames;
-    return [...primaryNames, ...extra].sort();
+      return Array.from(names).sort();
+    });
   }
 
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
     const internal = this.guardRead(path);
-
-    let primaryEntries: DirentEntry[] | null = null;
-    let caughtEnoent: FsError | null = null;
-    try {
-      primaryEntries = await this.withWorkspace(async (tx) => {
-        const node = await this.resolveEntryFollowSymlink(tx, internal);
-        if (node.node_type !== "directory")
-          throw new FsError("ENOTDIR", "not a directory, scandir", path);
-        const realPath = ltreeToPath(node.path);
-        const children = await this.listVisibleChildren(tx, realPath);
-        return children.map((c) => this.mapDirChildToDirent(c));
-      });
-    } catch (e) {
-      if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0) {
-        caughtEnoent = e;
-      } else {
+    return this.withWorkspace(async (tx) => {
+      let node: EntryRow | null = null;
+      try {
+        node = await this.resolveEntryFollowSymlink(tx, internal);
+      } catch (e) {
+        if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0 && this.isSyntheticDirectory(internal)) {
+          return this.buildInjectedDirents(tx, internal);
+        }
         throw e;
       }
-    }
 
-    if (primaryEntries !== null && this.mounts.length === 0) return primaryEntries;
+      if (node.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
 
-    const injected = await this.buildMountInjectedDirents(internal);
+      const sourcePosix = ltreeToPath(node.path);
+      let children: DirChildRow[];
 
-    if (primaryEntries === null) {
-      const mount = this.findMountForPath(internal);
-      if (mount) {
-        const sourceEntries = await this.getMountedFs(mount.mount).readdirWithFileTypes(mount.sourcePath);
-        return this.mergeDirentLists(this.mergeDirentLists(sourceEntries, injected), []);
+      if (node.workspace_id !== this.workspaceId) {
+        const mountInfo = this.findMountForPath(internal)!;
+        const srcVersionId = await this.getMountVersionId(tx, mountInfo.mount.sourceWorkspaceId, mountInfo.mount.sourceVersion);
+        children = srcVersionId !== null
+          ? await this.listVisibleChildrenForWorkspace(tx, mountInfo.mount.sourceWorkspaceId, srcVersionId, sourcePosix)
+          : [];
+      } else {
+        children = await this.listVisibleChildren(tx, sourcePosix);
+        if (this.mounts.length > 0) {
+          const primaryNames = new Set(children.map((c) => fileName(ltreeToPath(c.path))));
+          for (const mount of this.mounts.filter((m) => m.targetPath === internal)) {
+            const srcVersionId = await this.getMountVersionId(tx, mount.sourceWorkspaceId, mount.sourceVersion);
+            if (srcVersionId === null) continue;
+            const src = await this.listVisibleChildrenForWorkspace(tx, mount.sourceWorkspaceId, srcVersionId, mount.sourcePath);
+            for (const c of src) {
+              const n = fileName(ltreeToPath(c.path));
+              if (!primaryNames.has(n)) { children.push(c); primaryNames.add(n); }
+            }
+          }
+        }
       }
-      if (injected.length > 0) return injected;
-      throw caughtEnoent!;
-    }
 
-    const directMounts = this.mounts.filter((m) => m.targetPath === internal);
-    let merged = primaryEntries;
-    for (const mount of directMounts) {
-      const sourceEntries = await this.getMountedFs(mount).readdirWithFileTypes(mount.sourcePath).catch(() => [] as DirentEntry[]);
-      merged = this.mergeDirentLists(merged, sourceEntries);
-    }
-    return this.mergeDirentLists(merged, injected);
+      let result: DirentEntry[] = children.map((c) => this.mapDirChildToDirent(c));
+      if (this.mounts.length > 0) {
+        const injected = await this.buildInjectedDirents(tx, internal);
+        result = this.mergeDirentLists(result, injected);
+      }
+      return result;
+    });
   }
 
   async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
     const internal = this.guardRead(path);
-
-    let primaryEntries: DirentStatEntry[] | null = null;
-    let caughtEnoent: FsError | null = null;
-    try {
-      primaryEntries = await this.withWorkspace(async (tx) => {
-        const node = await this.resolveEntryFollowSymlink(tx, internal);
-        if (node.node_type !== "directory")
-          throw new FsError("ENOTDIR", "not a directory, scandir", path);
-        const realPath = ltreeToPath(node.path);
-        const children = await this.listVisibleChildren(tx, realPath);
-        return children.map((c) => this.mapDirChildToStatEntry(c));
-      });
-    } catch (e) {
-      if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0) {
-        caughtEnoent = e;
-      } else {
+    return this.withWorkspace(async (tx) => {
+      let node: EntryRow | null = null;
+      try {
+        node = await this.resolveEntryFollowSymlink(tx, internal);
+      } catch (e) {
+        if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0 && this.isSyntheticDirectory(internal)) {
+          return this.buildInjectedStatEntries(tx, internal);
+        }
         throw e;
       }
-    }
 
-    if (primaryEntries !== null && this.mounts.length === 0) return primaryEntries;
+      if (node.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
 
-    const injected = await this.buildMountInjectedStatEntries(internal);
+      const sourcePosix = ltreeToPath(node.path);
+      let children: DirChildRow[];
 
-    if (primaryEntries === null) {
-      const mount = this.findMountForPath(internal);
-      if (mount) {
-        const sourceEntries = await this.getMountedFs(mount.mount).readdirWithStats(mount.sourcePath);
-        return this.mergeStatEntryLists(this.mergeStatEntryLists(sourceEntries, injected), []);
+      if (node.workspace_id !== this.workspaceId) {
+        const mountInfo = this.findMountForPath(internal)!;
+        const srcVersionId = await this.getMountVersionId(tx, mountInfo.mount.sourceWorkspaceId, mountInfo.mount.sourceVersion);
+        children = srcVersionId !== null
+          ? await this.listVisibleChildrenForWorkspace(tx, mountInfo.mount.sourceWorkspaceId, srcVersionId, sourcePosix)
+          : [];
+      } else {
+        children = await this.listVisibleChildren(tx, sourcePosix);
+        if (this.mounts.length > 0) {
+          const primaryNames = new Set(children.map((c) => fileName(ltreeToPath(c.path))));
+          for (const mount of this.mounts.filter((m) => m.targetPath === internal)) {
+            const srcVersionId = await this.getMountVersionId(tx, mount.sourceWorkspaceId, mount.sourceVersion);
+            if (srcVersionId === null) continue;
+            const src = await this.listVisibleChildrenForWorkspace(tx, mount.sourceWorkspaceId, srcVersionId, mount.sourcePath);
+            for (const c of src) {
+              const n = fileName(ltreeToPath(c.path));
+              if (!primaryNames.has(n)) { children.push(c); primaryNames.add(n); }
+            }
+          }
+        }
       }
-      if (injected.length > 0) return injected;
-      throw caughtEnoent!;
-    }
 
-    const directMounts = this.mounts.filter((m) => m.targetPath === internal);
-    let merged = primaryEntries;
-    for (const mount of directMounts) {
-      const sourceEntries = await this.getMountedFs(mount).readdirWithStats(mount.sourcePath).catch(() => [] as DirentStatEntry[]);
-      merged = this.mergeStatEntryLists(merged, sourceEntries);
-    }
-    return this.mergeStatEntryLists(merged, injected);
+      let result: DirentStatEntry[] = children.map((c) => this.mapDirChildToStatEntry(c));
+      if (this.mounts.length > 0) {
+        const injected = await this.buildInjectedStatEntries(tx, internal);
+        result = this.mergeStatEntryLists(result, injected);
+      }
+      return result;
+    });
   }
 
   async walk(path: string): Promise<WalkEntry[]> {
     const internal = this.guardRead(path);
-
-    let primaryRows: WalkEntry[] | null = null;
-    let caughtEnoent: FsError | null = null;
-    try {
-      primaryRows = await this.withWorkspace(async (tx) => {
-        const node = await this.resolveEntryFollowSymlink(tx, internal);
-        if (node.node_type !== "directory")
-          throw new FsError("ENOTDIR", "not a directory, scandir", path);
-        const realPath = ltreeToPath(node.path);
-        const rows = await this.listVisibleSubtree(tx, realPath, false);
-        return rows.map((r) => this.mapSubtreeToWalk(r));
-      });
-    } catch (e) {
-      if (e instanceof FsError && e.code === "ENOENT" && this.mounts.length > 0) {
-        caughtEnoent = e;
-      } else {
+    return this.withWorkspace(async (tx) => {
+      let node: EntryRow | null = null;
+      try {
+        node = await this.resolveEntryFollowSymlink(tx, internal);
+      } catch (e) {
+        if (e instanceof FsError && e.code === "ENOENT") throw e;
         throw e;
       }
-    }
 
-    if (primaryRows === null) {
-      // Walk root not in primary — redirect to mount if one covers this path.
-      const mount = this.findMountForPath(internal);
-      if (mount) {
-        const sourceWalk = await this.getMountedFs(mount.mount).walk(mount.sourcePath);
-        return sourceWalk.map((e) =>
-          this.translateMountWalkEntry(e, mount.mount.sourcePath, mount.mount.targetPath, internal),
-        );
+      if (node.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, scandir", path);
+
+      const sourcePosix = ltreeToPath(node.path);
+      const walkRootDepth = internal === "/" ? 0 : internal.split("/").filter(Boolean).length;
+
+      let rows: SubtreeRow[];
+      let translatePath: (r: SubtreeRow) => WalkEntry;
+
+      if (node.workspace_id !== this.workspaceId) {
+        // Walk root is a direct mount target — walk source workspace
+        const mountInfo = this.findMountForPath(internal)!;
+        const srcVersionId = await this.getMountVersionId(tx, mountInfo.mount.sourceWorkspaceId, mountInfo.mount.sourceVersion);
+        rows = srcVersionId !== null
+          ? await this.listVisibleSubtreeForWorkspace(tx, mountInfo.mount.sourceWorkspaceId, srcVersionId, sourcePosix, false)
+          : [];
+        translatePath = (r) => this.translateSubtreeRow(r, mountInfo.mount.sourcePath, mountInfo.mount.targetPath, walkRootDepth);
+        return rows.map(translatePath).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
       }
-      throw caughtEnoent!;
-    }
 
-    if (this.mounts.length === 0) return primaryRows;
+      // Primary workspace walk
+      rows = await this.listVisibleSubtree(tx, sourcePosix, false);
+      const primaryRows = rows.map((r) => this.mapSubtreeToWalk(r));
 
-    // Merge mount subtrees whose target falls under the walk root.
-    const walkPrefix = internal === "/" ? "/" : internal + "/";
-    const relevantMounts = this.mounts.filter(
-      (m) => m.targetPath === internal || m.targetPath.startsWith(walkPrefix),
-    );
-    if (relevantMounts.length === 0) return primaryRows;
+      if (this.mounts.length === 0) return primaryRows;
 
-    const primaryPathSet = new Set(primaryRows.map((e) => e.path));
-    const result: WalkEntry[] = [...primaryRows];
-
-    const walkRootDepth =
-      internal === "/" ? 0 : internal.split("/").filter(Boolean).length;
-
-    for (const mount of relevantMounts) {
-      // Synthesize any ancestor dirs between walk root and mount target.
-      const ancestors = this.syntheticAncestorEntries(
-        mount.targetPath,
-        internal,
-        primaryPathSet,
-        walkRootDepth,
+      const walkPrefix = internal === "/" ? "/" : internal + "/";
+      const relevantMounts = this.mounts.filter(
+        (m) => m.targetPath === internal || m.targetPath.startsWith(walkPrefix),
       );
-      for (const a of ancestors) {
-        result.push(a);
-        primaryPathSet.add(a.path);
-      }
+      if (relevantMounts.length === 0) return primaryRows;
 
-      // Walk source and translate paths.
-      const sourceWalk = await this.getMountedFs(mount).walk(mount.sourcePath).catch(() => [] as WalkEntry[]);
-      const targetUserPath = this.toUserPath(mount.targetPath);
+      const seenPaths = new Set(primaryRows.map((e) => e.path));
+      const result: WalkEntry[] = [...primaryRows];
 
-      // Add the mount target dir itself if not already present.
-      if (!primaryPathSet.has(targetUserPath)) {
-        const mountDirEntry: WalkEntry = {
-          path: targetUserPath,
-          name: fileName(mount.targetPath),
-          depth: mount.targetPath.split("/").filter(Boolean).length - walkRootDepth,
-          isFile: false,
-          isDirectory: true,
-          isSymbolicLink: false,
-          mode: 0o755,
-          size: 0,
-          mtime: new Date(0),
-          symlinkTarget: null,
-        };
-        result.push(mountDirEntry);
-        primaryPathSet.add(targetUserPath);
-      }
+      for (const mount of relevantMounts) {
+        for (const a of this.syntheticAncestorEntries(mount.targetPath, internal, seenPaths, walkRootDepth)) {
+          result.push(a);
+          seenPaths.add(a.path);
+        }
 
-      for (const entry of sourceWalk) {
-        const translated = this.translateMountWalkEntry(
-          entry,
-          mount.sourcePath,
-          mount.targetPath,
-          internal,
-        );
-        if (!primaryPathSet.has(translated.path)) {
-          result.push(translated);
-          primaryPathSet.add(translated.path);
+        const srcVersionId = await this.getMountVersionId(tx, mount.sourceWorkspaceId, mount.sourceVersion);
+        const srcRows = srcVersionId !== null
+          ? await this.listVisibleSubtreeForWorkspace(tx, mount.sourceWorkspaceId, srcVersionId, mount.sourcePath, false)
+          : [];
+
+        const targetUserPath = this.toUserPath(mount.targetPath);
+        if (!seenPaths.has(targetUserPath)) {
+          result.push({
+            path: targetUserPath,
+            name: fileName(mount.targetPath),
+            depth: mount.targetPath.split("/").filter(Boolean).length - walkRootDepth,
+            isFile: false,
+            isDirectory: true,
+            isSymbolicLink: false,
+            mode: 0o755,
+            size: 0,
+            mtime: new Date(0),
+            symlinkTarget: null,
+          });
+          seenPaths.add(targetUserPath);
+        }
+
+        for (const r of srcRows) {
+          const entry = this.translateSubtreeRow(r, mount.sourcePath, mount.targetPath, walkRootDepth);
+          if (!seenPaths.has(entry.path)) {
+            result.push(entry);
+            seenPaths.add(entry.path);
+          }
         }
       }
-    }
 
-    return result.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      return result.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    });
   }
 
   // -- Mount directory listing helpers ----------------------------------------
 
-  /**
-   * Build DirentEntry objects for mount-injected direct children of `internalPath`.
-   * Direct mount targets are stat'd from the source; intermediate ancestors are
-   * returned as synthetic directories.
-   */
-  private async buildMountInjectedDirents(internalPath: string): Promise<DirentEntry[]> {
+  /** Translate a SubtreeRow from source workspace path space to primary target path space. */
+  private translateSubtreeRow(
+    row: SubtreeRow,
+    mountSourcePath: string,
+    mountTargetPath: string,
+    walkRootDepth: number,
+  ): WalkEntry {
+    const sourcePosix = ltreeToPath(row.path);
+    const relative = sourcePosix.slice(mountSourcePath.length);
+    const targetPosix = mountTargetPath + relative;
+    const userPath = this.toUserPath(targetPosix);
+    const depth = targetPosix.split("/").filter(Boolean).length - walkRootDepth;
+    return {
+      path: userPath,
+      name: fileName(targetPosix),
+      depth,
+      isFile: row.node_type === "file",
+      isDirectory: row.node_type === "directory",
+      isSymbolicLink: row.node_type === "symlink",
+      mode: row.mode,
+      size: Number(row.size_bytes),
+      mtime: new Date(row.mtime),
+      symlinkTarget: row.symlink_target,
+    };
+  }
+
+  /** DirentEntry list for mount-injected children of `internalPath` (within the current tx). */
+  private async buildInjectedDirents(tx: SqlClient, internalPath: string): Promise<DirentEntry[]> {
+    if (this.mounts.length === 0) return [];
     const prefix = internalPath === "/" ? "/" : internalPath + "/";
-    const directMounts = new Map<string, ResolvedMount>();
+    const directChildren = new Map<string, ResolvedMount>();
     const intermediateNames = new Set<string>();
 
     for (const mount of this.mounts) {
@@ -2311,40 +2443,44 @@ export class PgFileSystem {
       const parts = rest.split("/").filter(Boolean);
       if (parts.length === 0) continue;
       const firstName = parts[0]!;
-      if (parts.length === 1) {
-        if (!directMounts.has(firstName)) directMounts.set(firstName, mount);
-      } else {
-        intermediateNames.add(firstName);
-      }
+      if (parts.length === 1) { if (!directChildren.has(firstName)) directChildren.set(firstName, mount); }
+      else intermediateNames.add(firstName);
     }
 
     const result: DirentEntry[] = [];
-
-    for (const [name, mount] of directMounts) {
+    for (const [name, mount] of directChildren) {
       if (intermediateNames.has(name)) {
         result.push({ name, isFile: false, isDirectory: true, isSymbolicLink: false });
         continue;
       }
-      try {
-        const s = await this.getMountedFs(mount).stat(mount.sourcePath);
-        result.push({ name, isFile: s.isFile, isDirectory: s.isDirectory, isSymbolicLink: false });
-      } catch {
-        // source gone — skip
-      }
+      const srcVersionId = await this.getMountVersionId(tx, mount.sourceWorkspaceId, mount.sourceVersion);
+      if (srcVersionId === null) continue;
+      const srcLt = pathToLtree(mount.sourcePath, mount.sourceWorkspaceId);
+      const r = await tx.query<{ node_type: string }>(
+        `SELECT e.node_type FROM version_ancestors a
+         INNER JOIN LATERAL (
+           SELECT node_type FROM fs_entries
+           WHERE workspace_id = $1 AND version_id = a.ancestor_id AND path = $2::ltree LIMIT 1
+         ) e ON true
+         WHERE a.workspace_id = $1 AND a.descendant_id = $3
+         ORDER BY a.depth ASC LIMIT 1`,
+        [mount.sourceWorkspaceId, srcLt, srcVersionId],
+      );
+      const type = r.rows[0]?.node_type;
+      if (!type || type === TOMBSTONE) continue;
+      result.push({ name, isFile: type === "file", isDirectory: type === "directory", isSymbolicLink: type === "symlink" });
     }
-
     for (const name of intermediateNames) {
-      if (!directMounts.has(name)) {
-        result.push({ name, isFile: false, isDirectory: true, isSymbolicLink: false });
-      }
+      if (!directChildren.has(name)) result.push({ name, isFile: false, isDirectory: true, isSymbolicLink: false });
     }
-
     return result;
   }
 
-  private async buildMountInjectedStatEntries(internalPath: string): Promise<DirentStatEntry[]> {
+  /** DirentStatEntry list for mount-injected children of `internalPath` (within the current tx). */
+  private async buildInjectedStatEntries(tx: SqlClient, internalPath: string): Promise<DirentStatEntry[]> {
+    if (this.mounts.length === 0) return [];
     const prefix = internalPath === "/" ? "/" : internalPath + "/";
-    const directMounts = new Map<string, ResolvedMount>();
+    const directChildren = new Map<string, ResolvedMount>();
     const intermediateNames = new Set<string>();
 
     for (const mount of this.mounts) {
@@ -2353,52 +2489,44 @@ export class PgFileSystem {
       const parts = rest.split("/").filter(Boolean);
       if (parts.length === 0) continue;
       const firstName = parts[0]!;
-      if (parts.length === 1) {
-        if (!directMounts.has(firstName)) directMounts.set(firstName, mount);
-      } else {
-        intermediateNames.add(firstName);
-      }
+      if (parts.length === 1) { if (!directChildren.has(firstName)) directChildren.set(firstName, mount); }
+      else intermediateNames.add(firstName);
     }
 
-    const syntheticStat: DirentStatEntry = {
-      name: "",
-      isFile: false,
-      isDirectory: true,
-      isSymbolicLink: false,
-      mode: 0o755,
-      size: 0,
-      mtime: new Date(0),
-      symlinkTarget: null,
-    };
-
+    const synth: DirentStatEntry = { name: "", isFile: false, isDirectory: true, isSymbolicLink: false, mode: 0o755, size: 0, mtime: new Date(0), symlinkTarget: null };
     const result: DirentStatEntry[] = [];
 
-    for (const [name, mount] of directMounts) {
-      if (intermediateNames.has(name)) {
-        result.push({ ...syntheticStat, name });
-        continue;
-      }
-      try {
-        const s = await this.getMountedFs(mount).stat(mount.sourcePath);
-        result.push({
-          name,
-          isFile: s.isFile,
-          isDirectory: s.isDirectory,
-          isSymbolicLink: false,
-          mode: s.mode,
-          size: s.size,
-          mtime: s.mtime,
-          symlinkTarget: null,
-        });
-      } catch {
-        // source gone — skip
-      }
+    for (const [name, mount] of directChildren) {
+      if (intermediateNames.has(name)) { result.push({ ...synth, name }); continue; }
+      const srcVersionId = await this.getMountVersionId(tx, mount.sourceWorkspaceId, mount.sourceVersion);
+      if (srcVersionId === null) continue;
+      const srcLt = pathToLtree(mount.sourcePath, mount.sourceWorkspaceId);
+      const r = await tx.query<{ node_type: string; mode: number; size_bytes: number | string; mtime: Date }>(
+        `SELECT e.node_type, e.mode, e.size_bytes, e.mtime FROM version_ancestors a
+         INNER JOIN LATERAL (
+           SELECT node_type, mode, size_bytes, mtime FROM fs_entries
+           WHERE workspace_id = $1 AND version_id = a.ancestor_id AND path = $2::ltree LIMIT 1
+         ) e ON true
+         WHERE a.workspace_id = $1 AND a.descendant_id = $3
+         ORDER BY a.depth ASC LIMIT 1`,
+        [mount.sourceWorkspaceId, srcLt, srcVersionId],
+      );
+      const row = r.rows[0];
+      if (!row || row.node_type === TOMBSTONE) continue;
+      result.push({
+        name,
+        isFile: row.node_type === "file",
+        isDirectory: row.node_type === "directory",
+        isSymbolicLink: row.node_type === "symlink",
+        mode: row.mode,
+        size: Number(row.size_bytes),
+        mtime: new Date(row.mtime),
+        symlinkTarget: null,
+      });
     }
-
     for (const name of intermediateNames) {
-      if (!directMounts.has(name)) result.push({ ...syntheticStat, name });
+      if (!directChildren.has(name)) result.push({ ...synth, name });
     }
-
     return result;
   }
 
@@ -2420,11 +2548,6 @@ export class PgFileSystem {
     return [...primary, ...toAdd].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
-  /**
-   * Return synthetic WalkEntry objects for ancestor directories of `mountTarget`
-   * that are not already in `existingPaths`. Only ancestors strictly between
-   * `walkRoot` and `mountTarget` are considered.
-   */
   private syntheticAncestorEntries(
     mountTarget: string,
     walkRoot: string,
@@ -2436,7 +2559,7 @@ export class PgFileSystem {
     let current = "";
     for (const part of parts) {
       current += "/" + part;
-      if (current === mountTarget) break; // don't add the mount target itself here
+      if (current === mountTarget) break;
       if (current === walkRoot || !current.startsWith(walkRoot === "/" ? "/" : walkRoot + "/")) continue;
       const userPath = this.toUserPath(current);
       if (existingPaths.has(userPath)) continue;
@@ -2456,25 +2579,6 @@ export class PgFileSystem {
     return result;
   }
 
-  /**
-   * Translate a WalkEntry returned by a source FS's `walk()` into the path
-   * space of this (primary) FS.
-   */
-  private translateMountWalkEntry(
-    entry: WalkEntry,
-    mountSourcePath: string,
-    mountTargetPath: string,
-    walkRoot: string,
-  ): WalkEntry {
-    const relative = entry.path.slice(mountSourcePath.length); // "" or "/sub/path"
-    const rawTargetPath = mountTargetPath + relative;
-    const userTargetPath = this.toUserPath(rawTargetPath);
-    const walkRootDepth =
-      walkRoot === "/" ? 0 : walkRoot.split("/").filter(Boolean).length;
-    const depth = rawTargetPath.split("/").filter(Boolean).length - walkRootDepth;
-    return { ...entry, path: userTargetPath, name: fileName(rawTargetPath), depth };
-  }
-
   // -- Public API: Mutation ---------------------------------------------------
 
   async rm(path: string, options?: RmOptions): Promise<void> {
@@ -2482,7 +2586,7 @@ export class PgFileSystem {
     this.guardExcludedWrite(internal, "rm", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
-      const node = await this.resolveEntry(tx, internal);
+      const node = await this.resolvePrimaryEntry(tx, internal);
       if (!node) {
         if (options?.force) return;
         throw new FsError("ENOENT", "no such file or directory, rm", path);
@@ -2535,17 +2639,17 @@ export class PgFileSystem {
         );
       }
 
-      const srcEntry = await this.resolveEntry(tx, srcPath);
+      const srcEntry = await this.resolvePrimaryEntry(tx, srcPath);
       if (!srcEntry)
         throw new FsError("ENOENT", "no such file or directory, mv", src);
 
-      const destParent = await this.resolveEntry(tx, parentPath(destPath));
+      const destParent = await this.resolvePrimaryEntry(tx, parentPath(destPath));
       if (!destParent)
         throw new FsError("ENOENT", "no such file or directory, mv", dest);
       if (destParent.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, mv", dest);
 
-      const destEntry = await this.resolveEntry(tx, destPath);
+      const destEntry = await this.resolvePrimaryEntry(tx, destPath);
       if (destEntry) {
         if (
           destEntry.node_type === "directory" &&

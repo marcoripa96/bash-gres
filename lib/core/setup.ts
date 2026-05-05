@@ -131,16 +131,10 @@ function rlsDdl(table: string): string {
 ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE tablename = '${table}' AND policyname = 'workspace_isolation'
-    ) THEN
-        CREATE POLICY workspace_isolation ON ${table} FOR ALL
-            USING (workspace_id = current_setting('app.workspace_id', true))
-            WITH CHECK (workspace_id = current_setting('app.workspace_id', true));
-    END IF;
-END $$;
+DROP POLICY IF EXISTS workspace_isolation ON ${table};
+CREATE POLICY workspace_isolation ON ${table} FOR ALL
+    USING (workspace_id = ANY(string_to_array(current_setting('app.workspace_id', true), ',')))
+    WITH CHECK (workspace_id = ANY(string_to_array(current_setting('app.workspace_id', true), ',')));
 `;
 }
 
