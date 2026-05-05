@@ -22,6 +22,8 @@ export {
   type SetupOptions,
   type FsPermissions,
   type PgFileSystemOptions,
+  type SharedMountEntry,
+  type SharedMount,
   type NodeType,
   type EntryShape,
   type VersionDiffEntry,

@@ -231,6 +231,17 @@ export interface WorkspaceUsageOptions {
   path?: string;
 }
 
+export interface SharedMountEntry {
+  source: string;
+  target?: string;
+}
+
+export interface SharedMount {
+  workspaceId: string;
+  version?: string;
+  mounts: Array<string | SharedMountEntry>;
+}
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
@@ -266,4 +277,5 @@ export interface PgFileSystemOptions {
   statementTimeoutMs?: number;
   embed?: (text: string) => Promise<number[]>;
   embeddingDimensions?: number;
+  sharedMounts?: SharedMount[];
 }

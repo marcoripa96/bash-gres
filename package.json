@@ -71,7 +71,7 @@
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^10.0.0",
-    "@types/node": "^25.5.2",
+    "@types/node": "^25.6.0",
     "@types/pg": "^8.20.0",
     "drizzle-orm": "^0.44.6",
     "just-bash": "^2.14.0",
