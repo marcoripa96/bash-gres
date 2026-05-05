@@ -2070,6 +2070,8 @@ export class PgFileSystem {
       }
     }
 
+    if (primaryNames !== null && this.mounts.length === 0) return primaryNames;
+
     const injected = this.getMountInjectedChildNames(internal);
 
     if (primaryNames === null) {
@@ -2122,6 +2124,8 @@ export class PgFileSystem {
       }
     }
 
+    if (primaryEntries !== null && this.mounts.length === 0) return primaryEntries;
+
     const injected = await this.buildMountInjectedDirents(internal);
 
     if (primaryEntries === null) {
@@ -2164,6 +2168,8 @@ export class PgFileSystem {
         throw e;
       }
     }
+
+    if (primaryEntries !== null && this.mounts.length === 0) return primaryEntries;
 
     const injected = await this.buildMountInjectedStatEntries(internal);
 
@@ -2398,6 +2404,7 @@ export class PgFileSystem {
 
   /** Merge two DirentEntry lists; `primary` wins on name conflicts. */
   private mergeDirentLists(primary: DirentEntry[], injected: DirentEntry[]): DirentEntry[] {
+    if (injected.length === 0) return primary;
     const primaryNames = new Set(primary.map((e) => e.name));
     const toAdd = injected.filter((e) => !primaryNames.has(e.name));
     if (toAdd.length === 0) return primary;
@@ -2406,6 +2413,7 @@ export class PgFileSystem {
 
   /** Merge two DirentStatEntry lists; `primary` wins on name conflicts. */
   private mergeStatEntryLists(primary: DirentStatEntry[], injected: DirentStatEntry[]): DirentStatEntry[] {
+    if (injected.length === 0) return primary;
     const primaryNames = new Set(primary.map((e) => e.name));
     const toAdd = injected.filter((e) => !primaryNames.has(e.name));
     if (toAdd.length === 0) return primary;
