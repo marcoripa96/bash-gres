@@ -179,6 +179,15 @@ export class PgFileSystem {
   private cachedVersionRootId: number | null = null;
   private blobsHasEmbeddingCache: boolean | null = null;
   /**
+   * Optimistic visible-node count for `validateNodeCount`. Avoids running a
+   * `COUNT(*)` over the COW-resolved view of the whole workspace on every
+   * write while there's still comfortable headroom under `maxFiles`. May
+   * drift upward when entries are removed (we never decrement); the drift
+   * is self-correcting because as the cache approaches `maxFiles` we fall
+   * back to the real `COUNT` and reset.
+   */
+  private cachedNodeCount: number | null = null;
+  /**
    * When non-null, this instance is a transaction-bound facade. All `withWorkspace()`
    * calls on the facade run `fn(txClient)` directly instead of opening a new
    * transaction. The outer `transaction()` call has already wired up RLS
@@ -722,6 +731,74 @@ export class PgFileSystem {
     return row;
   }
 
+  /**
+   * Visibility lookup for many paths in a single round-trip. Mirrors
+   * `resolveEntry` but unrolls over an array of requested paths, evaluates
+   * each one's nearest-ancestor row independently, and returns a Map keyed
+   * by the original input path. Lets hot write paths fold parent-existence
+   * + existing-entry checks into one query.
+   *
+   * Single-path callers should keep using `resolveEntry`: the planner
+   * picks a tighter plan for a literal `path = $n::ltree` predicate than
+   * for `path = req.p` over `unnest`, and we don't want to regress reads
+   * for the savings on writes.
+   */
+  private async resolveEntries(
+    tx: SqlClient,
+    posixPaths: string[],
+  ): Promise<Map<string, EntryRow | null>> {
+    const out = new Map<string, EntryRow | null>();
+    const lookups: { posix: string; lt: string }[] = [];
+    for (const posix of posixPaths) {
+      if (out.has(posix)) continue;
+      if (!this.excludes.empty && isExcluded(this.excludes, posix)) {
+        out.set(posix, null);
+        continue;
+      }
+      lookups.push({ posix, lt: pathToLtree(posix, this.workspaceId) });
+      out.set(posix, null);
+    }
+    if (lookups.length === 0) return out;
+    if (lookups.length === 1) {
+      // Single path: defer to the indexed direct-equality plan.
+      const only = lookups[0]!;
+      const row = await this.resolveEntry(tx, only.posix);
+      if (row) out.set(only.posix, row);
+      return out;
+    }
+
+    const versionId = await this.getCurrentVersionId(tx);
+    const ltArray = lookups.map((l) => l.lt);
+    const r = await tx.query<EntryRow>(
+      `SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
+              e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
+       FROM unnest($2::ltree[]) AS req(p)
+       INNER JOIN LATERAL (
+         SELECT e2.workspace_id, e2.version_id, e2.path, e2.blob_hash,
+                e2.node_type, e2.symlink_target, e2.mode, e2.size_bytes,
+                e2.mtime, e2.created_at
+         FROM version_ancestors a
+         INNER JOIN fs_entries e2
+           ON e2.workspace_id = $1
+          AND e2.version_id = a.ancestor_id
+          AND e2.path = req.p
+         WHERE a.workspace_id = $1
+           AND a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       ) e ON true`,
+      [this.workspaceId, ltArray, versionId],
+    );
+    const ltToPosix = new Map<string, string>();
+    for (const l of lookups) ltToPosix.set(l.lt, l.posix);
+    for (const row of r.rows) {
+      if (row.node_type === TOMBSTONE) continue;
+      const posix = ltToPosix.get(row.path);
+      if (posix !== undefined) out.set(posix, row);
+    }
+    return out;
+  }
+
   private async resolveEntryFollowSymlink(
     tx: SqlClient,
     posixPath: string,
@@ -925,6 +1002,19 @@ export class PgFileSystem {
   }
 
   private async validateNodeCount(tx: SqlClient): Promise<void> {
+    // Headroom: as long as the cached count plus this margin is still under
+    // `maxFiles`, skip the COUNT(*) and bump the cache optimistically. Once
+    // we're inside the margin we re-query on every call so the limit stays
+    // strictly enforced near the boundary.
+    const HEADROOM = 16;
+    if (
+      this.cachedNodeCount !== null &&
+      this.cachedNodeCount + HEADROOM < this.maxFiles
+    ) {
+      this.cachedNodeCount++;
+      return;
+    }
+
     const versionId = await this.getCurrentVersionId(tx);
     const baseParams: SqlParam[] = [this.workspaceId, versionId, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
@@ -940,6 +1030,8 @@ export class PgFileSystem {
        ) v WHERE node_type != $3`,
       [...baseParams, ...exc.params],
     );
+    const actual = Number(r.rows[0]?.count ?? 0);
+    this.cachedNodeCount = actual + 1;
     if (r.rows[0] && r.rows[0].count >= this.maxFiles) {
       throw new Error(
         `Node limit reached: ${this.maxFiles} nodes per workspace`,
@@ -1148,6 +1240,98 @@ export class PgFileSystem {
     }
   }
 
+  /**
+   * Fused blob+entry upsert for the file write hot path. Runs both INSERTs
+   * in a single CTE so the round-trip count drops from 2 → 1; data-modifying
+   * statements in `WITH` clauses are always evaluated by Postgres regardless
+   * of whether the outer query references them. Used only for `node_type =
+   * 'file'` writes; symlinks, directories, and bulk copy paths still go
+   * through `upsertBlob` / `upsertEntry` separately because they have
+   * different shapes (no blob, embedding-only refresh, etc.).
+   */
+  private async upsertFileBlobAndEntry(
+    tx: SqlClient,
+    versionId: number,
+    posixPath: string,
+    hash: Uint8Array,
+    content: string | Uint8Array,
+    sizeBytes: number,
+    embedding: number[] | null,
+    mode: number,
+  ): Promise<void> {
+    await this.validateWorkspaceBytes(tx, hash, sizeBytes, posixPath);
+
+    const isText = typeof content === "string";
+    const textContent = isText ? content : null;
+    const binaryData = isText ? null : content;
+    const lt = pathToLtree(posixPath, this.workspaceId);
+
+    if (embedding !== null) {
+      const embeddingStr = `[${embedding.join(",")}]`;
+      await tx.query(
+        `WITH b AS (
+           INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes, embedding)
+           VALUES ($1, $2, $3, $4, $5, $6::vector)
+           ON CONFLICT (workspace_id, hash) DO UPDATE SET
+             embedding = COALESCE(fs_blobs.embedding, EXCLUDED.embedding)
+           RETURNING 1
+         )
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         VALUES ($1, $7, $8::ltree, $2, 'file', NULL, $9, $5, now())
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = EXCLUDED.blob_hash,
+           node_type = EXCLUDED.node_type,
+           symlink_target = EXCLUDED.symlink_target,
+           mode = EXCLUDED.mode,
+           size_bytes = EXCLUDED.size_bytes,
+           mtime = now()`,
+        [
+          this.workspaceId,
+          hash,
+          textContent,
+          binaryData,
+          sizeBytes,
+          embeddingStr,
+          versionId,
+          lt,
+          mode,
+        ],
+      );
+    } else {
+      await tx.query(
+        `WITH b AS (
+           INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (workspace_id, hash) DO NOTHING
+           RETURNING 1
+         )
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         VALUES ($1, $6, $7::ltree, $2, 'file', NULL, $8, $5, now())
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = EXCLUDED.blob_hash,
+           node_type = EXCLUDED.node_type,
+           symlink_target = EXCLUDED.symlink_target,
+           mode = EXCLUDED.mode,
+           size_bytes = EXCLUDED.size_bytes,
+           mtime = now()`,
+        [
+          this.workspaceId,
+          hash,
+          textContent,
+          binaryData,
+          sizeBytes,
+          versionId,
+          lt,
+          mode,
+        ],
+      );
+    }
+  }
+
   private async upsertEntry(
     tx: SqlClient,
     versionId: number,
@@ -1244,13 +1428,14 @@ export class PgFileSystem {
     this.validatePathDepth(path);
 
     const parentPosix = parentPath(path);
-    const parent = await this.resolveEntry(tx, parentPosix);
+    const resolved = await this.resolveEntries(tx, [parentPosix, path]);
+    const parent = resolved.get(parentPosix) ?? null;
     if (!parent)
       throw new FsError("ENOENT", "no such file or directory, open", path);
     if (parent.node_type !== "directory")
       throw new FsError("ENOTDIR", "not a directory, open", path);
 
-    const existing = await this.resolveEntry(tx, path);
+    const existing = resolved.get(path) ?? null;
     if (existing?.node_type === "directory")
       throw new FsError(
         "EISDIR",
@@ -1281,23 +1466,15 @@ export class PgFileSystem {
       embedding = await this.maybeEmbed(tx, hash, content);
     }
 
-    await this.upsertBlob(
+    await this.upsertFileBlobAndEntry(
       tx,
+      versionId,
+      path,
       hash,
       content,
       sizeBytes,
       embedding,
-      this.toUserPath(path),
-    );
-    await this.upsertEntry(
-      tx,
-      versionId,
-      path,
-      "file",
-      hash,
-      sizeBytes,
       0o644,
-      null,
     );
   }
 
