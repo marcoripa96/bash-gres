@@ -24,6 +24,11 @@
       "import": "./dist/adapters/node-postgres/index.js",
       "default": "./dist/adapters/node-postgres/index.js"
     },
+    "./prisma": {
+      "types": "./dist/adapters/prisma/index.d.ts",
+      "import": "./dist/adapters/prisma/index.js",
+      "default": "./dist/adapters/prisma/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -34,6 +39,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "prisma:generate": "prisma generate --schema=tests/prisma/schema.prisma",
     "bench": "tsc -p tsconfig.bench.json && node dist-bench/bench/perf.js",
     "prepublishOnly": "tsc"
   },
@@ -50,6 +56,7 @@
   ],
   "license": "MIT",
   "peerDependencies": {
+    "@prisma/client": ">=5.0.0",
     "drizzle-orm": ">=0.30.0",
     "just-bash": ">=2.0.0",
     "pg": ">=8.0.0",
@@ -65,11 +72,15 @@
     "pg": {
       "optional": true
     },
+    "@prisma/client": {
+      "optional": true
+    },
     "just-bash": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@prisma/client": "^6.19.3",
     "@testcontainers/postgresql": "^10.0.0",
     "@types/node": "^25.5.2",
     "@types/pg": "^8.20.0",
@@ -77,6 +88,7 @@
     "just-bash": "^2.14.0",
     "pg": "^8.20.0",
     "postgres": "^3.4.8",
+    "prisma": "^6.19.3",
     "testcontainers": "^10.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

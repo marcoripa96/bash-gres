@@ -9,6 +9,7 @@ bash-gres (core)          PgFileSystem, setup(), search, types
 bash-gres/drizzle         Drizzle adapter (createDrizzleClient) + schema
 bash-gres/node-postgres   node-postgres (pg) adapter (createNodePgClient)
 bash-gres/postgres        postgres.js adapter (createPostgresClient)
+bash-gres/prisma          Prisma adapter (createPrismaClient)
 ```
 
 ### Core + Adapter pattern
@@ -18,6 +19,7 @@ The core operates on a `SqlClient` interface (`query(text, params)` + `transacti
 - **postgres.js**: `createPostgresClient(sql)` from `bash-gres/postgres`
 - **node-postgres (pg)**: `createNodePgClient(pool)` from `bash-gres/node-postgres`
 - **Drizzle**: `createDrizzleClient(db)` from `bash-gres/drizzle`
+- **Prisma**: `createPrismaClient(prisma)` from `bash-gres/prisma`
 
 Then pass the resulting `SqlClient` to `PgFileSystem({ db: client })` and `setup(client)`. Core has zero knowledge of any specific driver.
 
@@ -44,6 +46,7 @@ await bash.exec("echo hello > /file.txt");
 - `lib/adapters/drizzle/schema.ts`: Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/node-postgres/index.ts`: wraps `pg.Pool` into `SqlClient` (structural `NodePgPool` interface)
 - `lib/adapters/postgres/index.ts`: wraps `postgres.Sql` into `SqlClient`
+- `lib/adapters/prisma/adapter.ts`: wraps a Prisma client (`$queryRawUnsafe`/`$executeRawUnsafe`/`$transaction`) into `SqlClient`. Detects SELECT vs DML via regex to dispatch between `$queryRaw*` and `$executeRaw*`, splits multi-statement DDL because Prisma's prepared-statement protocol forbids compound commands, and rebuilds Postgres SQLSTATEs out of `PrismaClientKnownRequestError.meta.code` so the `FsError` mappings still fire
 
 ## Database
 

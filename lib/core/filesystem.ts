@@ -1553,12 +1553,15 @@ export class PgFileSystem {
       const sqlOffset = (options?.offset ?? 0) + 1;
       const sqlLimit = options?.limit;
 
+      // Prisma's query engine binds JS numbers as `bigint`, but `substr`'s
+      // strict overload list has no `(text, bigint, bigint)` form. Casting
+      // to int (range checked above) keeps every adapter happy.
       const textExpr =
-        sqlLimit !== undefined ? `substr(content, $3, $4)` : `substr(content, $3)`;
+        sqlLimit !== undefined ? `substr(content, $3::int, $4::int)` : `substr(content, $3::int)`;
       const binaryExpr =
         sqlLimit !== undefined
-          ? `substring(binary_data FROM $3 FOR $4)`
-          : `substring(binary_data FROM $3)`;
+          ? `substring(binary_data FROM $3::int FOR $4::int)`
+          : `substring(binary_data FROM $3::int)`;
 
       const params: (string | number | Uint8Array)[] = [
         this.workspaceId,

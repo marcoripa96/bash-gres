@@ -1,0 +1,16 @@
+// Minimal Prisma schema for the bash-gres Prisma adapter tests.
+//
+// The adapter only uses raw queries (`$queryRawUnsafe`/`$executeRawUnsafe`/
+// `$transaction`), so no Prisma models are required — declaring just the
+// generator and datasource is enough to produce a `PrismaClient` with the
+// raw-SQL surface we exercise. The real DDL is created by `setup()`.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("TEST_DATABASE_URL")
+}

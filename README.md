@@ -11,7 +11,7 @@ PostgreSQL-backed virtual filesystem for AI agents. Implements the [just-bash](h
 - Versioned directories via `mkdir(path, { versioned: true })` and scoped facades
 - BM25 full-text search via `pg_textsearch`
 - Optional pgvector semantic and hybrid search
-- Bring your own driver: `postgres.js`, `node-postgres (pg)`, or Drizzle ORM
+- Bring your own driver: `postgres.js`, `node-postgres (pg)`, Drizzle ORM, or Prisma
 
 ## Install
 
@@ -30,6 +30,9 @@ npm install pg just-bash
 
 # Drizzle ORM
 npm install drizzle-orm just-bash
+
+# Prisma
+npm install @prisma/client just-bash
 ```
 
 ## Quick Start
@@ -79,6 +82,24 @@ await setup(db)
 
 const fs = new PgFileSystem({ db, workspaceId: "workspace-1" })
 ```
+
+### With Prisma
+
+```ts
+import { PrismaClient } from "@prisma/client"
+import { setup, PgFileSystem } from "bash-gres/prisma"
+
+const prisma = new PrismaClient()
+
+await setup(prisma)
+
+const fs = new PgFileSystem({ db: prisma, workspaceId: "workspace-1" })
+```
+
+`bash-gres` only uses Prisma's raw-query and interactive-transaction APIs
+(`$queryRawUnsafe`, `$executeRawUnsafe`, `$transaction`), so the filesystem
+tables don't need to appear in your `schema.prisma` — `setup()` creates them
+via raw DDL.
 
 ## Filesystem API
 
@@ -231,6 +252,7 @@ bash-gres                PgFileSystem, setup(), search, types
 bash-gres/postgres       postgres.js adapter (setup, PgFileSystem, createPostgresClient)
 bash-gres/node-postgres  node-postgres (pg) adapter (setup, PgFileSystem, createNodePgClient)
 bash-gres/drizzle        Drizzle adapter (setup, PgFileSystem, createDrizzleClient, createSchema)
+bash-gres/prisma         Prisma adapter (setup, PgFileSystem, createPrismaClient)
 ```
 
 ## Development

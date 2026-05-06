@@ -21,3 +21,6 @@ Thumbs.db
 *.swo
 
 content/
+
+# Generated Prisma client (test fixture)
+tests/prisma/generated/

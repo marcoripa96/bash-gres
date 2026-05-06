@@ -1,9 +1,11 @@
 import postgres from "postgres";
 import pg from "pg";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { PrismaClient } from "./prisma/generated/client.js";
 import { createPostgresClient } from "../lib/adapters/postgres/index.js";
 import { createDrizzleClient } from "../lib/adapters/drizzle/adapter.js";
 import { createNodePgClient } from "../lib/adapters/node-postgres/index.js";
+import { createPrismaClient } from "../lib/adapters/prisma/adapter.js";
 import type { SqlClient } from "../lib/core/types.js";
 
 // Re-export for convenience
@@ -39,6 +41,37 @@ function createNodePgTestClient(): TestClient {
   const pool = new pg.Pool({ connectionString: TEST_DB_URL });
   const client = createNodePgClient(pool);
   return { client, teardown: () => pool.end() };
+}
+
+// PrismaClient spins up a heavy query engine per instance, so reuse a single
+// client across all factory() calls. The `fileParallelism: false` vitest config
+// keeps shared state safe; per-test cleanup is workspace-scoped via resetWorkspace.
+let sharedPrisma: PrismaClient | null = null;
+let prismaRefCount = 0;
+
+function getSharedPrisma(): PrismaClient {
+  if (!sharedPrisma) {
+    sharedPrisma = new PrismaClient({
+      datasources: { db: { url: TEST_DB_URL } },
+    });
+  }
+  return sharedPrisma;
+}
+
+function createPrismaTestClient(): TestClient {
+  const prisma = getSharedPrisma();
+  prismaRefCount++;
+  const client = createPrismaClient(prisma);
+  return {
+    client,
+    teardown: async () => {
+      prismaRefCount--;
+      if (prismaRefCount === 0 && sharedPrisma) {
+        await sharedPrisma.$disconnect();
+        sharedPrisma = null;
+      }
+    },
+  };
 }
 
 /** @deprecated Use TEST_ADAPTERS with describe.each instead */
@@ -84,4 +117,5 @@ export const TEST_ADAPTERS: [string, AdapterFactory][] = [
   ["postgres", createPostgresTestClient],
   ["drizzle", createDrizzleTestClient],
   ["node-postgres", createNodePgTestClient],
+  ["prisma", createPrismaTestClient],
 ];
