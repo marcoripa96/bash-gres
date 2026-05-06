@@ -41,6 +41,7 @@
     "typecheck": "tsc --noEmit",
     "prisma:generate": "prisma generate --schema=tests/prisma/schema.prisma",
     "bench": "tsc -p tsconfig.bench.json && node dist-bench/bench/perf.js",
+    "bench:adapters": "tsc -p tsconfig.bench.json && node dist-bench/bench/adapter-perf.js",
     "prepublishOnly": "tsc"
   },
   "keywords": [

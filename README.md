@@ -101,6 +101,14 @@ const fs = new PgFileSystem({ db: prisma, workspaceId: "workspace-1" })
 tables don't need to appear in your `schema.prisma` — `setup()` creates them
 via raw DDL.
 
+> **Note on performance.** Prisma routes every query through a separate query
+> engine over RPC, which adds roughly 1 ms of overhead per operation. In our
+> [adapter benchmarks](bench/adapter-results.md) the Prisma adapter typically
+> runs ~1.3–2× slower than the `postgres.js` / `node-postgres` adapters on
+> hot, single-row paths (`readFile`, `stat`). Use it when you want to share
+> a single Prisma client between your app and `bash-gres`; pick a native
+> driver when raw throughput matters.
+
 ## Filesystem API
 
 ```ts
