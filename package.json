@@ -35,6 +35,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "bench": "tsc -p tsconfig.bench.json && node dist-bench/bench/perf.js",
+    "bench:adapters": "tsc -p tsconfig.bench.json && node dist-bench/bench/adapter-perf.js",
+    "bench:writefile": "tsc -p tsconfig.bench.json && node dist-bench/bench/writefile-profile.js",
     "prepublishOnly": "tsc"
   },
   "keywords": [
