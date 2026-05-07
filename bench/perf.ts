@@ -312,6 +312,153 @@ async function benchDirListingUnderDivergence(schema: "old" | "new") {
   record(`readdir(/d) at depth 10, 100 files`, "p95", fmtMs(p95(samples)));
 }
 
+async function benchSliceReads(schema: "old" | "new") {
+  const ws = "bench-slice-reads";
+  await resetWs(ws, schema);
+
+  const fs = new PgFileSystem({ db: client, workspaceId: ws, version: "v0" });
+  await fs.init();
+
+  const textLines: string[] = [];
+  for (let i = 0; i < 200; i++) textLines.push(`line-${i.toString().padStart(4, "0")}`);
+  const text = textLines.join("\n") + "\n";
+  await fs.writeFile("/text.log", text);
+
+  const binary = new Uint8Array(8 * 1024);
+  for (let i = 0; i < binary.length; i++) binary[i] = i & 0xff;
+  await fs.writeFile("/blob.bin", binary);
+
+  // readFileBuffer (text)
+  for (let i = 0; i < 5; i++) await fs.readFileBuffer("/text.log");
+  let samples: bigint[] = [];
+  for (let i = 0; i < 100; i++) {
+    const { ns } = await time(() => fs.readFileBuffer("/text.log"));
+    samples.push(ns);
+  }
+  record("readFileBuffer (text, 200 lines)", "median", fmtMs(median(samples)));
+  record("readFileBuffer (text, 200 lines)", "p95", fmtMs(p95(samples)));
+
+  // readFileBuffer (binary)
+  for (let i = 0; i < 5; i++) await fs.readFileBuffer("/blob.bin");
+  samples = [];
+  for (let i = 0; i < 100; i++) {
+    const { ns } = await time(() => fs.readFileBuffer("/blob.bin"));
+    samples.push(ns);
+  }
+  record("readFileBuffer (binary, 8 KiB)", "median", fmtMs(median(samples)));
+  record("readFileBuffer (binary, 8 KiB)", "p95", fmtMs(p95(samples)));
+
+  // readFileRange (small slice)
+  for (let i = 0; i < 5; i++) await fs.readFileRange("/blob.bin", { offset: 0, limit: 64 });
+  samples = [];
+  for (let i = 0; i < 100; i++) {
+    const { ns } = await time(() =>
+      fs.readFileRange("/blob.bin", { offset: 1024, limit: 64 }),
+    );
+    samples.push(ns);
+  }
+  record("readFileRange (8 KiB, 64 B slice)", "median", fmtMs(median(samples)));
+  record("readFileRange (8 KiB, 64 B slice)", "p95", fmtMs(p95(samples)));
+
+  // readFileLines (10-line slice)
+  for (let i = 0; i < 5; i++) await fs.readFileLines("/text.log", { offset: 50, limit: 10 });
+  samples = [];
+  for (let i = 0; i < 100; i++) {
+    const { ns } = await time(() =>
+      fs.readFileLines("/text.log", { offset: 50, limit: 10 }),
+    );
+    samples.push(ns);
+  }
+  record("readFileLines (200 lines, 10-line slice)", "median", fmtMs(median(samples)));
+  record("readFileLines (200 lines, 10-line slice)", "p95", fmtMs(p95(samples)));
+}
+
+async function benchReadOnlyOps(schema: "old" | "new") {
+  const ws = "bench-readonly-ops";
+  await resetWs(ws, schema);
+
+  const fs = new PgFileSystem({
+    db: client,
+    workspaceId: ws,
+    version: "v0",
+    maxFiles: 1100,
+  });
+  await fs.init();
+  for (let i = 0; i < 50; i++) {
+    await fs.writeFile(`/file-${i}.txt`, `content-${i}`);
+  }
+  let cur: PgFileSystem = fs;
+  for (let d = 1; d <= 5; d++) cur = await cur.fork(`v${d}`);
+
+  // listVersions
+  for (let i = 0; i < 5; i++) await cur.listVersions();
+  let samples: bigint[] = [];
+  for (let i = 0; i < 100; i++) {
+    const { ns } = await time(() => cur.listVersions());
+    samples.push(ns);
+  }
+  record("listVersions (6 versions)", "median", fmtMs(median(samples)));
+  record("listVersions (6 versions)", "p95", fmtMs(p95(samples)));
+
+  // getUsage
+  for (let i = 0; i < 5; i++) await cur.getUsage();
+  samples = [];
+  for (let i = 0; i < 50; i++) {
+    const { ns } = await time(() => cur.getUsage());
+    samples.push(ns);
+  }
+  record("getUsage (50 files, depth 5)", "median", fmtMs(median(samples)));
+  record("getUsage (50 files, depth 5)", "p95", fmtMs(p95(samples)));
+
+  // diff (cur vs sibling fork at v2)
+  await cur.fork("sibling");
+  for (let i = 0; i < 5; i++) await cur.diff("sibling");
+  samples = [];
+  for (let i = 0; i < 50; i++) {
+    const { ns } = await time(() => cur.diff("sibling"));
+    samples.push(ns);
+  }
+  record("diff (cur vs sibling, 50 files)", "median", fmtMs(median(samples)));
+  record("diff (cur vs sibling, 50 files)", "p95", fmtMs(p95(samples)));
+}
+
+async function benchWriteFile(schema: "old" | "new") {
+  const ws = "bench-writefile";
+  await resetWs(ws, schema);
+
+  const fs = new PgFileSystem({
+    db: client,
+    workspaceId: ws,
+    version: "v0",
+    maxFiles: 5000,
+  });
+  await fs.init();
+  await fs.mkdir("/d", { recursive: true });
+
+  // Cold writes: 50 fresh paths (no existing entry).
+  let samples: bigint[] = [];
+  for (let i = 0; i < 50; i++) {
+    const { ns } = await time(() =>
+      fs.writeFile(`/d/cold-${i}.txt`, `cold-${i}`),
+    );
+    samples.push(ns);
+  }
+  record("writeFile (new file in existing dir)", "median", fmtMs(median(samples)));
+  record("writeFile (new file in existing dir)", "p95", fmtMs(p95(samples)));
+
+  // Warm writes: overwrite existing path.
+  for (let i = 0; i < 5; i++) await fs.writeFile("/d/warm.txt", "v0");
+  samples = [];
+  for (let i = 0; i < 100; i++) {
+    const { ns } = await time(() =>
+      fs.writeFile("/d/warm.txt", `iteration-${i}`),
+    );
+    samples.push(ns);
+  }
+  record("writeFile (overwrite existing)", "median", fmtMs(median(samples)));
+  record("writeFile (overwrite existing)", "p95", fmtMs(p95(samples)));
+}
+
 // -- Orchestration ---------------------------------------------------------
 
 function printHeader(title: string) {
@@ -365,6 +512,15 @@ async function main() {
 
   printHeader("readdir under version divergence");
   await benchDirListingUnderDivergence(schema);
+
+  printHeader("slice reads (Buffer/Range/Lines)");
+  await benchSliceReads(schema);
+
+  printHeader("read-only ops (listVersions/getUsage/diff)");
+  await benchReadOnlyOps(schema);
+
+  printHeader("writeFile latency");
+  await benchWriteFile(schema);
 
   writeResults(LABEL);
 }
