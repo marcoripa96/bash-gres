@@ -884,3 +884,91 @@ BENCH_LABEL=cow-redesign npm run bench
 | deleteVersion (1000 files, 100 edited) | elapsed | 7.81 ms |
 | readdir(/d) at depth 10, 100 files | median | 1.11 ms |
 | readdir(/d) at depth 10, 100 files | p95 | 1.32 ms |
+
+## after-readrange-fuse-1  _(2026-05-07T15:26:45.236Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 5.05 ms |
+| fork after 1000 files | fork() | 2.83 ms |
+| fork after 5000 files | fork() | 2.40 ms |
+| read at depth 1 | median | 0.58 ms |
+| read at depth 1 | p95 | 0.80 ms |
+| read at depth 5 | median | 0.57 ms |
+| read at depth 5 | p95 | 0.82 ms |
+| read at depth 25 | median | 0.59 ms |
+| read at depth 25 | p95 | 0.84 ms |
+| read at depth 50 | median | 0.56 ms |
+| read at depth 50 | p95 | 0.77 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.56 MiB -> 134.56 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.47 ms |
+| readdir(/d) at depth 10, 100 files | median | 2.22 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 3.01 ms |
+
+## after-readrange-fuse-2  _(2026-05-07T15:27:31.485Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.41 ms |
+| fork after 1000 files | fork() | 2.60 ms |
+| fork after 5000 files | fork() | 5.52 ms |
+| read at depth 1 | median | 0.61 ms |
+| read at depth 1 | p95 | 0.80 ms |
+| read at depth 5 | median | 0.59 ms |
+| read at depth 5 | p95 | 0.86 ms |
+| read at depth 25 | median | 0.58 ms |
+| read at depth 25 | p95 | 0.68 ms |
+| read at depth 50 | median | 0.58 ms |
+| read at depth 50 | p95 | 0.77 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 135.87 MiB -> 135.87 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.51 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.23 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.71 ms |
+
+## after-readrange-fuse-3  _(2026-05-07T15:28:46.676Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 7.01 ms |
+| fork after 1000 files | fork() | 2.69 ms |
+| fork after 5000 files | fork() | 22.99 ms |
+| read at depth 1 | median | 1.64 ms |
+| read at depth 1 | p95 | 8.95 ms |
+| read at depth 5 | median | 1.64 ms |
+| read at depth 5 | p95 | 6.19 ms |
+| read at depth 25 | median | 2.11 ms |
+| read at depth 25 | p95 | 6.53 ms |
+| read at depth 50 | median | 1.84 ms |
+| read at depth 50 | p95 | 11.84 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 135.87 MiB -> 135.87 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.57 ms |
+| readdir(/d) at depth 10, 100 files | median | 2.18 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 4.30 ms |
+
+## after-readrange-fuse-4-rerun  _(2026-05-07T15:29:57.445Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 12.80 ms |
+| fork after 1000 files | fork() | 9.12 ms |
+| fork after 5000 files | fork() | 6.41 ms |
+| read at depth 1 | median | 0.54 ms |
+| read at depth 1 | p95 | 0.63 ms |
+| read at depth 5 | median | 0.55 ms |
+| read at depth 5 | p95 | 0.80 ms |
+| read at depth 25 | median | 0.57 ms |
+| read at depth 25 | p95 | 0.69 ms |
+| read at depth 50 | median | 0.59 ms |
+| read at depth 50 | p95 | 0.85 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.88 MiB -> 134.88 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.53 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.16 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.38 ms |
