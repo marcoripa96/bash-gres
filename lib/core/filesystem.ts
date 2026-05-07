@@ -163,7 +163,7 @@ export class PgFileSystem extends FsBase {
     _options?: { encoding?: string | null } | string,
   ): Promise<string> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       return this.internalReadFile(tx, internal, path);
     });
   }
@@ -265,7 +265,7 @@ export class PgFileSystem extends FsBase {
     options?: ReadFileRangeOptions,
   ): Promise<string> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError(
@@ -318,7 +318,7 @@ export class PgFileSystem extends FsBase {
     options?: ReadFileLinesOptions,
   ): Promise<ReadFileLinesResult> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError(
@@ -397,7 +397,7 @@ export class PgFileSystem extends FsBase {
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type === "directory")
         throw new FsError(
@@ -499,7 +499,7 @@ export class PgFileSystem extends FsBase {
 
   async exists(path: string): Promise<boolean> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntry(tx, internal);
       return node !== null;
     });
@@ -507,7 +507,7 @@ export class PgFileSystem extends FsBase {
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       return {
         ...this.statFromEntry(node),
@@ -518,7 +518,7 @@ export class PgFileSystem extends FsBase {
 
   async lstat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntry(tx, internal);
       if (!node)
         throw new FsError("ENOENT", "no such file or directory, lstat", path);
@@ -528,7 +528,7 @@ export class PgFileSystem extends FsBase {
 
   async realpath(path: string): Promise<string> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const resolved = await this.internalRealpath(tx, internal);
       return this.toUserPath(resolved);
     });
@@ -584,7 +584,7 @@ export class PgFileSystem extends FsBase {
 
   async readdir(path: string): Promise<string[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -595,7 +595,7 @@ export class PgFileSystem extends FsBase {
 
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -607,7 +607,7 @@ export class PgFileSystem extends FsBase {
 
   async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -619,7 +619,7 @@ export class PgFileSystem extends FsBase {
 
   async walk(path: string): Promise<WalkEntry[]> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
@@ -918,7 +918,7 @@ export class PgFileSystem extends FsBase {
 
   async readlink(path: string): Promise<string> {
     const internal = this.guardRead(path);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const node = await this.resolveEntry(tx, internal);
       if (!node)
         throw new FsError(
@@ -958,7 +958,7 @@ export class PgFileSystem extends FsBase {
     const scopePath = opts?.path ? normalizePath(opts.path) : "/";
     this.guardRead(scopePath);
     const internalScope = this.toInternalPath(scopePath);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const results = await fullTextSearch(
         tx,
@@ -981,7 +981,7 @@ export class PgFileSystem extends FsBase {
     const internalScope = this.toInternalPath(scopePath);
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const results = await semanticSearch(
         tx,
@@ -1009,7 +1009,7 @@ export class PgFileSystem extends FsBase {
     const internalScope = this.toInternalPath(scopePath);
     const embedding = await this.embed(query);
     validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const results = await hybridSearch(
         tx,
@@ -1037,7 +1037,7 @@ export class PgFileSystem extends FsBase {
     const internalScope = this.toInternalPath(queryScope);
     const queryPlan = analyzeGlobPattern(pattern, literalPrefix);
 
-    return this.withWorkspace(async (tx) => {
+    return this.withReadOnlyWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       const scopeLtree = pathToLtree(internalScope, this.workspaceId);
 

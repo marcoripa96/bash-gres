@@ -105,6 +105,14 @@ export class FsBase {
    * instance rather than the transient facade.
    */
   protected originInstance: this | null = null;
+  /**
+   * Lazily-built `SqlClient` that auto-injects `set_config('app.workspace_id',...)`
+   * and `set_config('statement_timeout',...)` as a CTE on every read query.
+   * Lets single-statement reads bypass the BEGIN/SET/COMMIT triplet — the
+   * `set_config(local=true)` calls take effect inside the implicit per-statement
+   * transaction so RLS and the timeout are still honored.
+   */
+  private cachedReadOnlyClient: SqlClient | null = null;
 
   constructor(options: PgFileSystemOptions) {
     const perms = {
@@ -199,6 +207,57 @@ export class FsBase {
       }
       throw e;
     }
+  }
+
+  /**
+   * Read-only variant of `withWorkspace`. When not inside an outer transaction,
+   * runs `fn` against a wrapper client that injects `set_config` for RLS and
+   * statement timeout as a CTE on every query — saving the BEGIN/SET/COMMIT
+   * round-trips that a normal `withWorkspace` would incur. Each query inside
+   * `fn` runs in its own implicit transaction; callers must not depend on
+   * cross-query snapshot atomicity (real filesystem reads aren't atomic across
+   * calls either).
+   */
+  protected async withReadOnlyWorkspace<T>(
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    try {
+      if (this.txClient) {
+        return await fn(this.txClient);
+      }
+      return await fn(this.getReadOnlyClient());
+    } catch (e) {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
+    }
+  }
+
+  private getReadOnlyClient(): SqlClient {
+    if (this.cachedReadOnlyClient) return this.cachedReadOnlyClient;
+    const inner = this.client;
+    const workspaceId = this.workspaceId;
+    const timeoutStr = String(this.statementTimeoutMs);
+    const wrap = (text: string, params: SqlParam[]): { sql: string; params: SqlParam[] } => {
+      const wsIdx = params.length + 1;
+      const toIdx = params.length + 2;
+      const setupCte = `_ws AS MATERIALIZED (SELECT set_config('app.workspace_id', $${wsIdx}, true) AS ws, set_config('statement_timeout', $${toIdx}, true) AS st)`;
+      const stripped = text.replace(/^[\s;]+/, "");
+      const withMatch = /^WITH(\s+RECURSIVE)?(\s+)/i.exec(stripped);
+      const wrappedText = withMatch
+        ? `WITH${withMatch[1] ?? ""}${withMatch[2]}${setupCte}, ${stripped.slice(withMatch[0].length)}`
+        : `WITH ${setupCte} ${stripped}`;
+      return { sql: wrappedText, params: [...params, workspaceId, timeoutStr] };
+    };
+    this.cachedReadOnlyClient = {
+      query: async (text, params = []) => {
+        const w = wrap(text, params);
+        return inner.query(w.sql, w.params);
+      },
+      transaction: inner.transaction.bind(inner),
+    };
+    return this.cachedReadOnlyClient;
   }
 
   /**
