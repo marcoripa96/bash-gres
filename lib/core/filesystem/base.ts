@@ -565,19 +565,30 @@ export class FsBase {
     }
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(posixPath, this.workspaceId);
+    // Flip: select entries at this exact path first (typically 1 row), then
+    // join to the descendant's ancestor closure to pick the nearest ancestor
+    // that owns it. The lateral form probes once per ancestor (O(chain_depth)
+    // GiST lookups); this form does a single path lookup plus an ordered
+    // closure scan with a cheap join filter, regardless of chain depth.
+    //
+    // The CTE is `MATERIALIZED` deliberately: under prepared-statement plan
+    // caching, postgres switches to a generic plan after ~5 executions, and
+    // its generic costing for the un-fenced shape inverts the join order
+    // (drives from ancestors, probes the path GiST 51× per read at depth 50).
+    // Materializing the path lookup keeps it as the build side of the join.
     const r = await tx.query<EntryRow>(
-      `SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type,
+                symlink_target, mode, size_bytes, mtime, created_at
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       )
+       SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
               e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
-       FROM version_ancestors a
-       INNER JOIN LATERAL (
-         SELECT * FROM fs_entries
-         WHERE workspace_id = $1
-           AND version_id = a.ancestor_id
-           AND path = $2::ltree
-         LIMIT 1
-       ) e ON true
-       WHERE a.workspace_id = $1
-         AND a.descendant_id = $3
+       FROM e
+       JOIN version_ancestors a
+         ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+       WHERE a.descendant_id = $3
        ORDER BY a.depth ASC
        LIMIT 1`,
       [this.workspaceId, lt, versionId],
@@ -625,24 +636,25 @@ export class FsBase {
 
     const versionId = await this.getCurrentVersionId(tx);
     const ltArray = lookups.map((l) => l.lt);
+    // DISTINCT ON (path) over an ordered scan picks the nearest-ancestor row
+    // per requested path. Same flip and same MATERIALIZED fence as
+    // resolveEntry — keep the path lookup as the build side of the join even
+    // under generic plan caching.
     const r = await tx.query<EntryRow>(
-      `SELECT e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type,
+                symlink_target, mode, size_bytes, mtime, created_at
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = ANY($2::ltree[])
+       )
+       SELECT DISTINCT ON (e.path)
+              e.workspace_id, e.version_id, e.path::text AS path, e.blob_hash,
               e.node_type, e.symlink_target, e.mode, e.size_bytes, e.mtime, e.created_at
-       FROM unnest($2::ltree[]) AS req(p)
-       INNER JOIN LATERAL (
-         SELECT e2.workspace_id, e2.version_id, e2.path, e2.blob_hash,
-                e2.node_type, e2.symlink_target, e2.mode, e2.size_bytes,
-                e2.mtime, e2.created_at
-         FROM version_ancestors a
-         INNER JOIN fs_entries e2
-           ON e2.workspace_id = $1
-          AND e2.version_id = a.ancestor_id
-          AND e2.path = req.p
-         WHERE a.workspace_id = $1
-           AND a.descendant_id = $3
-         ORDER BY a.depth ASC
-         LIMIT 1
-       ) e ON true`,
+       FROM e
+       JOIN version_ancestors a
+         ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+       WHERE a.descendant_id = $3
+       ORDER BY e.path, a.depth ASC`,
       [this.workspaceId, ltArray, versionId],
     );
     const ltToPosix = new Map<string, string>();

@@ -180,6 +180,9 @@ export class PgFileSystem extends FsBase {
 
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(internal, this.workspaceId);
+    // Same flip as resolveEntry, with the CTE materialized as a planner fence
+    // so prepared-statement plan caching can't invert the join order. The
+    // LEFT JOIN to fs_blobs runs once against the winning row (after LIMIT 1).
     const r = await tx.query<{
       path: string;
       blob_hash: Uint8Array | null;
@@ -189,28 +192,31 @@ export class PgFileSystem extends FsBase {
       blob_content: string | null;
       blob_binary_data: Uint8Array | null;
     }>(
-      `SELECT e.path::text AS path,
-              e.blob_hash,
-              e.node_type,
-              e.symlink_target,
-              e.size_bytes,
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type,
+                symlink_target, size_bytes
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.path, e.blob_hash, e.node_type, e.symlink_target, e.size_bytes
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.path::text AS path,
+              picked.blob_hash,
+              picked.node_type,
+              picked.symlink_target,
+              picked.size_bytes,
               b.content AS blob_content,
               b.binary_data AS blob_binary_data
-       FROM version_ancestors a
-       INNER JOIN LATERAL (
-         SELECT e2.path, e2.blob_hash, e2.node_type, e2.symlink_target, e2.size_bytes
-         FROM fs_entries e2
-         WHERE e2.workspace_id = $1
-           AND e2.version_id = a.ancestor_id
-           AND e2.path = $2::ltree
-         LIMIT 1
-       ) e ON true
+       FROM picked
        LEFT JOIN fs_blobs b
-         ON b.workspace_id = $1 AND b.hash = e.blob_hash
-       WHERE a.workspace_id = $1
-         AND a.descendant_id = $3
-       ORDER BY a.depth ASC
-       LIMIT 1`,
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
       [this.workspaceId, lt, versionId],
     );
 
