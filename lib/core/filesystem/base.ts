@@ -1289,7 +1289,7 @@ export class FsBase {
     );
   }
 
-  protected async moveVisibleSubtreeEntries(
+  protected async copyVisibleSubtreeEntries(
     tx: SqlClient,
     versionId: number,
     srcPosix: string,
@@ -1349,6 +1349,46 @@ export class FsBase {
          mtime = now()`,
       [...baseParams, ...exc.params],
     );
+  }
+
+  protected async countVisibleSubtreeNodes(
+    tx: SqlClient,
+    versionId: number,
+    rootPosix: string,
+  ): Promise<{ total: number; files: number }> {
+    const lt = pathToLtree(rootPosix, this.workspaceId);
+    const baseParams: SqlParam[] = [
+      this.workspaceId,
+      versionId,
+      lt,
+      TOMBSTONE,
+    ];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const r = await tx.query<{ total: number; files: number }>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path,
+           e.node_type
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           AND ${exc.sql}
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE node_type = 'file')::int AS files
+       FROM visible
+       WHERE node_type != $4`,
+      [...baseParams, ...exc.params],
+    );
+    return {
+      total: Number(r.rows[0]?.total ?? 0),
+      files: Number(r.rows[0]?.files ?? 0),
+    };
   }
 
   /**
@@ -1567,6 +1607,26 @@ export class FsBase {
           "illegal operation on a directory, cp",
           src,
         );
+      }
+      const existingDest = await this.resolveEntry(tx, dest);
+      if (!existingDest) {
+        await this.internalMkdir(tx, versionId, dest, { recursive: true });
+        const copied = await this.countVisibleSubtreeNodes(tx, versionId, src);
+        if (copied.total > this.maxCpNodes) {
+          throw new Error(
+            `cp: too many nodes (exceeds limit of ${this.maxCpNodes})`,
+          );
+        }
+        if (copied.files > 0) {
+          const currentCount = await this.globalVisibleCount(tx, versionId);
+          if (currentCount + copied.files > this.maxFiles) {
+            throw new Error(
+              `Node limit reached: ${this.maxFiles} nodes per workspace`,
+            );
+          }
+        }
+        await this.copyVisibleSubtreeEntries(tx, versionId, src, dest);
+        return;
       }
       await this.internalMkdir(tx, versionId, dest, { recursive: true });
       const children = await this.listVisibleChildren(tx, src);
