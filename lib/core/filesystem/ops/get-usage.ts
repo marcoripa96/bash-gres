@@ -11,7 +11,7 @@ export const getUsage = op(async (
     const scopeUser = options?.path ? normalizePath(options.path) : "/";
     ctx.guardRead(scopeUser);
     const scopeInternal = ctx.toInternalPath(scopeUser);
-    return ctx.withWorkspace(async (tx) => {
+    return ctx.withReadOnlyWorkspace(async (tx) => {
       const versionRootId = await ctx.getVersionRootId(tx);
       const versionId = await ctx.getCurrentVersionId(tx);
       const scopeLtree = pathToLtree(scopeInternal, ctx.workspaceId);

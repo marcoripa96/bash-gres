@@ -28,7 +28,7 @@ export const diffStream = op(async function* (
 
     let cursor: string | null = null;
     while (true) {
-      const { entries, lastLtree } = await ctx.withWorkspace(async (tx) => {
+      const { entries, lastLtree } = await ctx.withReadOnlyWorkspace(async (tx) => {
         const ourId = await ctx.getCurrentVersionId(tx);
         const theirId = await ctx.requireVersionIdByLabel(tx, other);
         const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);

@@ -28,7 +28,7 @@ export const diff = op(async (
     ctx.guardRead(scopeUser);
     const internalScope = ctx.toInternalPath(scopeUser);
 
-    return ctx.withWorkspace(async (tx) => {
+    return ctx.withReadOnlyWorkspace(async (tx) => {
       const ourId = await ctx.getCurrentVersionId(tx);
       const theirId = await ctx.requireVersionIdByLabel(tx, other);
       const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);

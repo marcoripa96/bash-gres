@@ -34,6 +34,7 @@ export interface FilesystemOpsContext<TFs> {
   ): { sql: string; params: SqlParam[] };
 
   withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
+  withReadOnlyWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
   transaction<T>(
     fn: (tx: TFs & FilesystemTransactionOps) => Promise<T>,
   ): Promise<T>;

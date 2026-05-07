@@ -69,6 +69,7 @@ export class PgFileSystem extends FsBase {
       buildExcludeClause: (pathExpr, nextParamIdx) =>
         self.buildExcludeClause(pathExpr, nextParamIdx),
       withWorkspace: (fn) => self.withWorkspace(fn),
+      withReadOnlyWorkspace: (fn) => self.withReadOnlyWorkspace(fn),
       transaction: (fn) => self.transaction(fn),
       getVersionRootId: (tx) => self.getVersionRootId(tx),
       getCurrentVersionId: (tx) => self.getCurrentVersionId(tx),
