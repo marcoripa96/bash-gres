@@ -59,6 +59,12 @@ export function ltreeToPath(ltree: string): string {
   return "/" + segments.map(decodeLabel).join("/");
 }
 
+export function ltreeFileName(ltree: string): string {
+  const idx = ltree.lastIndexOf(".");
+  if (idx === -1) return "/";
+  return decodeLabel(ltree.slice(idx + 1));
+}
+
 export function parentPath(posixPath: string): string {
   const parts = posixPath.split("/").filter(Boolean);
   if (parts.length <= 1) return "/";

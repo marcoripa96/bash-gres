@@ -16,6 +16,7 @@ import { readonlySqlClient } from "../readonly.js";
 import {
   pathToLtree,
   ltreeToPath,
+  ltreeFileName,
   normalizePath,
   parentPath,
   fileName,
@@ -729,6 +730,36 @@ export class FsBase {
     return r.rows;
   }
 
+  protected async listVisibleChildNames(
+    tx: SqlClient,
+    parentPosix: string,
+  ): Promise<string[]> {
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(parentPosix, this.workspaceId);
+    const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const r = await tx.query<{ path: string; node_type: string }>(
+      `WITH visible AS (
+         SELECT DISTINCT ON (e.path)
+           e.path::text AS path,
+           e.node_type
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           AND e.path != $3::ltree
+           AND nlevel(e.path) = nlevel($3::ltree) + 1
+           AND ${exc.sql}
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT path, node_type FROM visible WHERE node_type != $4 ORDER BY path`,
+      [...baseParams, ...exc.params],
+    );
+    return r.rows.map((row) => ltreeFileName(row.path));
+  }
+
   /**
    * Fetch every visible (non-tombstone) entry under `scopeLtree` for
    * `versionId`, keyed by internal POSIX path. Used by batch primitives
@@ -972,9 +1003,8 @@ export class FsBase {
   // -- Mappers ---------------------------------------------------------------
 
   protected mapDirChildToDirent(row: DirChildRow): DirentEntry {
-    const userPath = ltreeToPath(row.path);
     return {
-      name: fileName(userPath),
+      name: ltreeFileName(row.path),
       isFile: row.node_type === "file",
       isDirectory: row.node_type === "directory",
       isSymbolicLink: row.node_type === "symlink",
@@ -982,9 +1012,8 @@ export class FsBase {
   }
 
   protected mapDirChildToStatEntry(row: DirChildRow): DirentStatEntry {
-    const userPath = ltreeToPath(row.path);
     return {
-      name: fileName(userPath),
+      name: ltreeFileName(row.path),
       isFile: row.node_type === "file",
       isDirectory: row.node_type === "directory",
       isSymbolicLink: row.node_type === "symlink",

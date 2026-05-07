@@ -583,8 +583,7 @@ export class PgFileSystem extends FsBase {
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", path);
       const realPath = ltreeToPath(node.path);
-      const children = await this.listVisibleChildren(tx, realPath);
-      return children.map((c) => fileName(ltreeToPath(c.path)));
+      return this.listVisibleChildNames(tx, realPath);
     });
   }
 
