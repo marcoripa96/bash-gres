@@ -664,3 +664,91 @@ BENCH_LABEL=cow-redesign npm run bench
 | deleteVersion (1000 files, 100 edited) | elapsed | 8.28 ms |
 | readdir(/d) at depth 10, 100 files | median | 1.19 ms |
 | readdir(/d) at depth 10, 100 files | p95 | 1.43 ms |
+
+## after-readonly-readfile  _(2026-05-07T15:04:50.772Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 7.14 ms |
+| fork after 1000 files | fork() | 2.73 ms |
+| fork after 5000 files | fork() | 3.00 ms |
+| read at depth 1 | median | 0.61 ms |
+| read at depth 1 | p95 | 0.94 ms |
+| read at depth 5 | median | 0.64 ms |
+| read at depth 5 | p95 | 0.90 ms |
+| read at depth 25 | median | 0.60 ms |
+| read at depth 25 | p95 | 0.83 ms |
+| read at depth 50 | median | 0.59 ms |
+| read at depth 50 | p95 | 0.87 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.75 MiB -> 134.75 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.32 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.33 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.85 ms |
+
+## after-readonly-1  _(2026-05-07T15:08:10.004Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.69 ms |
+| fork after 1000 files | fork() | 2.34 ms |
+| fork after 5000 files | fork() | 2.44 ms |
+| read at depth 1 | median | 0.59 ms |
+| read at depth 1 | p95 | 0.89 ms |
+| read at depth 5 | median | 0.54 ms |
+| read at depth 5 | p95 | 0.65 ms |
+| read at depth 25 | median | 0.57 ms |
+| read at depth 25 | p95 | 0.72 ms |
+| read at depth 50 | median | 0.55 ms |
+| read at depth 50 | p95 | 0.69 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.66 MiB -> 134.66 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.89 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.07 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 2.60 ms |
+
+## after-readonly-2  _(2026-05-07T15:08:55.668Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 3.12 ms |
+| fork after 1000 files | fork() | 2.52 ms |
+| fork after 5000 files | fork() | 9.69 ms |
+| read at depth 1 | median | 0.55 ms |
+| read at depth 1 | p95 | 0.99 ms |
+| read at depth 5 | median | 0.54 ms |
+| read at depth 5 | p95 | 0.61 ms |
+| read at depth 25 | median | 0.51 ms |
+| read at depth 25 | p95 | 0.65 ms |
+| read at depth 50 | median | 0.52 ms |
+| read at depth 50 | p95 | 0.66 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.66 MiB -> 134.66 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.23 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.05 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.11 ms |
+
+## after-readonly-3  _(2026-05-07T15:09:39.343Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.73 ms |
+| fork after 1000 files | fork() | 2.64 ms |
+| fork after 5000 files | fork() | 21.52 ms |
+| read at depth 1 | median | 0.52 ms |
+| read at depth 1 | p95 | 0.63 ms |
+| read at depth 5 | median | 0.54 ms |
+| read at depth 5 | p95 | 0.67 ms |
+| read at depth 25 | median | 0.53 ms |
+| read at depth 25 | p95 | 0.63 ms |
+| read at depth 50 | median | 0.56 ms |
+| read at depth 50 | p95 | 0.83 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.64 MiB -> 134.64 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.35 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.06 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.42 ms |
