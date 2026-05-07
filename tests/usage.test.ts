@@ -158,6 +158,77 @@ describe.each(TEST_ADAPTERS)("workspace usage [%s]", (_name, factory) => {
     expect(usage.limits.maxWorkspaceBytes).toBe(5);
   });
 
+  it("enforces maxFiles strictly at the boundary", async () => {
+    // Tests the optimistic node-count cache: writes succeed up to the limit,
+    // and the next write fails. Exercises both the warm cache path (most
+    // writes skip COUNT) and the boundary fallback (the last few writes
+    // re-query the actual count).
+    const MAX = 20;
+    const limited = new PgFileSystem({
+      db: client,
+      workspaceId: "usage-workspace",
+      maxFiles: MAX,
+    });
+    await limited.init();
+
+    // The root directory entry counts as 1 toward the limit, so we can
+    // write MAX-1 files before refusing.
+    for (let i = 0; i < MAX - 1; i++) {
+      await limited.writeFile(`/f${i}.txt`, "x");
+    }
+
+    await expect(limited.writeFile(`/over.txt`, "y")).rejects.toThrow(
+      /Node limit reached/,
+    );
+    await expect(limited.exists(`/over.txt`)).resolves.toBe(false);
+
+    // After a refusal, removing a file should free a slot for the next
+    // write — confirms the cache doesn't permanently lock writes out.
+    await limited.rm(`/f0.txt`);
+    await limited.writeFile(`/recovered.txt`, "z");
+    await expect(limited.exists(`/recovered.txt`)).resolves.toBe(true);
+  });
+
+  it("recovers from cache drift after delete bursts", async () => {
+    // The cached node count never decrements, so after a large delete burst
+    // it overestimates the actual count. This test exercises that drift:
+    // we fill near `maxFiles`, empty the workspace, then refill — and
+    // confirm we can still use every available slot, that the next write
+    // past the limit still fails, and that the cache catches up to reality.
+    const MAX = 30;
+    const limited = new PgFileSystem({
+      db: client,
+      workspaceId: "usage-workspace",
+      maxFiles: MAX,
+    });
+    await limited.init();
+
+    // Phase 1: fill exactly to the limit (root + MAX-1 files). Cache
+    // reaches MAX.
+    for (let i = 0; i < MAX - 1; i++) {
+      await limited.writeFile(`/phase1-${i}.txt`, "x");
+    }
+
+    // Empty the workspace. Actual count drops back to 1, but the cache
+    // stays inflated because we deliberately don't decrement on rm.
+    for (let i = 0; i < MAX - 1; i++) {
+      await limited.rm(`/phase1-${i}.txt`);
+    }
+
+    // Phase 2: refill to the limit. The first write triggers a fallback
+    // `COUNT(*)` because the inflated cache is inside HEADROOM of MAX, so
+    // it re-syncs to reality. Every slot up to MAX should be writable.
+    for (let i = 0; i < MAX - 1; i++) {
+      await limited.writeFile(`/phase2-${i}.txt`, "x");
+    }
+
+    // One past the limit should still be refused.
+    await expect(limited.writeFile(`/over.txt`, "y")).rejects.toThrow(
+      /Node limit reached/,
+    );
+    await expect(limited.exists(`/over.txt`)).resolves.toBe(false);
+  });
+
   it("requires the current version to exist", async () => {
     const missing = new PgFileSystem({
       db: client,
