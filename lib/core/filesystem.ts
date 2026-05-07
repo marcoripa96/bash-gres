@@ -660,7 +660,13 @@ export class PgFileSystem extends FsBase {
       }
 
       if (srcEntry.node_type === "directory") {
-        await this.copyVisibleSubtreeEntries(tx, versionId, srcPath, destPath);
+        await this.copyVisibleSubtreeEntries(
+          tx,
+          versionId,
+          srcPath,
+          destPath,
+          true,
+        );
         await this.writeTombstonesForVisibleSubtree(
           tx,
           versionId,
