@@ -399,20 +399,84 @@ export class PgFileSystem extends FsBase {
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type === "directory")
-        throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, read",
-          path,
-        );
-      if (!node.blob_hash) return new Uint8Array(0);
-      const blob = await this.getBlob(tx, node.blob_hash);
-      if (!blob) return new Uint8Array(0);
-      if (blob.binary_data !== null) return blob.binary_data;
-      if (blob.content !== null) return new TextEncoder().encode(blob.content);
-      return new Uint8Array(0);
+      return this.internalReadFileBuffer(tx, internal, path);
     });
+  }
+
+  private async internalReadFileBuffer(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<Uint8Array> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    // Same fused entry+blob lookup as internalReadFile, but returning binary
+    // data alongside text so readFileBuffer can avoid the separate getBlob.
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      blob_hash: Uint8Array | null;
+      blob_content: string | null;
+      blob_binary_data: Uint8Array | null;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type,
+                symlink_target, size_bytes
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              picked.blob_hash,
+              b.content AS blob_content,
+              b.binary_data AS blob_binary_data
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      [this.workspaceId, lt, versionId],
+    );
+
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalReadFileBuffer(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+
+    if (!row.blob_hash) return new Uint8Array(0);
+    if (row.blob_binary_data !== null) return row.blob_binary_data;
+    if (row.blob_content !== null) return new TextEncoder().encode(row.blob_content);
+    return new Uint8Array(0);
   }
 
   async writeFile(
