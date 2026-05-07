@@ -28,22 +28,24 @@ import {
   type CompiledExcludes,
 } from "../exclude.js";
 import {
-  sha256,
-  TOMBSTONE,
+  DEFAULT_MAX_CP_NODES,
+  DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_FILE_SIZE,
   DEFAULT_MAX_FILES,
-  DEFAULT_MAX_DEPTH,
-  DEFAULT_STATEMENT_TIMEOUT_MS,
   DEFAULT_MAX_SYMLINK_DEPTH,
-  DEFAULT_MAX_CP_NODES,
+  DEFAULT_STATEMENT_TIMEOUT_MS,
   DEFAULT_VERSION,
-  type EntryRow,
-  type BlobRow,
-  type DirChildRow,
-  type SubtreeRow,
-  type VersionRootRow,
-  type InternalEntryShape,
-} from "./internals.js";
+  TOMBSTONE,
+} from "./internals/constants.js";
+import type { InternalEntryShape } from "./internals/entry-shapes.js";
+import { sha256 } from "./internals/hashes.js";
+import type {
+  BlobRow,
+  DirChildRow,
+  EntryRow,
+  SubtreeRow,
+  VersionRootRow,
+} from "./internals/rows.js";
 
 export class FsBase {
   protected client: SqlClient;

@@ -11,6 +11,7 @@ import type {
   ReadFileLinesOptions,
   ReadFileLinesResult,
   SearchResult,
+  PgFileSystemOptions,
 } from "./types.js";
 import { FsError } from "./types.js";
 import {
@@ -26,16 +27,105 @@ import {
   hybridSearch,
   validateEmbedding,
 } from "./search.js";
-import { FsOps } from "./filesystem/ops.js";
+import { FsBase } from "./filesystem/base.js";
+import { filesystemOpsContext } from "./filesystem/ops/context.js";
+import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
+import {
+  deleteVersionById,
+  installFilesystemOps,
+  type FilesystemOpsApi,
+} from "./filesystem/ops/index.js";
 import {
   encodeBasenameForLtree,
   globToRegex,
   globLiteralPrefix,
   analyzeGlobPattern,
-} from "./filesystem/internals.js";
+} from "./filesystem/internals/glob.js";
 import type { SqlParam } from "./types.js";
 
-export class PgFileSystem extends FsOps {
+export class PgFileSystem extends FsBase {
+  [filesystemOpsContext](): FilesystemOpsContext<this> {
+    const self = this;
+    return {
+      get workspaceId() {
+        return self.workspaceId;
+      },
+      get versionLabel() {
+        return self.versionLabel;
+      },
+      get maxFiles() {
+        return self.maxFiles;
+      },
+      get maxFileSize() {
+        return self.maxFileSize;
+      },
+      get maxWorkspaceBytes() {
+        return self.maxWorkspaceBytes;
+      },
+      guardRead: (userPath) => self.guardRead(userPath),
+      toInternalPath: (userPath) => self.toInternalPath(userPath),
+      toUserPath: (internalPath) => self.toUserPath(internalPath),
+      buildExcludeClause: (pathExpr, nextParamIdx) =>
+        self.buildExcludeClause(pathExpr, nextParamIdx),
+      withWorkspace: (fn) => self.withWorkspace(fn),
+      transaction: (fn) => self.transaction(fn),
+      getVersionRootId: (tx) => self.getVersionRootId(tx),
+      getCurrentVersionId: (tx) => self.getCurrentVersionId(tx),
+      requireVersionIdByLabel: (tx, label) =>
+        self.requireVersionIdByLabel(tx, label),
+      lockVersions: (tx, versionIds) => self.lockVersions(tx, versionIds),
+      findLCA: (tx, idA, idB) => self.findLCA(tx, idA, idB),
+      globalVisibleCount: (tx, versionId) =>
+        self.globalVisibleCount(tx, versionId),
+      fetchVisibleEntryMap: (tx, versionId, scopeLtree) =>
+        self.fetchVisibleEntryMap(tx, versionId, scopeLtree),
+      writeEntryShape: (tx, versionId, posixPath, shape) =>
+        self.writeEntryShape(tx, versionId, posixPath, shape),
+      createVersionedFilesystem: (internalPath, version, versionRootId) => {
+        const Ctor = self.constructor as new (
+          opts: PgFileSystemOptions,
+        ) => this;
+        const scoped = new Ctor({
+          ...self.baseOptions,
+          db: self.rawDb,
+          rootDir: internalPath,
+          versionRoot: internalPath,
+          version,
+        });
+        scoped.cachedVersionRootId = versionRootId;
+        if (self.txClient) {
+          scoped.txClient = self.txClient;
+          scoped.postCommitHooks = self.postCommitHooks;
+          scoped.originInstance = self.originInstance ?? self;
+        }
+        return scoped;
+      },
+      createForkedFilesystem: (newVersion) => {
+        const Ctor = self.constructor as new (
+          opts: PgFileSystemOptions,
+        ) => this;
+        const child = new Ctor({
+          ...self.baseOptions,
+          db: self.rawDb,
+          version: newVersion,
+        });
+        if (self.txClient) {
+          child.txClient = self.txClient;
+        }
+        return child;
+      },
+      setVersionLabelAfterRename: (label) => {
+        self.versionLabel = label;
+        if (self.txClient && self.originInstance && self.postCommitHooks) {
+          const origin = self.originInstance;
+          self.postCommitHooks.push(() => {
+            origin.versionLabel = label;
+          });
+        }
+      },
+    };
+  }
+
   async init(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
@@ -58,7 +148,7 @@ export class PgFileSystem extends FsOps {
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
-      await this.deleteVersionById(tx, versionId);
+      await deleteVersionById(this[filesystemOpsContext](), tx, versionId);
     });
     this.cachedVersionId = null;
   }
@@ -947,3 +1037,7 @@ export class PgFileSystem extends FsOps {
     });
   }
 }
+
+export interface PgFileSystem extends FilesystemOpsApi<PgFileSystem> {}
+
+installFilesystemOps(PgFileSystem.prototype);

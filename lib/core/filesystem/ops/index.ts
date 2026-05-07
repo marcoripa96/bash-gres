@@ -1,0 +1,17 @@
+export { cherryPick } from "./cherry-pick.js";
+export { deleteVersion } from "./delete-version.js";
+export { deleteVersionById } from "./delete-version-by-id.js";
+export { detach } from "./detach.js";
+export { diff } from "./diff.js";
+export { diffStream } from "./diff-stream.js";
+export { fetchDiff } from "./fetch-diff.js";
+export { fork } from "./fork.js";
+export { getUsage } from "./get-usage.js";
+export { installFilesystemOps } from "./install.js";
+export type { FilesystemOpsApi } from "./install.js";
+export { listVersions } from "./list-versions.js";
+export { merge } from "./merge.js";
+export { promoteTo } from "./promote-to.js";
+export { renameVersion } from "./rename-version.js";
+export { revert } from "./revert.js";
+export { versioned } from "./versioned.js";
