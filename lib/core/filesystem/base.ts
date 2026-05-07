@@ -1581,26 +1581,6 @@ export class FsBase {
     this.validateFileSize(content);
     this.validatePathDepth(path);
 
-    const parentPosix = parentPath(path);
-    const resolved = await this.resolveEntries(tx, [parentPosix, path]);
-    const parent = resolved.get(parentPosix) ?? null;
-    if (!parent)
-      throw new FsError("ENOENT", "no such file or directory, open", path);
-    if (parent.node_type !== "directory")
-      throw new FsError("ENOTDIR", "not a directory, open", path);
-
-    const existing = resolved.get(path) ?? null;
-    if (existing?.node_type === "directory")
-      throw new FsError(
-        "EISDIR",
-        "illegal operation on a directory, open",
-        path,
-      );
-
-    if (!existing) {
-      await this.validateNodeCount(tx);
-    }
-
     const isText = typeof content === "string";
     const bytes = isText
       ? new TextEncoder().encode(content)
@@ -1620,16 +1600,165 @@ export class FsBase {
       embedding = await this.maybeEmbed(tx, hash, content);
     }
 
-    await this.upsertFileBlobAndEntry(
-      tx,
-      versionId,
-      path,
-      hash,
-      content,
-      sizeBytes,
-      embedding,
-      0o644,
-    );
+    // Embedding writes still take the older two-step path because the blob
+    // INSERT shape differs (extra column, different ON CONFLICT projection)
+    // and re-using the fused statement would force everything through a
+    // CASE-laden query.
+    if (embedding !== null) {
+      const parentPosix = parentPath(path);
+      const resolved = await this.resolveEntries(tx, [parentPosix, path]);
+      const parent = resolved.get(parentPosix) ?? null;
+      if (!parent)
+        throw new FsError("ENOENT", "no such file or directory, open", path);
+      if (parent.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, open", path);
+      const existing = resolved.get(path) ?? null;
+      if (existing?.node_type === "directory")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, open",
+          path,
+        );
+      if (!existing) {
+        await this.validateNodeCount(tx);
+      }
+      await this.upsertFileBlobAndEntry(
+        tx,
+        versionId,
+        path,
+        hash,
+        content,
+        sizeBytes,
+        embedding,
+        0o644,
+      );
+      return;
+    }
+
+    // Workspace-byte quota check (no-op when maxWorkspaceBytes is unset).
+    // Runs before the fused query so a quota refusal never persists either
+    // the blob row or the entry row.
+    await this.validateWorkspaceBytes(tx, hash, sizeBytes, path);
+
+    // Optimistic node-count check: assume we'll insert. If the upsert turns
+    // out to be an overwrite (xmax != 0 in the entry RETURNING), undo the
+    // increment below. validateNodeCount() throws at the boundary; if it
+    // throws we never run the fused query.
+    await this.validateNodeCount(tx);
+
+    const parentPosix = parentPath(path);
+    const parentLt = pathToLtree(parentPosix, this.workspaceId);
+    const targetLt = pathToLtree(path, this.workspaceId);
+    const textContent = isText ? content : null;
+    const binaryData = isText ? null : (content as Uint8Array);
+    // Fuse parent existence + parent type + target type validation with
+    // the blob and entry upserts. Validation runs as CTEs whose result
+    // gates the two INSERTs via WHERE status='ok'; data-modifying CTEs
+    // execute exactly once but their SELECT-driven INSERT inserts zero
+    // rows when the gate fails. The entry RETURNING (xmax = 0) tells us
+    // whether this was an insert or an overwrite, so we can fix the
+    // optimistically-incremented node count for the overwrite case.
+    let result: { rows: Array<{ status: string; inserted: boolean | null }> };
+    try {
+      result = await tx.query<{ status: string; inserted: boolean | null }>(
+        `WITH lookups AS MATERIALIZED (
+           SELECT DISTINCT ON (e.path)
+             e.path AS path,
+             e.node_type
+           FROM fs_entries e
+           JOIN version_ancestors a
+             ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+           WHERE e.workspace_id = $1
+             AND e.path = ANY(ARRAY[$7::ltree, $8::ltree])
+             AND a.descendant_id = $6
+           ORDER BY e.path, a.depth ASC
+         ),
+         validation AS (
+           SELECT
+             CASE
+               WHEN COALESCE(
+                 (SELECT node_type FROM lookups WHERE path = $7::ltree),
+                 'missing'
+               ) IN ('missing', 'tombstone')
+                 THEN 'enoent'
+               WHEN (SELECT node_type FROM lookups WHERE path = $7::ltree) <> 'directory'
+                 THEN 'enotdir'
+               WHEN COALESCE(
+                 (SELECT node_type FROM lookups WHERE path = $8::ltree),
+                 ''
+               ) = 'directory'
+                 THEN 'eisdir'
+               ELSE 'ok'
+             END AS status
+         ),
+         blob_upsert AS (
+           INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
+           SELECT $1, $2, $3, $4, $5
+           FROM validation WHERE status = 'ok'
+           ON CONFLICT (workspace_id, hash) DO NOTHING
+           RETURNING 1
+         ),
+         entry_upsert AS (
+           INSERT INTO fs_entries
+             (workspace_id, version_id, path, blob_hash, node_type,
+              symlink_target, mode, size_bytes, mtime)
+           SELECT $1, $6, $8::ltree, $2, 'file', NULL, $9, $5, now()
+           FROM validation WHERE status = 'ok'
+           ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+             blob_hash = EXCLUDED.blob_hash,
+             node_type = EXCLUDED.node_type,
+             symlink_target = EXCLUDED.symlink_target,
+             mode = EXCLUDED.mode,
+             size_bytes = EXCLUDED.size_bytes,
+             mtime = now()
+           RETURNING (xmax = 0) AS inserted
+         )
+         SELECT validation.status,
+                (SELECT inserted FROM entry_upsert) AS inserted
+         FROM validation`,
+        [
+          this.workspaceId,
+          hash,
+          textContent,
+          binaryData,
+          sizeBytes,
+          versionId,
+          parentLt,
+          targetLt,
+          0o644,
+        ],
+      );
+    } catch (e) {
+      this.decrementCachedNodeCount();
+      throw e;
+    }
+
+    const row = result.rows[0]!;
+    if (row.status !== "ok") {
+      this.decrementCachedNodeCount();
+      if (row.status === "enoent")
+        throw new FsError("ENOENT", "no such file or directory, open", path);
+      if (row.status === "enotdir")
+        throw new FsError("ENOTDIR", "not a directory, open", path);
+      if (row.status === "eisdir")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, open",
+          path,
+        );
+      throw new Error(`internalWriteFile: unexpected status '${row.status}'`);
+    }
+    if (row.inserted === false) {
+      // Overwrite — actual node count didn't change. Undo the optimistic
+      // increment so the cache stays accurate.
+      this.decrementCachedNodeCount();
+    }
+  }
+
+  private decrementCachedNodeCount(): void {
+    if (this.cachedNodeCount !== null && this.cachedNodeCount > 0) {
+      this.cachedNodeCount--;
+    }
   }
 
   protected async blobsHasEmbedding(tx: SqlClient): Promise<boolean> {
