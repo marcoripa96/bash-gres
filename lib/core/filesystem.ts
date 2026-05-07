@@ -35,6 +35,7 @@ import {
   installFilesystemOps,
   type FilesystemOpsApi,
 } from "./filesystem/ops/index.js";
+import { isExcluded } from "./exclude.js";
 import {
   encodeBasenameForLtree,
   globToRegex,
@@ -163,31 +164,94 @@ export class PgFileSystem extends FsBase {
   ): Promise<string> {
     const internal = this.guardRead(path);
     return this.withWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type === "directory")
-        throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, read",
-          path,
-        );
-
-      const size = Number(node.size_bytes);
-      if (this.maxReadSize !== undefined && size > this.maxReadSize) {
-        throw new FsError(
-          "E2BIG",
-          `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFileRange with { offset, limit } to read in chunks`,
-          path,
-        );
-      }
-
-      if (!node.blob_hash) return "";
-      const blob = await this.getBlob(tx, node.blob_hash);
-      if (!blob) return "";
-      if (blob.content !== null) return blob.content;
-      if (blob.binary_data !== null)
-        return new TextDecoder().decode(blob.binary_data);
-      return "";
+      return this.internalReadFile(tx, internal, path);
     });
+  }
+
+  private async internalReadFile(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<string> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const r = await tx.query<{
+      path: string;
+      blob_hash: Uint8Array | null;
+      node_type: string;
+      symlink_target: string | null;
+      size_bytes: number | string;
+      blob_content: string | null;
+      blob_binary_data: Uint8Array | null;
+    }>(
+      `SELECT e.path::text AS path,
+              e.blob_hash,
+              e.node_type,
+              e.symlink_target,
+              e.size_bytes,
+              b.content AS blob_content,
+              b.binary_data AS blob_binary_data
+       FROM version_ancestors a
+       INNER JOIN LATERAL (
+         SELECT e2.path, e2.blob_hash, e2.node_type, e2.symlink_target, e2.size_bytes
+         FROM fs_entries e2
+         WHERE e2.workspace_id = $1
+           AND e2.version_id = a.ancestor_id
+           AND e2.path = $2::ltree
+         LIMIT 1
+       ) e ON true
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = e.blob_hash
+       WHERE a.workspace_id = $1
+         AND a.descendant_id = $3
+       ORDER BY a.depth ASC
+       LIMIT 1`,
+      [this.workspaceId, lt, versionId],
+    );
+
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalReadFile(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+
+    const size = Number(row.size_bytes);
+    if (this.maxReadSize !== undefined && size > this.maxReadSize) {
+      throw new FsError(
+        "E2BIG",
+        `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFileRange with { offset, limit } to read in chunks`,
+        userPath,
+      );
+    }
+
+    if (!row.blob_hash) return "";
+    if (row.blob_content !== null) return row.blob_content;
+    if (row.blob_binary_data !== null) {
+      return new TextDecoder().decode(row.blob_binary_data);
+    }
+    return "";
   }
 
   async readFileRange(
