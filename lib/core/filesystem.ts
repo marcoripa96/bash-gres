@@ -576,13 +576,12 @@ export class PgFileSystem extends FsBase {
           throw new FsError("ENOTEMPTY", "directory not empty, rm", path);
         }
         if (options?.recursive) {
-          const subtree = await this.listVisibleSubtree(tx, internal, true);
-          // Tombstone all visible paths (including root) at current version.
-          // Order doesn't matter because tombstones don't reference each other.
-          for (const row of subtree) {
-            const userPath = ltreeToPath(row.path);
-            await this.writeTombstone(tx, versionId, userPath);
-          }
+          await this.writeTombstonesForVisibleSubtree(
+            tx,
+            versionId,
+            internal,
+            true,
+          );
           return;
         }
       }

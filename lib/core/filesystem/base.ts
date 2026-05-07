@@ -1244,6 +1244,51 @@ export class FsBase {
     );
   }
 
+  protected async writeTombstonesForVisibleSubtree(
+    tx: SqlClient,
+    versionId: number,
+    rootPosix: string,
+    includeRoot: boolean,
+  ): Promise<void> {
+    const lt = pathToLtree(rootPosix, this.workspaceId);
+    const filter = includeRoot ? "" : "AND e.path != $3::ltree";
+    const baseParams: SqlParam[] = [
+      this.workspaceId,
+      versionId,
+      lt,
+      TOMBSTONE,
+    ];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    await tx.query(
+      `INSERT INTO fs_entries
+         (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
+       SELECT $1, $2, visible.path, NULL, $4, 0, 0, now()
+       FROM (
+         SELECT DISTINCT ON (e.path)
+           e.path,
+           e.node_type
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           ${filter}
+           AND ${exc.sql}
+         ORDER BY e.path, a.depth ASC
+       ) visible
+       WHERE visible.node_type != $4
+       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+         blob_hash = NULL,
+         node_type = $4,
+         symlink_target = NULL,
+         mode = 0,
+         size_bytes = 0,
+         mtime = now()`,
+      [...baseParams, ...exc.params],
+    );
+  }
+
   /**
    * Apply a pre-fetched entry shape to the destination version's `fs_entries`.
    * Used by batch operations (merge, cherry-pick, revert, detach) to copy
