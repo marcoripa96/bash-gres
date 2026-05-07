@@ -267,51 +267,95 @@ export class PgFileSystem extends FsBase {
   ): Promise<string> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type === "directory")
-        throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, read",
-          path,
-        );
-      if (!node.blob_hash) return "";
-
-      const sqlOffset = (options?.offset ?? 0) + 1;
-      const sqlLimit = options?.limit;
-
-      const textExpr =
-        sqlLimit !== undefined ? `substr(content, $3, $4)` : `substr(content, $3)`;
-      const binaryExpr =
-        sqlLimit !== undefined
-          ? `substring(binary_data FROM $3 FOR $4)`
-          : `substring(binary_data FROM $3)`;
-
-      const params: (string | number | Uint8Array)[] = [
-        this.workspaceId,
-        node.blob_hash,
-        sqlOffset,
-      ];
-      if (sqlLimit !== undefined) params.push(sqlLimit);
-
-      const result = await tx.query<{
-        chunk_text: string | null;
-        chunk_binary: Uint8Array | null;
-      }>(
-        `SELECT ${textExpr} AS chunk_text,
-                ${binaryExpr} AS chunk_binary
-         FROM fs_blobs
-         WHERE workspace_id = $1 AND hash = $2
-         LIMIT 1`,
-        params,
-      );
-
-      const chunk = result.rows[0];
-      if (!chunk) return "";
-      if (chunk.chunk_text !== null) return chunk.chunk_text;
-      if (chunk.chunk_binary !== null)
-        return new TextDecoder().decode(chunk.chunk_binary);
-      return "";
+      return this.internalReadFileRange(tx, internal, path, options);
     });
+  }
+
+  private async internalReadFileRange(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    options?: ReadFileRangeOptions,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<string> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const sqlOffset = (options?.offset ?? 0) + 1;
+    const sqlLimit = options?.limit;
+    const hasLimit = sqlLimit !== undefined;
+    // $1 workspace_id, $2 path, $3 versionId, $4 offset, [$5 limit]
+    const textExpr = hasLimit ? `substr(b.content, $4, $5)` : `substr(b.content, $4)`;
+    const binaryExpr = hasLimit
+      ? `substring(b.binary_data FROM $4 FOR $5)`
+      : `substring(b.binary_data FROM $4)`;
+    const params: SqlParam[] = [this.workspaceId, lt, versionId, sqlOffset];
+    if (hasLimit) params.push(sqlLimit);
+    // Same fused path-anchored CTE as readFile, but the blob join projects a
+    // computed slice instead of the whole content.
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      blob_hash: Uint8Array | null;
+      chunk_text: string | null;
+      chunk_binary: Uint8Array | null;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type, symlink_target
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              picked.blob_hash,
+              ${textExpr} AS chunk_text,
+              ${binaryExpr} AS chunk_binary
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      params,
+    );
+
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalReadFileRange(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        options,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+
+    if (!row.blob_hash) return "";
+    if (row.chunk_text !== null) return row.chunk_text;
+    if (row.chunk_binary !== null) return new TextDecoder().decode(row.chunk_binary);
+    return "";
   }
 
   async readFileLines(
