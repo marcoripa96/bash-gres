@@ -1289,6 +1289,68 @@ export class FsBase {
     );
   }
 
+  protected async moveVisibleSubtreeEntries(
+    tx: SqlClient,
+    versionId: number,
+    srcPosix: string,
+    destPosix: string,
+  ): Promise<void> {
+    const srcLt = pathToLtree(srcPosix, this.workspaceId);
+    const destLt = pathToLtree(destPosix, this.workspaceId);
+    const baseParams: SqlParam[] = [
+      this.workspaceId,
+      versionId,
+      srcLt,
+      destLt,
+      TOMBSTONE,
+    ];
+    const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    await tx.query(
+      `INSERT INTO fs_entries
+         (workspace_id, version_id, path, blob_hash, node_type,
+          symlink_target, mode, size_bytes, mtime)
+       SELECT
+         $1,
+         $2,
+         CASE
+           WHEN visible.path = $3::ltree THEN $4::ltree
+           ELSE $4::ltree || subpath(visible.path, nlevel($3::ltree))
+         END,
+         visible.blob_hash,
+         visible.node_type,
+         visible.symlink_target,
+         visible.mode,
+         visible.size_bytes,
+         now()
+       FROM (
+         SELECT DISTINCT ON (e.path)
+           e.path,
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes
+         FROM fs_entries e
+         JOIN version_ancestors a
+           ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+         WHERE e.workspace_id = $1
+           AND a.descendant_id = $2
+           AND e.path <@ $3::ltree
+           AND ${exc.sql}
+         ORDER BY e.path, a.depth ASC
+       ) visible
+       WHERE visible.node_type != $5
+       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+         blob_hash = EXCLUDED.blob_hash,
+         node_type = EXCLUDED.node_type,
+         symlink_target = EXCLUDED.symlink_target,
+         mode = EXCLUDED.mode,
+         size_bytes = EXCLUDED.size_bytes,
+         mtime = now()`,
+      [...baseParams, ...exc.params],
+    );
+  }
+
   /**
    * Apply a pre-fetched entry shape to the destination version's `fs_entries`.
    * Used by batch operations (merge, cherry-pick, revert, detach) to copy

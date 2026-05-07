@@ -660,29 +660,13 @@ export class PgFileSystem extends FsBase {
       }
 
       if (srcEntry.node_type === "directory") {
-        // Move all visible descendants: tombstone each old path, insert new entry at translated path.
-        const subtree = await this.listVisibleSubtree(tx, srcPath, true);
-        // Insert new entries first, then tombstone old paths. Order matters
-        // because src and dest may overlap (already guarded above, but be safe).
-        for (const row of subtree) {
-          const oldPath = ltreeToPath(row.path);
-          const suffix = oldPath === srcPath ? "" : oldPath.slice(srcPath.length);
-          const newPath = destPath + suffix;
-          await this.upsertEntry(
-            tx,
-            versionId,
-            newPath,
-            row.node_type,
-            row.blob_hash,
-            Number(row.size_bytes),
-            row.mode,
-            row.symlink_target,
-          );
-        }
-        for (const row of subtree) {
-          const oldPath = ltreeToPath(row.path);
-          await this.writeTombstone(tx, versionId, oldPath);
-        }
+        await this.moveVisibleSubtreeEntries(tx, versionId, srcPath, destPath);
+        await this.writeTombstonesForVisibleSubtree(
+          tx,
+          versionId,
+          srcPath,
+          true,
+        );
       } else {
         // single-file or symlink: insert at dest with same blob_hash/symlink_target
         await this.upsertEntry(
