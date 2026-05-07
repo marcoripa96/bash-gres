@@ -363,81 +363,133 @@ export class PgFileSystem extends FsBase {
     options?: ReadFileLinesOptions,
   ): Promise<ReadFileLinesResult> {
     const internal = this.guardRead(path);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type === "directory")
-        throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, read",
-          path,
-        );
-
-      const start = options?.offset ?? 1;
-      if (start < 1)
-        throw new FsError(
-          "EINVAL",
-          `readFileLines: offset must be >= 1 (got ${start})`,
-          path,
-        );
-      const limit = options?.limit;
-      if (limit !== undefined && limit < 1)
-        throw new FsError(
-          "EINVAL",
-          `readFileLines: limit must be >= 1 (got ${limit})`,
-          path,
-        );
-      const end = limit !== undefined ? start + limit - 1 : null;
-
-      if (!node.blob_hash) return { content: "", total: 0 };
-
-      const sliceExpr = end !== null ? "lines[$3:$4]" : "lines[$3:]";
-      const params: (string | number | Uint8Array)[] = [
-        this.workspaceId,
-        node.blob_hash,
-        start,
-      ];
-      if (end !== null) params.push(end);
-
-      const result = await tx.query<{
-        chunk: string | null;
-        total: number | null;
-        is_binary: boolean;
-      }>(
-        `WITH raw AS (
-           SELECT string_to_array(content, E'\n') AS arr,
-                  (content LIKE '%' || E'\n') AS has_trail,
-                  (content IS NULL AND binary_data IS NOT NULL) AS is_binary
-           FROM fs_blobs
-           WHERE workspace_id = $1 AND hash = $2
-         ),
-         parts AS (
-           SELECT
-             CASE
-               WHEN has_trail AND array_length(arr, 1) IS NOT NULL
-                 THEN arr[1:array_length(arr, 1) - 1]
-               ELSE arr
-             END AS lines,
-             is_binary
-           FROM raw
-         )
-         SELECT array_to_string(${sliceExpr}, E'\n') AS chunk,
-                coalesce(array_length(lines, 1), 0) AS total,
-                is_binary
-         FROM parts`,
-        params,
+    const start = options?.offset ?? 1;
+    if (start < 1)
+      throw new FsError(
+        "EINVAL",
+        `readFileLines: offset must be >= 1 (got ${start})`,
+        path,
       );
-
-      const row = result.rows[0];
-      if (!row) return { content: "", total: 0 };
-      if (row.is_binary) {
-        throw new FsError(
-          "EINVAL",
-          "readFileLines is text-only; use readFileRange for binary files",
-          path,
-        );
-      }
-      return { content: row.chunk ?? "", total: row.total ?? 0 };
+    const limit = options?.limit;
+    if (limit !== undefined && limit < 1)
+      throw new FsError(
+        "EINVAL",
+        `readFileLines: limit must be >= 1 (got ${limit})`,
+        path,
+      );
+    return this.withReadOnlyWorkspace(async (tx) => {
+      return this.internalReadFileLines(tx, internal, path, start, limit);
     });
+  }
+
+  private async internalReadFileLines(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    start: number,
+    limit: number | undefined,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<ReadFileLinesResult> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const end = limit !== undefined ? start + limit - 1 : null;
+    // $1 workspace_id, $2 path, $3 versionId, $4 start, [$5 end]
+    const sliceExpr = end !== null ? "lines[$4:$5]" : "lines[$4:]";
+    const params: SqlParam[] = [this.workspaceId, lt, versionId, start];
+    if (end !== null) params.push(end);
+
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      blob_hash: Uint8Array | null;
+      chunk: string | null;
+      total: number | null;
+      is_binary: boolean | null;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type, symlink_target
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       ),
+       blob AS (
+         SELECT b.content, b.binary_data
+         FROM picked
+         LEFT JOIN fs_blobs b
+           ON b.workspace_id = $1 AND b.hash = picked.blob_hash
+       ),
+       raw AS (
+         SELECT string_to_array(content, E'\n') AS arr,
+                (content LIKE '%' || E'\n') AS has_trail,
+                (content IS NULL AND binary_data IS NOT NULL) AS is_binary
+         FROM blob
+       ),
+       parts AS (
+         SELECT
+           CASE
+             WHEN has_trail AND array_length(arr, 1) IS NOT NULL
+               THEN arr[1:array_length(arr, 1) - 1]
+             ELSE arr
+           END AS lines,
+           is_binary
+         FROM raw
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              picked.blob_hash,
+              array_to_string(${sliceExpr}, E'\n') AS chunk,
+              coalesce(array_length(lines, 1), 0) AS total,
+              is_binary
+       FROM picked
+       LEFT JOIN parts ON true`,
+      params,
+    );
+
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalReadFileLines(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        start,
+        limit,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+    if (!row.blob_hash) return { content: "", total: 0 };
+    if (row.is_binary) {
+      throw new FsError(
+        "EINVAL",
+        "readFileLines is text-only; use readFileRange for binary files",
+        userPath,
+      );
+    }
+    return { content: row.chunk ?? "", total: row.total ?? 0 };
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
