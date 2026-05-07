@@ -1640,24 +1640,83 @@ export class FsBase {
     // the blob row or the entry row.
     await this.validateWorkspaceBytes(tx, hash, sizeBytes, path);
 
+    const parentPosix = parentPath(path);
+    const textContent = isText ? content : null;
+    const binaryData = isText ? null : (content as Uint8Array);
+
+    // First attempt: skip mkdir entirely. The fused query validates the
+    // parent itself and reports 'enoent' if missing — at which point we
+    // create the parent and retry. The hot path (parent already exists)
+    // avoids the wasted resolveEntry that internalMkdir(parent, recursive)
+    // would otherwise issue.
+    let outcome = await this.attemptFusedWrite(
+      tx,
+      versionId,
+      path,
+      parentPosix,
+      hash,
+      textContent,
+      binaryData,
+      sizeBytes,
+    );
+
+    if (outcome.status === "enoent" && parentPosix !== "/") {
+      // Parent missing — create it then retry. The retry's validateNodeCount
+      // increment is paired with the same decrement-on-failure semantics.
+      await this.internalMkdir(tx, versionId, parentPosix, { recursive: true });
+      outcome = await this.attemptFusedWrite(
+        tx,
+        versionId,
+        path,
+        parentPosix,
+        hash,
+        textContent,
+        binaryData,
+        sizeBytes,
+      );
+    }
+
+    if (outcome.status !== "ok") {
+      if (outcome.status === "enoent")
+        throw new FsError("ENOENT", "no such file or directory, open", path);
+      if (outcome.status === "enotdir")
+        throw new FsError("ENOTDIR", "not a directory, open", path);
+      if (outcome.status === "eisdir")
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, open",
+          path,
+        );
+      throw new Error(`internalWriteFile: unexpected status '${outcome.status}'`);
+    }
+  }
+
+  /**
+   * Run the fused validation+blob+entry upsert and return the status without
+   * throwing. Manages the optimistic node-count cache: increments before the
+   * write, decrements on validation failure, on overwrite (xmax != 0), or
+   * on SQL error. Caller is responsible for translating a non-'ok' status
+   * into an `FsError`.
+   */
+  private async attemptFusedWrite(
+    tx: SqlClient,
+    versionId: number,
+    path: string,
+    parentPosix: string,
+    hash: Uint8Array,
+    textContent: string | null,
+    binaryData: Uint8Array | null,
+    sizeBytes: number,
+  ): Promise<{ status: string; inserted: boolean | null }> {
+    const parentLt = pathToLtree(parentPosix, this.workspaceId);
+    const targetLt = pathToLtree(path, this.workspaceId);
+
     // Optimistic node-count check: assume we'll insert. If the upsert turns
-    // out to be an overwrite (xmax != 0 in the entry RETURNING), undo the
+    // out to be an overwrite (xmax != 0) or fails validation we undo the
     // increment below. validateNodeCount() throws at the boundary; if it
     // throws we never run the fused query.
     await this.validateNodeCount(tx);
 
-    const parentPosix = parentPath(path);
-    const parentLt = pathToLtree(parentPosix, this.workspaceId);
-    const targetLt = pathToLtree(path, this.workspaceId);
-    const textContent = isText ? content : null;
-    const binaryData = isText ? null : (content as Uint8Array);
-    // Fuse parent existence + parent type + target type validation with
-    // the blob and entry upserts. Validation runs as CTEs whose result
-    // gates the two INSERTs via WHERE status='ok'; data-modifying CTEs
-    // execute exactly once but their SELECT-driven INSERT inserts zero
-    // rows when the gate fails. The entry RETURNING (xmax = 0) tells us
-    // whether this was an insert or an overwrite, so we can fix the
-    // optimistically-incremented node count for the overwrite case.
     let result: { rows: Array<{ status: string; inserted: boolean | null }> };
     try {
       result = await tx.query<{ status: string; inserted: boolean | null }>(
@@ -1734,25 +1793,13 @@ export class FsBase {
     }
 
     const row = result.rows[0]!;
-    if (row.status !== "ok") {
-      this.decrementCachedNodeCount();
-      if (row.status === "enoent")
-        throw new FsError("ENOENT", "no such file or directory, open", path);
-      if (row.status === "enotdir")
-        throw new FsError("ENOTDIR", "not a directory, open", path);
-      if (row.status === "eisdir")
-        throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, open",
-          path,
-        );
-      throw new Error(`internalWriteFile: unexpected status '${row.status}'`);
-    }
-    if (row.inserted === false) {
-      // Overwrite — actual node count didn't change. Undo the optimistic
-      // increment so the cache stays accurate.
+    if (row.status !== "ok" || row.inserted === false) {
+      // Either validation rejected the write or it turned into an overwrite.
+      // Either way, no new entry actually landed — undo the optimistic
+      // increment so the cached count stays accurate.
       this.decrementCachedNodeCount();
     }
+    return row;
   }
 
   private decrementCachedNodeCount(): void {

@@ -584,10 +584,11 @@ export class PgFileSystem extends FsBase {
     this.guardExcludedWrite(internal, "open", path);
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
-      const parent = parentPath(internal);
-      if (parent !== "/") {
-        await this.internalMkdir(tx, versionId, parent, { recursive: true });
-      }
+      // internalWriteFile handles missing-parent recovery itself: it tries
+      // the fused upsert first, and if validation reports the parent is
+      // missing it runs internalMkdir(parent, recursive: true) and retries.
+      // Skipping the unconditional mkdir here saves a round-trip on the hot
+      // path (parent already exists).
       await this.internalWriteFile(tx, versionId, internal, content);
     });
   }
