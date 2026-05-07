@@ -55,6 +55,11 @@ export interface FilesystemOpsContext<TFs> {
     posixPath: string,
     shape: InternalEntryShape | null,
   ): Promise<void>;
+  writeEntryShapes(
+    tx: SqlClient,
+    versionId: number,
+    writes: Array<{ internalPath: string; shape: InternalEntryShape | null }>,
+  ): Promise<void>;
 
   createVersionedFilesystem(
     internalPath: string,

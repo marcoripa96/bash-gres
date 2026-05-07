@@ -117,9 +117,7 @@ export const cherryPick = op(async (
         : a.internalPath > b.internalPath ? 1
         : 0,
       );
-      for (const w of writes) {
-        await ctx.writeEntryShape(tx, ourId, w.internalPath, w.shape);
-      }
+      await ctx.writeEntryShapes(tx, ourId, writes);
 
       return { applied, conflicts: [], skipped };
     });

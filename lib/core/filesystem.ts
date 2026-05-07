@@ -81,6 +81,8 @@ export class PgFileSystem extends FsBase {
         self.fetchVisibleEntryMap(tx, versionId, scopeLtree),
       writeEntryShape: (tx, versionId, posixPath, shape) =>
         self.writeEntryShape(tx, versionId, posixPath, shape),
+      writeEntryShapes: (tx, versionId, writes) =>
+        self.writeEntryShapes(tx, versionId, writes),
       createVersionedFilesystem: (internalPath, version, versionRootId) => {
         const Ctor = self.constructor as new (
           opts: PgFileSystemOptions,

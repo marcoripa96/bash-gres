@@ -1422,6 +1422,55 @@ export class FsBase {
     );
   }
 
+  protected async writeEntryShapes(
+    tx: SqlClient,
+    versionId: number,
+    writes: Array<{ internalPath: string; shape: InternalEntryShape | null }>,
+  ): Promise<void> {
+    if (writes.length === 0) return;
+
+    const CHUNK_SIZE = 4000;
+    for (let start = 0; start < writes.length; start += CHUNK_SIZE) {
+      const chunk = writes.slice(start, start + CHUNK_SIZE);
+      const params: SqlParam[] = [this.workspaceId, versionId];
+      const values: string[] = [];
+      for (const w of chunk) {
+        const shape = w.shape;
+        const idx = params.length + 1;
+        values.push(
+          `($${idx}::ltree, $${idx + 1}::bytea, $${idx + 2}::text, $${idx + 3}::text, $${idx + 4}::int, $${idx + 5}::bigint)`,
+        );
+        params.push(
+          pathToLtree(w.internalPath, this.workspaceId),
+          shape?.blobHash ?? null,
+          shape?.type ?? TOMBSTONE,
+          shape?.symlinkTarget ?? null,
+          shape?.mode ?? 0,
+          shape?.sizeBytes ?? 0,
+        );
+      }
+
+      await tx.query(
+        `WITH input(path, blob_hash, node_type, symlink_target, mode, size_bytes) AS (
+           VALUES ${values.join(", ")}
+         )
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         SELECT $1, $2, path, blob_hash, node_type, symlink_target, mode, size_bytes, now()
+         FROM input
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = EXCLUDED.blob_hash,
+           node_type = EXCLUDED.node_type,
+           symlink_target = EXCLUDED.symlink_target,
+           mode = EXCLUDED.mode,
+           size_bytes = EXCLUDED.size_bytes,
+           mtime = now()`,
+        params,
+      );
+    }
+  }
+
   protected async internalWriteFile(
     tx: SqlClient,
     versionId: number,
