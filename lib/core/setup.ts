@@ -106,9 +106,9 @@ CREATE INDEX IF NOT EXISTS idx_fs_entries_path_gist
 CREATE INDEX IF NOT EXISTS idx_fs_entries_blob_hash
   ON fs_entries (workspace_id, blob_hash) WHERE blob_hash IS NOT NULL;
 
--- Closure: ordered nearest-ancestor scan
-CREATE INDEX IF NOT EXISTS idx_version_ancestors_depth
-  ON version_ancestors (workspace_id, descendant_id, depth);
+-- Closure: ordered nearest-ancestor scan with ancestor_id available from the index
+CREATE INDEX IF NOT EXISTS idx_version_ancestors_depth_cover
+  ON version_ancestors (workspace_id, descendant_id, depth, ancestor_id);
 
 -- Closure reverse: descendants of a version (refusal checks, subtree delete)
 CREATE INDEX IF NOT EXISTS idx_version_ancestors_reverse

@@ -104,10 +104,11 @@ function buildAncestors() {
       primaryKey({
         columns: [table.workspaceId, table.descendantId, table.ancestorId],
       }),
-      index("idx_version_ancestors_depth").on(
+      index("idx_version_ancestors_depth_cover").on(
         table.workspaceId,
         table.descendantId,
         table.depth,
+        table.ancestorId,
       ),
       index("idx_version_ancestors_reverse").on(
         table.workspaceId,
