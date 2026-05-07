@@ -1,4 +1,4 @@
-import type { SqlClient } from "../../types.js";
+import type { SqlClient, SqlParam } from "../../types.js";
 import { bytesKey } from "../internals/hashes.js";
 import { op } from "./context.js";
 
@@ -53,15 +53,25 @@ export const deleteVersionById = op(async (
 
     if (candidates.size > 0) {
       // GC orphan blobs: only those previously owned by this version and now unreferenced.
-      for (const hash of candidates.values()) {
+      const hashes = [...candidates.values()];
+      const CHUNK_SIZE = 8000;
+      for (let start = 0; start < hashes.length; start += CHUNK_SIZE) {
+        const chunk = hashes.slice(start, start + CHUNK_SIZE);
+        const params: SqlParam[] = [ctx.workspaceId, ...chunk];
+        const values = chunk
+          .map((_, i) => `($${i + 2}::bytea)`)
+          .join(", ");
         await tx.query(
-          `DELETE FROM fs_blobs
-           WHERE workspace_id = $1 AND hash = $2
+          `WITH candidates(hash) AS (VALUES ${values})
+           DELETE FROM fs_blobs b
+           USING candidates c
+           WHERE b.workspace_id = $1
+             AND b.hash = c.hash
              AND NOT EXISTS (
-               SELECT 1 FROM fs_entries
-               WHERE workspace_id = $1 AND blob_hash = $2
-             )`,
-          [ctx.workspaceId, hash],
+                SELECT 1 FROM fs_entries
+                WHERE workspace_id = $1 AND blob_hash = c.hash
+              )`,
+          params,
         );
       }
     }
