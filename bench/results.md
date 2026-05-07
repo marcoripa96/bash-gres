@@ -1268,3 +1268,363 @@ BENCH_LABEL=cow-redesign npm run bench
 | writeFile (new file in existing dir) | p95 | 7.74 ms |
 | writeFile (overwrite existing) | median | 6.61 ms |
 | writeFile (overwrite existing) | p95 | 7.44 ms |
+
+## after-writefile-fuse-1  _(2026-05-07T15:52:34.372Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.18 ms |
+| fork after 1000 files | fork() | 5.93 ms |
+| fork after 5000 files | fork() | 6.13 ms |
+| read at depth 1 | median | 0.55 ms |
+| read at depth 1 | p95 | 0.58 ms |
+| read at depth 5 | median | 0.52 ms |
+| read at depth 5 | p95 | 0.74 ms |
+| read at depth 25 | median | 0.55 ms |
+| read at depth 25 | p95 | 0.75 ms |
+| read at depth 50 | median | 0.53 ms |
+| read at depth 50 | p95 | 0.68 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 137.64 MiB -> 137.64 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.12 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.12 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.60 ms |
+| readFileBuffer (text, 200 lines) | median | 0.55 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.74 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.51 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.75 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.51 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.69 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.73 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 1.11 ms |
+| listVersions (6 versions) | median | 0.18 ms |
+| listVersions (6 versions) | p95 | 0.25 ms |
+| getUsage (50 files, depth 5) | median | 1.21 ms |
+| getUsage (50 files, depth 5) | p95 | 1.80 ms |
+| diff (cur vs sibling, 50 files) | median | 0.90 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.67 ms |
+| writeFile (new file in existing dir) | median | 7.13 ms |
+| writeFile (new file in existing dir) | p95 | 12.36 ms |
+| writeFile (overwrite existing) | median | 7.02 ms |
+| writeFile (overwrite existing) | p95 | 7.98 ms |
+
+## after-writefile-fuse-2  _(2026-05-07T15:53:36.536Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.30 ms |
+| fork after 1000 files | fork() | 5.85 ms |
+| fork after 5000 files | fork() | 5.97 ms |
+| read at depth 1 | median | 0.56 ms |
+| read at depth 1 | p95 | 0.81 ms |
+| read at depth 5 | median | 0.50 ms |
+| read at depth 5 | p95 | 0.57 ms |
+| read at depth 25 | median | 0.53 ms |
+| read at depth 25 | p95 | 0.94 ms |
+| read at depth 50 | median | 0.57 ms |
+| read at depth 50 | p95 | 0.85 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 137.64 MiB -> 137.64 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.72 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.58 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 2.40 ms |
+| readFileBuffer (text, 200 lines) | median | 0.54 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.73 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.50 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.71 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.47 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.59 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.66 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.84 ms |
+| listVersions (6 versions) | median | 0.14 ms |
+| listVersions (6 versions) | p95 | 0.18 ms |
+| getUsage (50 files, depth 5) | median | 1.08 ms |
+| getUsage (50 files, depth 5) | p95 | 1.30 ms |
+| diff (cur vs sibling, 50 files) | median | 0.88 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.08 ms |
+| writeFile (new file in existing dir) | median | 6.65 ms |
+| writeFile (new file in existing dir) | p95 | 7.31 ms |
+| writeFile (overwrite existing) | median | 6.65 ms |
+| writeFile (overwrite existing) | p95 | 7.45 ms |
+
+## after-writefile-fuse-3  _(2026-05-07T15:54:37.606Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.35 ms |
+| fork after 1000 files | fork() | 5.61 ms |
+| fork after 5000 files | fork() | 6.09 ms |
+| read at depth 1 | median | 0.49 ms |
+| read at depth 1 | p95 | 0.59 ms |
+| read at depth 5 | median | 0.52 ms |
+| read at depth 5 | p95 | 0.66 ms |
+| read at depth 25 | median | 0.51 ms |
+| read at depth 25 | p95 | 0.71 ms |
+| read at depth 50 | median | 0.50 ms |
+| read at depth 50 | p95 | 0.55 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 137.66 MiB -> 137.66 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.44 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.08 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.34 ms |
+| readFileBuffer (text, 200 lines) | median | 0.52 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.57 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.50 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.86 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.49 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.73 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.68 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.98 ms |
+| listVersions (6 versions) | median | 0.14 ms |
+| listVersions (6 versions) | p95 | 0.19 ms |
+| getUsage (50 files, depth 5) | median | 1.10 ms |
+| getUsage (50 files, depth 5) | p95 | 1.21 ms |
+| diff (cur vs sibling, 50 files) | median | 0.89 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.20 ms |
+| writeFile (new file in existing dir) | median | 6.53 ms |
+| writeFile (new file in existing dir) | p95 | 7.96 ms |
+| writeFile (overwrite existing) | median | 6.58 ms |
+| writeFile (overwrite existing) | p95 | 7.15 ms |
+
+## after-writefile-fuse-4  _(2026-05-07T15:55:37.695Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.23 ms |
+| fork after 1000 files | fork() | 2.33 ms |
+| fork after 5000 files | fork() | 2.51 ms |
+| read at depth 1 | median | 0.50 ms |
+| read at depth 1 | p95 | 0.62 ms |
+| read at depth 5 | median | 0.51 ms |
+| read at depth 5 | p95 | 0.81 ms |
+| read at depth 25 | median | 0.51 ms |
+| read at depth 25 | p95 | 0.93 ms |
+| read at depth 50 | median | 0.55 ms |
+| read at depth 50 | p95 | 0.63 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 137.66 MiB -> 137.66 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 9.02 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.11 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.34 ms |
+| readFileBuffer (text, 200 lines) | median | 0.51 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.65 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.49 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.63 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.49 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.64 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.63 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.79 ms |
+| listVersions (6 versions) | median | 0.17 ms |
+| listVersions (6 versions) | p95 | 0.21 ms |
+| getUsage (50 files, depth 5) | median | 1.06 ms |
+| getUsage (50 files, depth 5) | p95 | 1.42 ms |
+| diff (cur vs sibling, 50 files) | median | 0.90 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.13 ms |
+| writeFile (new file in existing dir) | median | 6.55 ms |
+| writeFile (new file in existing dir) | p95 | 7.20 ms |
+| writeFile (overwrite existing) | median | 6.66 ms |
+| writeFile (overwrite existing) | p95 | 7.33 ms |
+
+## after-writefile-fuse-5  _(2026-05-07T15:56:15.887Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.77 ms |
+| fork after 1000 files | fork() | 2.32 ms |
+| fork after 5000 files | fork() | 2.25 ms |
+| read at depth 1 | median | 0.50 ms |
+| read at depth 1 | p95 | 0.53 ms |
+| read at depth 5 | median | 0.54 ms |
+| read at depth 5 | p95 | 0.70 ms |
+| read at depth 25 | median | 0.51 ms |
+| read at depth 25 | p95 | 0.63 ms |
+| read at depth 50 | median | 0.50 ms |
+| read at depth 50 | p95 | 0.58 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 138.05 MiB -> 138.05 MiB (Δ 8.0 KiB) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.02 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.00 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.11 ms |
+| readFileBuffer (text, 200 lines) | median | 0.48 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.62 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.48 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.62 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.54 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.81 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.70 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.85 ms |
+| listVersions (6 versions) | median | 0.15 ms |
+| listVersions (6 versions) | p95 | 0.33 ms |
+| getUsage (50 files, depth 5) | median | 1.14 ms |
+| getUsage (50 files, depth 5) | p95 | 1.50 ms |
+| diff (cur vs sibling, 50 files) | median | 0.87 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.03 ms |
+| writeFile (new file in existing dir) | median | 6.36 ms |
+| writeFile (new file in existing dir) | p95 | 6.82 ms |
+| writeFile (overwrite existing) | median | 22.13 ms |
+| writeFile (overwrite existing) | p95 | 34.44 ms |
+
+## after-writefile-fuse-v2-1  _(2026-05-07T15:59:47.337Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.37 ms |
+| fork after 1000 files | fork() | 2.11 ms |
+| fork after 5000 files | fork() | 2.03 ms |
+| read at depth 1 | median | 0.51 ms |
+| read at depth 1 | p95 | 0.63 ms |
+| read at depth 5 | median | 0.50 ms |
+| read at depth 5 | p95 | 0.60 ms |
+| read at depth 25 | median | 0.51 ms |
+| read at depth 25 | p95 | 0.77 ms |
+| read at depth 50 | median | 0.52 ms |
+| read at depth 50 | p95 | 0.69 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 138.28 MiB -> 138.28 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 4.53 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.79 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 2.06 ms |
+| readFileBuffer (text, 200 lines) | median | 0.50 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.57 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.52 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.77 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.49 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.61 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.67 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.87 ms |
+| listVersions (6 versions) | median | 0.13 ms |
+| listVersions (6 versions) | p95 | 0.16 ms |
+| getUsage (50 files, depth 5) | median | 1.04 ms |
+| getUsage (50 files, depth 5) | p95 | 1.10 ms |
+| diff (cur vs sibling, 50 files) | median | 0.88 ms |
+| diff (cur vs sibling, 50 files) | p95 | 0.98 ms |
+| writeFile (new file in existing dir) | median | 2.82 ms |
+| writeFile (new file in existing dir) | p95 | 3.24 ms |
+| writeFile (overwrite existing) | median | 6.50 ms |
+| writeFile (overwrite existing) | p95 | 7.18 ms |
+
+## after-writefile-fuse-v2-2  _(2026-05-07T16:01:13.724Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.04 ms |
+| fork after 1000 files | fork() | 5.92 ms |
+| fork after 5000 files | fork() | 2.07 ms |
+| read at depth 1 | median | 0.51 ms |
+| read at depth 1 | p95 | 0.71 ms |
+| read at depth 5 | median | 0.51 ms |
+| read at depth 5 | p95 | 0.61 ms |
+| read at depth 25 | median | 0.52 ms |
+| read at depth 25 | p95 | 0.57 ms |
+| read at depth 50 | median | 0.53 ms |
+| read at depth 50 | p95 | 0.69 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 137.74 MiB -> 137.74 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 10.48 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.06 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.36 ms |
+| readFileBuffer (text, 200 lines) | median | 0.50 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.62 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.51 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.62 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.54 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.59 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.71 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.75 ms |
+| listVersions (6 versions) | median | 0.17 ms |
+| listVersions (6 versions) | p95 | 0.20 ms |
+| getUsage (50 files, depth 5) | median | 1.12 ms |
+| getUsage (50 files, depth 5) | p95 | 1.51 ms |
+| diff (cur vs sibling, 50 files) | median | 0.99 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.44 ms |
+| writeFile (new file in existing dir) | median | 6.49 ms |
+| writeFile (new file in existing dir) | p95 | 6.98 ms |
+| writeFile (overwrite existing) | median | 6.64 ms |
+| writeFile (overwrite existing) | p95 | 7.54 ms |
+
+## after-writefile-fuse-v2-3  _(2026-05-07T16:01:50.123Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.40 ms |
+| fork after 1000 files | fork() | 5.80 ms |
+| fork after 5000 files | fork() | 2.01 ms |
+| read at depth 1 | median | 0.52 ms |
+| read at depth 1 | p95 | 0.62 ms |
+| read at depth 5 | median | 0.49 ms |
+| read at depth 5 | p95 | 0.56 ms |
+| read at depth 25 | median | 0.49 ms |
+| read at depth 25 | p95 | 0.66 ms |
+| read at depth 50 | median | 0.50 ms |
+| read at depth 50 | p95 | 0.57 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 138.69 MiB -> 138.69 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 7.90 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.05 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.30 ms |
+| readFileBuffer (text, 200 lines) | median | 0.48 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.59 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.48 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.56 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.47 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.54 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.65 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.72 ms |
+| listVersions (6 versions) | median | 0.14 ms |
+| listVersions (6 versions) | p95 | 0.21 ms |
+| getUsage (50 files, depth 5) | median | 1.08 ms |
+| getUsage (50 files, depth 5) | p95 | 1.59 ms |
+| diff (cur vs sibling, 50 files) | median | 0.86 ms |
+| diff (cur vs sibling, 50 files) | p95 | 0.91 ms |
+| writeFile (new file in existing dir) | median | 6.18 ms |
+| writeFile (new file in existing dir) | p95 | 6.67 ms |
+| writeFile (overwrite existing) | median | 6.24 ms |
+| writeFile (overwrite existing) | p95 | 6.82 ms |
+
+## after-writefile-fuse-v2-4  _(2026-05-07T16:02:26.127Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.64 ms |
+| fork after 1000 files | fork() | 6.19 ms |
+| fork after 5000 files | fork() | 2.11 ms |
+| read at depth 1 | median | 0.49 ms |
+| read at depth 1 | p95 | 0.53 ms |
+| read at depth 5 | median | 0.52 ms |
+| read at depth 5 | p95 | 0.69 ms |
+| read at depth 25 | median | 0.50 ms |
+| read at depth 25 | p95 | 0.69 ms |
+| read at depth 50 | median | 0.51 ms |
+| read at depth 50 | p95 | 0.62 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 139.68 MiB -> 139.68 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 7.83 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.01 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.13 ms |
+| readFileBuffer (text, 200 lines) | median | 0.52 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.59 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.50 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.60 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.52 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.67 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.64 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.74 ms |
+| listVersions (6 versions) | median | 0.17 ms |
+| listVersions (6 versions) | p95 | 0.20 ms |
+| getUsage (50 files, depth 5) | median | 1.11 ms |
+| getUsage (50 files, depth 5) | p95 | 2.17 ms |
+| diff (cur vs sibling, 50 files) | median | 0.86 ms |
+| diff (cur vs sibling, 50 files) | p95 | 0.91 ms |
+| writeFile (new file in existing dir) | median | 6.22 ms |
+| writeFile (new file in existing dir) | p95 | 6.69 ms |
+| writeFile (overwrite existing) | median | 6.39 ms |
+| writeFile (overwrite existing) | p95 | 7.16 ms |
