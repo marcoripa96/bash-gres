@@ -510,3 +510,157 @@ BENCH_LABEL=cow-redesign npm run bench
 | deleteVersion (1000 files, 100 edited) | elapsed | 8.42 ms |
 | readdir(/d) at depth 10, 100 files | median | 1.77 ms |
 | readdir(/d) at depth 10, 100 files | p95 | 2.40 ms |
+
+## baseline-refactor-1  _(2026-05-07T14:22:56.064Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 4.37 ms |
+| fork after 1000 files | fork() | 2.28 ms |
+| fork after 5000 files | fork() | 2.99 ms |
+| read at depth 1 | median | 0.65 ms |
+| read at depth 1 | p95 | 0.81 ms |
+| read at depth 5 | median | 0.74 ms |
+| read at depth 5 | p95 | 0.86 ms |
+| read at depth 25 | median | 1.24 ms |
+| read at depth 25 | p95 | 1.41 ms |
+| read at depth 50 | median | 1.83 ms |
+| read at depth 50 | p95 | 2.25 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.11 MiB -> 134.11 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.61 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.50 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.90 ms |
+
+## baseline-refactor-2  _(2026-05-07T14:23:30.243Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 7.54 ms |
+| fork after 1000 files | fork() | 2.25 ms |
+| fork after 5000 files | fork() | 2.48 ms |
+| read at depth 1 | median | 0.67 ms |
+| read at depth 1 | p95 | 0.90 ms |
+| read at depth 5 | median | 0.74 ms |
+| read at depth 5 | p95 | 0.88 ms |
+| read at depth 25 | median | 1.14 ms |
+| read at depth 25 | p95 | 1.45 ms |
+| read at depth 50 | median | 1.62 ms |
+| read at depth 50 | p95 | 1.95 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.74 MiB -> 134.74 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 7.93 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.52 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.89 ms |
+
+## baseline-refactor-3  _(2026-05-07T14:24:13.263Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 7.08 ms |
+| fork after 1000 files | fork() | 2.21 ms |
+| fork after 5000 files | fork() | 3.12 ms |
+| read at depth 1 | median | 0.73 ms |
+| read at depth 1 | p95 | 0.97 ms |
+| read at depth 5 | median | 0.82 ms |
+| read at depth 5 | p95 | 1.15 ms |
+| read at depth 25 | median | 1.22 ms |
+| read at depth 25 | p95 | 1.45 ms |
+| read at depth 50 | median | 1.73 ms |
+| read at depth 50 | p95 | 2.49 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.98 MiB -> 134.98 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.25 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.58 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.96 ms |
+
+## after-flip-1  _(2026-05-07T14:29:19.677Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.58 ms |
+| fork after 1000 files | fork() | 2.28 ms |
+| fork after 5000 files | fork() | 2.99 ms |
+| read at depth 1 | median | 0.83 ms |
+| read at depth 1 | p95 | 0.92 ms |
+| read at depth 5 | median | 0.95 ms |
+| read at depth 5 | p95 | 1.03 ms |
+| read at depth 25 | median | 1.46 ms |
+| read at depth 25 | p95 | 1.63 ms |
+| read at depth 50 | median | 2.31 ms |
+| read at depth 50 | p95 | 2.59 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.32 MiB -> 134.32 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.01 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.52 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.91 ms |
+
+## after-flip-cte-1  _(2026-05-07T14:33:02.358Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.75 ms |
+| fork after 1000 files | fork() | 2.52 ms |
+| fork after 5000 files | fork() | 19.98 ms |
+| read at depth 1 | median | 0.86 ms |
+| read at depth 1 | p95 | 1.01 ms |
+| read at depth 5 | median | 0.78 ms |
+| read at depth 5 | p95 | 1.43 ms |
+| read at depth 25 | median | 0.82 ms |
+| read at depth 25 | p95 | 1.02 ms |
+| read at depth 50 | median | 0.74 ms |
+| read at depth 50 | p95 | 0.92 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.48 MiB -> 134.48 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 7.95 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.28 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.76 ms |
+
+## after-flip-cte-2  _(2026-05-07T14:33:45.578Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.94 ms |
+| fork after 1000 files | fork() | 2.36 ms |
+| fork after 5000 files | fork() | 6.96 ms |
+| read at depth 1 | median | 0.78 ms |
+| read at depth 1 | p95 | 1.04 ms |
+| read at depth 5 | median | 0.76 ms |
+| read at depth 5 | p95 | 1.16 ms |
+| read at depth 25 | median | 0.87 ms |
+| read at depth 25 | p95 | 2.19 ms |
+| read at depth 50 | median | 0.75 ms |
+| read at depth 50 | p95 | 1.06 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.48 MiB -> 134.48 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.92 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.24 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.57 ms |
+
+## after-flip-cte-3  _(2026-05-07T14:34:20.207Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.87 ms |
+| fork after 1000 files | fork() | 2.25 ms |
+| fork after 5000 files | fork() | 4.83 ms |
+| read at depth 1 | median | 0.77 ms |
+| read at depth 1 | p95 | 1.11 ms |
+| read at depth 5 | median | 0.89 ms |
+| read at depth 5 | p95 | 1.25 ms |
+| read at depth 25 | median | 0.89 ms |
+| read at depth 25 | p95 | 1.14 ms |
+| read at depth 50 | median | 0.78 ms |
+| read at depth 50 | p95 | 1.02 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 134.58 MiB -> 134.58 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 8.28 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.19 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 1.43 ms |
