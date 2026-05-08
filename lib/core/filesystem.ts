@@ -579,6 +579,531 @@ export class PgFileSystem extends FsWriteOpsBase {
     return new Uint8Array(0);
   }
 
+  /**
+   * Run a Postgres SQL/JSON path query directly against a stored file's
+   * JSONB-cast content and return the array of matched values.
+   *
+   * Pushes the JSON parse + filter into Postgres so only projected results
+   * cross the wire. Throws `ENOENT` if the file is missing, `EISDIR` for
+   * directories, and surfaces Postgres parse errors when the file is not
+   * valid JSON or the path expression is malformed.
+   *
+   * When `options.arrayCheckPath` is provided, the value at that path
+   * inside the document must be a JSON array; otherwise the method returns
+   * `null` so the caller can fall back to an in-Node evaluator (this is
+   * used by the jq pushdown to preserve insertion-order semantics for
+   * object iteration). An empty array means "check the document root".
+   */
+  async queryJsonPath(
+    path: string,
+    jsonPathExpr: string,
+    options?: { arrayCheckPath?: string[] },
+  ): Promise<unknown[] | null> {
+    const internal = this.guardRead(path);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      return this.internalQueryJsonPath(
+        tx,
+        internal,
+        path,
+        jsonPathExpr,
+        options?.arrayCheckPath,
+      );
+    });
+  }
+
+  private async internalQueryJsonPath(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    jsonPathExpr: string,
+    arrayCheckPath: string[] | undefined,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<unknown[] | null> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const params: SqlParam[] = [this.workspaceId, lt, versionId, jsonPathExpr];
+    let resultsExpr: string;
+    if (arrayCheckPath !== undefined) {
+      let parentExpr: string;
+      if (arrayCheckPath.length === 0) {
+        parentExpr = "b.content::jsonb";
+      } else {
+        params.push(arrayCheckPath);
+        parentExpr = "(b.content::jsonb #> $5)";
+      }
+      resultsExpr = `CASE jsonb_typeof(${parentExpr})
+                       WHEN 'array' THEN jsonb_path_query_array(b.content::jsonb, $4::jsonpath)
+                       ELSE NULL
+                     END`;
+    } else {
+      resultsExpr = "jsonb_path_query_array(b.content::jsonb, $4::jsonpath)";
+    }
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      blob_hash: Uint8Array | null;
+      results: unknown;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type, symlink_target
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              picked.blob_hash,
+              ${resultsExpr} AS results
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      params,
+    );
+
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalQueryJsonPath(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        jsonPathExpr,
+        arrayCheckPath,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+    const raw = row.results;
+    if (raw === null || raw === undefined) {
+      return arrayCheckPath !== undefined ? null : [];
+    }
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === "string") {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    return [];
+  }
+
+  /**
+   * Run a Postgres-side aggregation (`length` / `sum` / `min` / `max`) over
+   * the JSON array at `jsonPath` inside the file's content. Returns
+   * `{ value }` when the aggregation completed and the result (parsed from
+   * jsonb) — `value` may itself be `null` (e.g. `add` of an empty array).
+   * Returns top-level `null` when the value at `jsonPath` is not a JSON
+   * array, or when the aggregation requires numeric elements and the
+   * array contains non-numbers — the caller should fall back to in-Node
+   * evaluation in that case.
+   */
+  async queryJsonAggregate(
+    path: string,
+    jsonPath: string[],
+    kind: AggregateSqlKind,
+    options?: {
+      keyPath?: string[];
+      stringArg?: string;
+      replacementArg?: string;
+      numericArg?: number;
+    },
+  ): Promise<{ value: unknown } | null> {
+    const internal = this.guardRead(path);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      return this.internalQueryJsonAggregate(
+        tx,
+        internal,
+        path,
+        jsonPath,
+        kind,
+        options?.keyPath,
+        options?.stringArg,
+        options?.replacementArg,
+        options?.numericArg,
+      );
+    });
+  }
+
+  private async internalQueryJsonAggregate(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    jsonPath: string[],
+    kind: AggregateSqlKind,
+    keyPath: string[] | undefined,
+    stringArg: string | undefined,
+    replacementArg: string | undefined,
+    numericArg: number | undefined,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<{ value: unknown } | null> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const params: SqlParam[] = [this.workspaceId, lt, versionId];
+    let parentExpr: string;
+    if (jsonPath.length === 0) {
+      parentExpr = "b.content::jsonb";
+    } else {
+      params.push(jsonPath);
+      parentExpr = "(b.content::jsonb #> $4)";
+    }
+    let keyParamIdx: number | null = null;
+    if (keyPath !== undefined) {
+      params.push(keyPath);
+      keyParamIdx = params.length;
+    }
+    let stringArgIdx: number | null = null;
+    if (stringArg !== undefined) {
+      params.push(stringArg);
+      stringArgIdx = params.length;
+    }
+    let replacementArgIdx: number | null = null;
+    if (replacementArg !== undefined) {
+      params.push(replacementArg);
+      replacementArgIdx = params.length;
+    }
+    const aggExpr = aggregateSqlExpr(
+      parentExpr,
+      kind,
+      keyParamIdx,
+      stringArgIdx,
+      replacementArgIdx,
+      numericArg,
+    );
+    const inputType = aggregateInputType(kind);
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      blob_hash: Uint8Array | null;
+      result: unknown;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type, symlink_target
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              picked.blob_hash,
+              CASE jsonb_typeof(${parentExpr})
+                WHEN '${inputType}' THEN ${aggExpr}
+                ELSE NULL
+              END AS result
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      params,
+    );
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalQueryJsonAggregate(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        jsonPath,
+        kind,
+        keyPath,
+        stringArg,
+        replacementArg,
+        numericArg,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+    const raw = row.result;
+    if (raw === null || raw === undefined) return null;
+    return { value: raw };
+  }
+
+  /**
+   * Run a Postgres-side `map({k: <path>, ...})` over the JSON array at
+   * `jsonPath`. For each element, builds an object with the given keys
+   * mapped to `element #> path`. Returns the result as a single JS array
+   * (already wrapped). `null` when the value at `jsonPath` is not a JSON
+   * array (caller falls back).
+   */
+  async queryJsonMapObject(
+    path: string,
+    jsonPath: string[],
+    pairs: Array<{ key: string; valuePath: string[] }>,
+  ): Promise<{ value: unknown } | null> {
+    const internal = this.guardRead(path);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      return this.internalQueryJsonMapObject(
+        tx,
+        internal,
+        path,
+        jsonPath,
+        pairs,
+      );
+    });
+  }
+
+  private async internalQueryJsonMapObject(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    jsonPath: string[],
+    pairs: Array<{ key: string; valuePath: string[] }>,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<{ value: unknown } | null> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const params: SqlParam[] = [this.workspaceId, lt, versionId];
+    let parentExpr: string;
+    if (jsonPath.length === 0) {
+      parentExpr = "b.content::jsonb";
+    } else {
+      params.push(jsonPath);
+      parentExpr = "(b.content::jsonb #> $4)";
+    }
+    const argParts: string[] = [];
+    for (const pair of pairs) {
+      params.push(pair.key);
+      const keyIdx = params.length;
+      params.push(pair.valuePath);
+      const valIdx = params.length;
+      argParts.push(`$${keyIdx}::text, value #> $${valIdx}`);
+    }
+    const buildExpr =
+      argParts.length === 0
+        ? "'{}'::jsonb"
+        : `jsonb_build_object(${argParts.join(", ")})`;
+    const aggExpr = `(SELECT COALESCE(jsonb_agg(${buildExpr}), '[]'::jsonb)
+                     FROM jsonb_array_elements(${parentExpr}))`;
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      result: unknown;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type, symlink_target
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              CASE jsonb_typeof(${parentExpr})
+                WHEN 'array' THEN ${aggExpr}
+                ELSE NULL
+              END AS result
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      params,
+    );
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalQueryJsonMapObject(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        jsonPath,
+        pairs,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+    const raw = row.result;
+    if (raw === null || raw === undefined) return null;
+    const value: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return { value };
+  }
+
+  /**
+   * Run a Postgres-side array slice over the JSON array at `jsonPath` and
+   * return the slice as a JS array. Bounds are 0-based with `null`
+   * meaning "from the start" / "to the end". Returns `null` if the value
+   * at `jsonPath` is not a JSON array (caller falls back).
+   */
+  async queryJsonSlice(
+    path: string,
+    jsonPath: string[],
+    start: number | null,
+    end: number | null,
+  ): Promise<{ value: unknown } | null> {
+    const internal = this.guardRead(path);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      return this.internalQueryJsonSlice(
+        tx,
+        internal,
+        path,
+        jsonPath,
+        start,
+        end,
+      );
+    });
+  }
+
+  private async internalQueryJsonSlice(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    jsonPath: string[],
+    start: number | null,
+    end: number | null,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<{ value: unknown } | null> {
+    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    const versionId = await this.getCurrentVersionId(tx);
+    const lt = pathToLtree(internal, this.workspaceId);
+    const params: SqlParam[] = [this.workspaceId, lt, versionId];
+    let parentExpr: string;
+    if (jsonPath.length === 0) {
+      parentExpr = "b.content::jsonb";
+    } else {
+      params.push(jsonPath);
+      parentExpr = "(b.content::jsonb #> $4)";
+    }
+    // 1-based ord from WITH ORDINALITY; jq slice [a:b] keeps indices
+    // a..b-1 (0-based), i.e. 1-based ord in (a, b]. For negative bounds
+    // we resolve relative to the array length here in SQL.
+    const arrLen = `jsonb_array_length(${parentExpr})`;
+    const startEff =
+      start === null
+        ? "0"
+        : start < 0
+          ? `GREATEST(0, ${arrLen} + (${start}))`
+          : `LEAST(${arrLen}, ${start})`;
+    const endEff =
+      end === null
+        ? arrLen
+        : end < 0
+          ? `GREATEST(0, ${arrLen} + (${end}))`
+          : `LEAST(${arrLen}, ${end})`;
+    const sliceExpr = `(SELECT COALESCE(jsonb_agg(value ORDER BY ord), '[]'::jsonb)
+                       FROM jsonb_array_elements(${parentExpr}) WITH ORDINALITY AS x(value, ord)
+                       WHERE ord > ${startEff} AND ord <= ${endEff})`;
+    const r = await tx.query<{
+      node_type: string;
+      symlink_target: string | null;
+      result: unknown;
+    }>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type, symlink_target
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $2::ltree
+       ),
+       picked AS (
+         SELECT e.blob_hash, e.node_type, e.symlink_target
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY a.depth ASC
+         LIMIT 1
+       )
+       SELECT picked.node_type,
+              picked.symlink_target,
+              CASE jsonb_typeof(${parentExpr})
+                WHEN 'array' THEN ${sliceExpr}
+                ELSE NULL
+              END AS result
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      params,
+    );
+    const row = r.rows[0];
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      return this.internalQueryJsonSlice(
+        tx,
+        this.resolveLinkTargetPath(internal, row.symlink_target),
+        userPath,
+        jsonPath,
+        start,
+        end,
+        maxDepth - 1,
+      );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+    const raw = row.result;
+    if (raw === null || raw === undefined) return null;
+    const value: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return { value };
+  }
+
   async writeFile(
     path: string,
     content: string | Uint8Array,
@@ -1298,5 +1823,280 @@ export class PgFileSystem extends FsWriteOpsBase {
 }
 
 export interface PgFileSystem extends FilesystemOpsApi<PgFileSystem> {}
+
+export type AggregateSqlKind =
+  | "length"
+  | "sum"
+  | "min"
+  | "max"
+  | "sort"
+  | "unique"
+  | "reverse"
+  | "sort_by"
+  | "min_by"
+  | "max_by"
+  | "group_by"
+  | "to_entries"
+  | "from_entries"
+  | "flatten"
+  | "ascii_downcase"
+  | "ascii_upcase"
+  | "tonumber"
+  | "split"
+  | "join"
+  | "ltrimstr"
+  | "rtrimstr"
+  | "sub"
+  | "gsub";
+
+function aggregateInputType(
+  kind: AggregateSqlKind,
+): "array" | "object" | "string" {
+  if (kind === "to_entries") return "object";
+  if (
+    kind === "ascii_downcase" ||
+    kind === "ascii_upcase" ||
+    kind === "tonumber" ||
+    kind === "split" ||
+    kind === "ltrimstr" ||
+    kind === "rtrimstr" ||
+    kind === "sub" ||
+    kind === "gsub"
+  ) {
+    return "string";
+  }
+  return "array";
+}
+
+/**
+ * Build the inner SQL expression that produces the aggregate result over
+ * the JSON array at `parentExpr`. The outer query already wraps this with
+ * a `CASE jsonb_typeof(parent) WHEN 'array' THEN ... ELSE NULL END` so the
+ * caller falls back to in-Node evaluation when the value isn't an array.
+ *
+ * Returns SQL `NULL` for type-heterogeneous arrays where pushdown can't
+ * preserve jq's ordering semantics; the caller then falls back.
+ */
+function aggregateSqlExpr(
+  parentExpr: string,
+  kind: AggregateSqlKind,
+  keyParamIdx: number | null,
+  stringArgIdx: number | null,
+  replacementArgIdx: number | null,
+  numericArg: number | undefined,
+): string {
+  if (kind === "ascii_downcase") {
+    return `to_jsonb(lower(${parentExpr} #>> '{}'))`;
+  }
+  if (kind === "ascii_upcase") {
+    return `to_jsonb(upper(${parentExpr} #>> '{}'))`;
+  }
+  if (kind === "tonumber") {
+    // Validate first: only push down if the string is a parseable number;
+    // otherwise return SQL NULL so the caller falls back (Node will surface
+    // the right jq error).
+    return `(CASE
+              WHEN (${parentExpr} #>> '{}') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$'
+                THEN to_jsonb((${parentExpr} #>> '{}')::numeric)
+              ELSE NULL
+            END)`;
+  }
+  if (kind === "split") {
+    if (stringArgIdx === null) throw new Error("split requires stringArg");
+    return `to_jsonb(string_to_array(${parentExpr} #>> '{}', $${stringArgIdx}))`;
+  }
+  if (kind === "join") {
+    // join requires the array to contain only strings (or nulls). Type-guard
+    // here so Node can handle mixed/non-string arrays.
+    if (stringArgIdx === null) throw new Error("join requires stringArg");
+    return `(SELECT
+              CASE
+                WHEN bool_and(jsonb_typeof(value) = 'string' OR jsonb_typeof(value) = 'null')
+                  THEN to_jsonb(string_agg(COALESCE(value #>> '{}', ''), $${stringArgIdx}))
+                ELSE NULL
+              END
+            FROM jsonb_array_elements(${parentExpr}))`;
+  }
+  if (kind === "ltrimstr") {
+    if (stringArgIdx === null) throw new Error("ltrimstr requires stringArg");
+    return `to_jsonb(
+              CASE
+                WHEN strpos(${parentExpr} #>> '{}', $${stringArgIdx}) = 1
+                  THEN substring(${parentExpr} #>> '{}' FROM length($${stringArgIdx}) + 1)
+                ELSE ${parentExpr} #>> '{}'
+              END
+            )`;
+  }
+  if (kind === "rtrimstr") {
+    if (stringArgIdx === null) throw new Error("rtrimstr requires stringArg");
+    return `to_jsonb(
+              CASE
+                WHEN right(${parentExpr} #>> '{}', length($${stringArgIdx})) = $${stringArgIdx}
+                  THEN substring(${parentExpr} #>> '{}' FROM 1
+                                 FOR length(${parentExpr} #>> '{}') - length($${stringArgIdx}))
+                ELSE ${parentExpr} #>> '{}'
+              END
+            )`;
+  }
+  if (kind === "sub" || kind === "gsub") {
+    if (stringArgIdx === null || replacementArgIdx === null) {
+      throw new Error(`${kind} requires regex and replacement args`);
+    }
+    const flags = kind === "gsub" ? "g" : "";
+    return `to_jsonb(regexp_replace(${parentExpr} #>> '{}', $${stringArgIdx}, $${replacementArgIdx}, '${flags}'))`;
+  }
+  if (kind === "to_entries") {
+    return `(SELECT COALESCE(jsonb_agg(jsonb_build_object('key', k, 'value', v) ORDER BY k), '[]'::jsonb)
+             FROM jsonb_each(${parentExpr}) AS x(k, v))`;
+  }
+  if (kind === "from_entries") {
+    // Strict shape only: every element must be an object with a string
+    // `key` field. Anything else (alternative names like `name` / `k`,
+    // missing `value`, etc.) returns SQL NULL → caller falls back to the
+    // in-Node evaluator which handles jq's full lenient behaviour.
+    return `(SELECT
+              CASE
+                WHEN COUNT(*) = 0 THEN '{}'::jsonb
+                WHEN bool_and(
+                       jsonb_typeof(value) = 'object'
+                       AND value ? 'key'
+                       AND jsonb_typeof(value->'key') = 'string'
+                     )
+                  THEN jsonb_object_agg(value->>'key', value->'value')
+                ELSE NULL
+              END
+            FROM jsonb_array_elements(${parentExpr}))`;
+  }
+  if (kind === "flatten") {
+    // numericArg === undefined → fully recursive (jq's `flatten`).
+    // numericArg === 0 → input array unchanged.
+    // numericArg === N (>=1) → recurse with a "remaining" budget per row,
+    //   matching jq's def `def flatten(x): reduce .[] as $i ([];
+    //   if $i|type=="array" and x>0 then . + ($i|flatten(x-1)) else . + [$i] end)`.
+    if (numericArg === 0) {
+      return parentExpr;
+    }
+    if (numericArg === undefined) {
+      return `(
+        WITH RECURSIVE flat(elem, p) AS (
+          SELECT value, ARRAY[ord]::bigint[]
+          FROM jsonb_array_elements(${parentExpr}) WITH ORDINALITY AS x(value, ord)
+          UNION ALL
+          SELECT y.value, flat.p || y.ord
+          FROM flat, jsonb_array_elements(elem) WITH ORDINALITY AS y(value, ord)
+          WHERE jsonb_typeof(elem) = 'array'
+        )
+        SELECT COALESCE(jsonb_agg(elem ORDER BY p), '[]'::jsonb)
+        FROM flat
+        WHERE jsonb_typeof(elem) <> 'array'
+      )`;
+    }
+    return `(
+      WITH RECURSIVE flat(elem, p, remaining) AS (
+        SELECT value, ARRAY[ord]::bigint[], ${numericArg}
+        FROM jsonb_array_elements(${parentExpr}) WITH ORDINALITY AS x(value, ord)
+        UNION ALL
+        SELECT y.value, flat.p || y.ord, remaining - 1
+        FROM flat, jsonb_array_elements(elem) WITH ORDINALITY AS y(value, ord)
+        WHERE jsonb_typeof(elem) = 'array' AND remaining > 0
+      )
+      SELECT COALESCE(jsonb_agg(elem ORDER BY p), '[]'::jsonb)
+      FROM flat
+      WHERE NOT (jsonb_typeof(elem) = 'array' AND remaining > 0)
+    )`;
+  }
+  if (kind === "length") {
+    return `to_jsonb(jsonb_array_length(${parentExpr}))`;
+  }
+  if (kind === "reverse") {
+    return `(SELECT COALESCE(jsonb_agg(value ORDER BY ord DESC), '[]'::jsonb)
+             FROM jsonb_array_elements(${parentExpr}) WITH ORDINALITY AS x(value, ord))`;
+  }
+  if (kind === "sort" || kind === "unique") {
+    const distinct = kind === "unique" ? "DISTINCT " : "";
+    return `(SELECT
+              CASE
+                WHEN COUNT(*) = 0 THEN '[]'::jsonb
+                WHEN bool_and(jsonb_typeof(value) = 'number')
+                  THEN jsonb_agg(${distinct}value ORDER BY (value)::text::numeric)
+                WHEN bool_and(jsonb_typeof(value) = 'string')
+                  THEN jsonb_agg(${distinct}value ORDER BY (value #>> '{}'))
+                ELSE NULL
+              END
+            FROM jsonb_array_elements(${parentExpr}))`;
+  }
+  if (kind === "group_by") {
+    if (keyParamIdx === null) {
+      throw new Error(`group_by requires a keyPath`);
+    }
+    const keyExpr = `(value #> $${keyParamIdx})`;
+    return `(SELECT
+              CASE
+                WHEN COUNT(*) = 0 THEN '[]'::jsonb
+                WHEN bool_and(jsonb_typeof(${keyExpr}) = 'number')
+                  THEN (SELECT jsonb_agg(grp ORDER BY (group_key)::text::numeric)
+                        FROM (
+                          SELECT ${keyExpr} AS group_key,
+                                 jsonb_agg(value ORDER BY ord) AS grp
+                          FROM jsonb_array_elements(${parentExpr}) WITH ORDINALITY AS x(value, ord)
+                          GROUP BY ${keyExpr}
+                        ) g)
+                WHEN bool_and(jsonb_typeof(${keyExpr}) = 'string')
+                  THEN (SELECT jsonb_agg(grp ORDER BY (group_key #>> '{}'))
+                        FROM (
+                          SELECT ${keyExpr} AS group_key,
+                                 jsonb_agg(value ORDER BY ord) AS grp
+                          FROM jsonb_array_elements(${parentExpr}) WITH ORDINALITY AS x(value, ord)
+                          GROUP BY ${keyExpr}
+                        ) g)
+                ELSE NULL
+              END
+            FROM jsonb_array_elements(${parentExpr}))`;
+  }
+  if (kind === "sort_by" || kind === "min_by" || kind === "max_by") {
+    if (keyParamIdx === null) {
+      throw new Error(`${kind} requires a keyPath`);
+    }
+    const keyExpr = `(value #> $${keyParamIdx})`;
+    if (kind === "sort_by") {
+      return `(SELECT
+                CASE
+                  WHEN COUNT(*) = 0 THEN '[]'::jsonb
+                  WHEN bool_and(jsonb_typeof(${keyExpr}) = 'number')
+                    THEN jsonb_agg(value ORDER BY (${keyExpr})::text::numeric)
+                  WHEN bool_and(jsonb_typeof(${keyExpr}) = 'string')
+                    THEN jsonb_agg(value ORDER BY (${keyExpr} #>> '{}'))
+                  ELSE NULL
+                END
+              FROM jsonb_array_elements(${parentExpr}))`;
+    }
+    // min_by / max_by: pick a single element by key. Empty array → null.
+    const direction = kind === "min_by" ? "ASC" : "DESC";
+    return `(SELECT
+              CASE
+                WHEN (SELECT COUNT(*) FROM jsonb_array_elements(${parentExpr})) = 0
+                  THEN 'null'::jsonb
+                WHEN (SELECT bool_and(jsonb_typeof(${keyExpr}) = 'number')
+                      FROM jsonb_array_elements(${parentExpr}) AS x(value))
+                  THEN (SELECT value FROM jsonb_array_elements(${parentExpr}) AS x(value)
+                        ORDER BY (${keyExpr})::text::numeric ${direction} LIMIT 1)
+                WHEN (SELECT bool_and(jsonb_typeof(${keyExpr}) = 'string')
+                      FROM jsonb_array_elements(${parentExpr}) AS x(value))
+                  THEN (SELECT value FROM jsonb_array_elements(${parentExpr}) AS x(value)
+                        ORDER BY (${keyExpr} #>> '{}') ${direction} LIMIT 1)
+                ELSE NULL
+              END)`;
+  }
+  // sum / min / max: numeric arrays only.
+  const op = kind === "sum" ? "SUM" : kind === "min" ? "MIN" : "MAX";
+  return `(SELECT
+            CASE
+              WHEN COUNT(*) = 0 THEN 'null'::jsonb
+              WHEN bool_and(jsonb_typeof(value) = 'number')
+                THEN to_jsonb(${op}((value)::text::numeric))
+              ELSE NULL
+            END
+          FROM jsonb_array_elements(${parentExpr}))`;
+}
 
 installFilesystemOps(PgFileSystem.prototype);

@@ -24,6 +24,11 @@
       "import": "./dist/adapters/node-postgres/index.js",
       "default": "./dist/adapters/node-postgres/index.js"
     },
+    "./just-bash": {
+      "types": "./dist/just-bash/index.d.ts",
+      "import": "./dist/just-bash/index.js",
+      "default": "./dist/just-bash/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
