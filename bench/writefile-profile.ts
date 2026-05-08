@@ -104,6 +104,14 @@ async function main() {
     `mean=${avg(warmTimings).toFixed(2)} ms, median=${median(warmTimings).toFixed(2)} ms, queries/write=${warmCounts[0]}`,
   );
 
+  console.log("\n=== nested writeFile with missing parents ===");
+  samples.length = 0;
+  const nestedT = hrtime.bigint();
+  await fs.writeFile("/a/b/c/d/e/file.txt", "deep");
+  const nestedMs = Number(hrtime.bigint() - nestedT) / 1_000_000;
+  printSamples(samples);
+  console.log(`nested writeFile total: ${nestedMs.toFixed(2)} ms`);
+
   await sql.end();
 }
 

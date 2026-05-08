@@ -70,6 +70,15 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
       expect(await fs.readFile("/a/b/c/file.txt")).toBe("deep");
     });
 
+    it("rejects auto-created parents through a file ancestor", async () => {
+      await fs.writeFile("/a", "file");
+
+      await expect(fs.writeFile("/a/b/c/file.txt", "deep")).rejects.toThrow(
+        "ENOTDIR",
+      );
+      expect(await fs.exists("/a/b/c/file.txt")).toBe(false);
+    });
+
     it("uses single-statement writes once version and node-count caches are warm", async () => {
       await resetWorkspace(client, "write-fast-path-workspace");
       const counted = countTransactions(client);

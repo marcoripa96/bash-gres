@@ -1571,6 +1571,7 @@ export class FsBase {
     path: string,
     content: string | Uint8Array,
     precomputedEmbedding?: number[] | null,
+    parentKnownMissing: boolean = false,
   ): Promise<void> {
     this.validateFileSize(content);
     this.validatePathDepth(path);
@@ -1643,21 +1644,24 @@ export class FsBase {
     // create the parent and retry. The hot path (parent already exists)
     // avoids the wasted resolveEntry that internalMkdir(parent, recursive)
     // would otherwise issue.
-    let outcome = await this.attemptFusedWrite(
-      tx,
-      versionId,
-      path,
-      parentPosix,
-      hash,
-      textContent,
-      binaryData,
-      sizeBytes,
-    );
+    let outcome: { status: string; inserted: boolean | null } =
+      parentKnownMissing && parentPosix !== "/"
+        ? { status: "enoent", inserted: null }
+        : await this.attemptFusedWrite(
+            tx,
+            versionId,
+            path,
+            parentPosix,
+            hash,
+            textContent,
+            binaryData,
+            sizeBytes,
+          );
 
     if (outcome.status === "enoent" && parentPosix !== "/") {
       // Parent missing — create it then retry. The retry's validateNodeCount
       // increment is paired with the same decrement-on-failure semantics.
-      await this.internalMkdir(tx, versionId, parentPosix, { recursive: true });
+      await this.internalMkdirForWriteParent(tx, versionId, parentPosix);
       outcome = await this.attemptFusedWrite(
         tx,
         versionId,
@@ -1926,6 +1930,92 @@ export class FsBase {
       this.decrementCachedNodeCount();
     }
     return row;
+  }
+
+  private async internalMkdirForWriteParent(
+    tx: SqlClient,
+    versionId: number,
+    path: string,
+  ): Promise<void> {
+    this.validatePathDepth(path);
+    const segments = path.split("/").filter(Boolean);
+    if (segments.length === 0) return;
+
+    let current = "/";
+    const paths = segments.map((segment) => {
+      current = current === "/" ? `/${segment}` : `${current}/${segment}`;
+      return current;
+    });
+
+    const params: SqlParam[] = [this.workspaceId, versionId];
+    const values = paths.map((p, i) => {
+      params.push(pathToLtree(p, this.workspaceId), i + 1);
+      const pathParam = params.length - 1;
+      const ordParam = params.length;
+      return `($${pathParam}::ltree, $${ordParam}::int)`;
+    });
+
+    const r = await tx.query<{ status: string; bad_path: string | null }>(
+      `WITH wanted(path, ord) AS (
+         VALUES ${values.join(", ")}
+       ),
+       visible AS MATERIALIZED (
+         SELECT DISTINCT ON (w.path)
+           w.path,
+           w.ord,
+           e.node_type
+         FROM wanted w
+         JOIN fs_entries e
+           ON e.workspace_id = $1 AND e.path = w.path
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $2
+         ORDER BY w.path, a.depth ASC
+       ),
+       invalid AS (
+         SELECT path
+         FROM visible
+         WHERE node_type NOT IN ('directory', 'tombstone')
+         ORDER BY ord
+         LIMIT 1
+       ),
+       inserted AS (
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         SELECT $1, $2, w.path, NULL, 'directory', NULL, $${params.length + 1}, 0, now()
+         FROM wanted w
+         LEFT JOIN visible v ON v.path = w.path
+         WHERE NOT EXISTS (SELECT 1 FROM invalid)
+           AND COALESCE(v.node_type, 'missing') != 'directory'
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = NULL,
+           node_type = EXCLUDED.node_type,
+           symlink_target = NULL,
+           mode = EXCLUDED.mode,
+           size_bytes = 0,
+           mtime = now()
+         RETURNING 1
+       )
+       SELECT
+         CASE WHEN EXISTS (SELECT 1 FROM invalid) THEN 'enotdir' ELSE 'ok' END AS status,
+         (SELECT path::text FROM invalid) AS bad_path`,
+      [...params, 0o755],
+    );
+
+    const row = r.rows[0]!;
+    if (row.status === "enotdir") {
+      throw new FsError(
+        "ENOTDIR",
+        "not a directory, mkdir",
+        row.bad_path ? ltreeToPath(row.bad_path) : path,
+      );
+    }
+    if (row.status !== "ok") {
+      throw new Error(
+        `internalMkdirForWriteParent: unexpected status '${row.status}'`,
+      );
+    }
   }
 
   private decrementCachedNodeCount(): void {

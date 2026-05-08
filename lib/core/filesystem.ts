@@ -588,11 +588,13 @@ export class PgFileSystem extends FsBase {
     this.guardExcludedWrite(internal, "open", path);
 
     const fastOutcome = await this.tryFastWriteFile(internal, content);
+    let parentKnownMissing = false;
     if (fastOutcome) {
       if (fastOutcome.status === "ok") return;
       if (fastOutcome.status === "enoent" && parentPath(internal) !== "/") {
         // Missing-parent recovery needs multiple statements, so keep it on the
         // existing transactional path.
+        parentKnownMissing = true;
       } else if (fastOutcome.status === "enoent") {
         throw new FsError("ENOENT", "no such file or directory, open", path);
       } else if (fastOutcome.status === "enotdir") {
@@ -617,7 +619,14 @@ export class PgFileSystem extends FsBase {
       // missing it runs internalMkdir(parent, recursive: true) and retries.
       // Skipping the unconditional mkdir here saves a round-trip on the hot
       // path (parent already exists).
-      await this.internalWriteFile(tx, versionId, internal, content);
+      await this.internalWriteFile(
+        tx,
+        versionId,
+        internal,
+        content,
+        undefined,
+        parentKnownMissing,
+      );
     });
   }
 
