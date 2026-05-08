@@ -4,6 +4,23 @@ import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
 
+function countTransactions(inner: SqlClient): {
+  client: SqlClient;
+  transactions: () => number;
+} {
+  let transactions = 0;
+  return {
+    client: {
+      query: (text, params) => inner.query(text, params),
+      transaction: async (fn) => {
+        transactions++;
+        return inner.transaction(fn);
+      },
+    },
+    transactions: () => transactions,
+  };
+}
+
 describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
   let client: SqlClient;
   let teardown: () => Promise<void>;
@@ -51,6 +68,42 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
     it("auto-creates parent dirs", async () => {
       await fs.writeFile("/a/b/c/file.txt", "deep");
       expect(await fs.readFile("/a/b/c/file.txt")).toBe("deep");
+    });
+
+    it("uses single-statement writes once version and node-count caches are warm", async () => {
+      await resetWorkspace(client, "write-fast-path-workspace");
+      const counted = countTransactions(client);
+      const fastFs = new PgFileSystem({
+        db: counted.client,
+        workspaceId: "write-fast-path-workspace",
+      });
+
+      await fastFs.init();
+      expect(counted.transactions()).toBe(1);
+
+      await fastFs.writeFile("/first.txt", "first");
+      expect(counted.transactions()).toBe(2);
+
+      await fastFs.writeFile("/second.txt", "second");
+      expect(counted.transactions()).toBe(2);
+      expect(await fastFs.readFile("/second.txt")).toBe("second");
+    });
+
+    it("falls back to transactional missing-parent recovery after a fast-path miss", async () => {
+      await resetWorkspace(client, "write-fast-path-mkdir-workspace");
+      const counted = countTransactions(client);
+      const fastFs = new PgFileSystem({
+        db: counted.client,
+        workspaceId: "write-fast-path-mkdir-workspace",
+      });
+
+      await fastFs.init();
+      await fastFs.writeFile("/warm.txt", "warm");
+      expect(counted.transactions()).toBe(2);
+
+      await fastFs.writeFile("/a/b/file.txt", "deep");
+      expect(counted.transactions()).toBe(3);
+      expect(await fastFs.readFile("/a/b/file.txt")).toBe("deep");
     });
 
     it("reads ranged slices through symlinks", async () => {

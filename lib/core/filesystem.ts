@@ -582,6 +582,30 @@ export class PgFileSystem extends FsBase {
   ): Promise<void> {
     const internal = this.guardWrite(path);
     this.guardExcludedWrite(internal, "open", path);
+
+    const fastOutcome = await this.tryFastWriteFile(internal, content);
+    if (fastOutcome) {
+      if (fastOutcome.status === "ok") return;
+      if (fastOutcome.status === "enoent" && parentPath(internal) !== "/") {
+        // Missing-parent recovery needs multiple statements, so keep it on the
+        // existing transactional path.
+      } else if (fastOutcome.status === "enoent") {
+        throw new FsError("ENOENT", "no such file or directory, open", path);
+      } else if (fastOutcome.status === "enotdir") {
+        throw new FsError("ENOTDIR", "not a directory, open", path);
+      } else if (fastOutcome.status === "eisdir") {
+        throw new FsError(
+          "EISDIR",
+          "illegal operation on a directory, open",
+          path,
+        );
+      } else {
+        throw new Error(
+          `writeFile: unexpected fast-path status '${fastOutcome.status}'`,
+        );
+      }
+    }
+
     return this.withWorkspace(async (tx) => {
       const versionId = await this.getCurrentVersionId(tx);
       // internalWriteFile handles missing-parent recovery itself: it tries

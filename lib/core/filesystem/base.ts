@@ -963,14 +963,7 @@ export class FsBase {
     // `maxFiles`, skip the COUNT(*) and bump the cache optimistically. Once
     // we're inside the margin we re-query on every call so the limit stays
     // strictly enforced near the boundary.
-    const HEADROOM = 16;
-    if (
-      this.cachedNodeCount !== null &&
-      this.cachedNodeCount + HEADROOM < this.maxFiles
-    ) {
-      this.cachedNodeCount++;
-      return;
-    }
+    if (this.tryOptimisticNodeCountIncrement()) return;
 
     const versionId = await this.getCurrentVersionId(tx);
     const baseParams: SqlParam[] = [this.workspaceId, versionId, TOMBSTONE];
@@ -1691,6 +1684,138 @@ export class FsBase {
     }
   }
 
+  protected async tryFastWriteFile(
+    path: string,
+    content: string | Uint8Array,
+  ): Promise<{ status: string; inserted: boolean | null } | null> {
+    if (
+      this.txClient ||
+      !this.permissions.write ||
+      this.cachedVersionId === null ||
+      this.maxWorkspaceBytes !== undefined ||
+      this.embed
+    ) {
+      return null;
+    }
+
+    this.validatePathDepth(path);
+
+    const isText = typeof content === "string";
+    const bytes = isText
+      ? new TextEncoder().encode(content)
+      : (content as Uint8Array);
+    const sizeBytes = bytes.byteLength;
+    if (sizeBytes > this.maxFileSize) {
+      throw new Error(
+        `File too large: ${sizeBytes} bytes exceeds maximum of ${this.maxFileSize} bytes`,
+      );
+    }
+
+    if (!this.tryOptimisticNodeCountIncrement()) return null;
+
+    const hash = sha256(bytes);
+    const parentPosix = parentPath(path);
+    const parentLt = pathToLtree(parentPosix, this.workspaceId);
+    const targetLt = pathToLtree(path, this.workspaceId);
+    const textContent = isText ? content : null;
+    const binaryData = isText ? null : (content as Uint8Array);
+
+    try {
+      const result = await this.client.query<{
+        status: string;
+        inserted: boolean | null;
+      }>(
+        `WITH _ws AS MATERIALIZED (
+           SELECT
+             set_config('app.workspace_id', $10, true) AS ws,
+             set_config('statement_timeout', $11, true) AS st
+         ),
+         lookups AS MATERIALIZED (
+           SELECT DISTINCT ON (e.path)
+             e.path AS path,
+             e.node_type
+           FROM _ws
+           CROSS JOIN fs_entries e
+           JOIN version_ancestors a
+             ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+           WHERE e.workspace_id = $1
+             AND e.path = ANY(ARRAY[$7::ltree, $8::ltree])
+             AND a.descendant_id = $6
+           ORDER BY e.path, a.depth ASC
+         ),
+         validation AS (
+           SELECT
+             CASE
+               WHEN COALESCE(
+                 (SELECT node_type FROM lookups WHERE path = $7::ltree),
+                 'missing'
+               ) IN ('missing', 'tombstone')
+                 THEN 'enoent'
+               WHEN (SELECT node_type FROM lookups WHERE path = $7::ltree) <> 'directory'
+                 THEN 'enotdir'
+               WHEN COALESCE(
+                 (SELECT node_type FROM lookups WHERE path = $8::ltree),
+                 ''
+               ) = 'directory'
+                 THEN 'eisdir'
+               ELSE 'ok'
+             END AS status
+           FROM _ws
+         ),
+         blob_upsert AS (
+           INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
+           SELECT $1, $2, $3, $4, $5
+           FROM validation WHERE status = 'ok'
+           ON CONFLICT (workspace_id, hash) DO NOTHING
+           RETURNING 1
+         ),
+         entry_upsert AS (
+           INSERT INTO fs_entries
+             (workspace_id, version_id, path, blob_hash, node_type,
+              symlink_target, mode, size_bytes, mtime)
+           SELECT $1, $6, $8::ltree, $2, 'file', NULL, $9, $5, now()
+           FROM validation WHERE status = 'ok'
+           ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+             blob_hash = EXCLUDED.blob_hash,
+             node_type = EXCLUDED.node_type,
+             symlink_target = EXCLUDED.symlink_target,
+             mode = EXCLUDED.mode,
+             size_bytes = EXCLUDED.size_bytes,
+             mtime = now()
+           RETURNING (xmax = 0) AS inserted
+         )
+         SELECT validation.status,
+                (SELECT inserted FROM entry_upsert) AS inserted
+         FROM validation`,
+        [
+          this.workspaceId,
+          hash,
+          textContent,
+          binaryData,
+          sizeBytes,
+          this.cachedVersionId,
+          parentLt,
+          targetLt,
+          0o644,
+          this.workspaceId,
+          String(this.statementTimeoutMs),
+        ],
+      );
+
+      const row = result.rows[0]!;
+      if (row.status !== "ok" || row.inserted === false) {
+        this.decrementCachedNodeCount();
+      }
+      return row;
+    } catch (e) {
+      this.decrementCachedNodeCount();
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
+    }
+  }
+
   /**
    * Run the fused validation+blob+entry upsert and return the status without
    * throwing. Manages the optimistic node-count cache: increments before the
@@ -1806,6 +1931,18 @@ export class FsBase {
     if (this.cachedNodeCount !== null && this.cachedNodeCount > 0) {
       this.cachedNodeCount--;
     }
+  }
+
+  private tryOptimisticNodeCountIncrement(): boolean {
+    const HEADROOM = 16;
+    if (
+      this.cachedNodeCount !== null &&
+      this.cachedNodeCount + HEADROOM < this.maxFiles
+    ) {
+      this.cachedNodeCount++;
+      return true;
+    }
+    return false;
   }
 
   protected async blobsHasEmbedding(tx: SqlClient): Promise<boolean> {
