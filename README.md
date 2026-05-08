@@ -185,7 +185,7 @@ Version labels are scoped to the versioned directory, so `/database` and `/user`
 
 Versioning primitives include:
 
-- `diff(other, { path? })` and `diffStream(other, { path?, batchSize? })` to compare visible trees.
+- `diff(other, { path? })`, `diffCount(other, { path?, nodeType? })`, and `diffStream(other, { path?, batchSize? })` to compare visible trees.
 - `merge(source, { strategy?, paths?, pathScope?, dryRun? })` for LCA-based three-way merges.
 - `cherryPick(source, paths)` to source-win copy selected paths without LCA conflict checks.
 - `revert(target, { paths?, pathScope? })` to restore selected paths to another version.

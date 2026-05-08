@@ -266,4 +266,58 @@ describe.each(TEST_ADAPTERS)("PgFileSystem.diff [%s]", (_name, factory) => {
       expect(collected.map((d) => d.path)).toEqual(["/only.txt"]);
     });
   });
+
+  describe("diffCount", () => {
+    it("returns the same changed path count as diff() without fetching entries", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      await a.writeFile("/existing.txt", "old");
+      const b = await a.fork("b");
+      await b.writeFile("/existing.txt", "new");
+      await b.writeFile("/added.txt", "added");
+      await b.rm("/existing.txt");
+
+      expect(await a.diffCount("b")).toBe((await a.diff("b")).length);
+    });
+
+    it("supports path scoping", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      const b = await a.fork("b");
+      await b.writeFile("/keep/x.txt", "in-scope");
+      await b.writeFile("/ignore/y.txt", "out-of-scope");
+
+      expect(await a.diffCount("b", { path: "/keep" })).toBe(2);
+    });
+
+    it("can count only changed files", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      await a.writeFile("/link.txt", "was a file");
+      const b = await a.fork("b");
+      await b.writeFile("/new-dir/file.txt", "file");
+      await b.rm("/link.txt");
+      await b.symlink("/new-dir/file.txt", "/link.txt");
+
+      expect(await a.diffCount("b")).toBe(3);
+      expect(await a.diffCount("b", { nodeType: "file" })).toBe(2);
+    });
+
+    it("works inside a versioned directory facade", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: WS });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      const main = await fs.versioned("/database");
+      const draft = await main.fork("draft");
+      await draft.writeFile("/schema.sql", "draft");
+
+      expect(await main.diffCount("draft", { nodeType: "file" })).toBe(1);
+    });
+
+    it("rejects an empty `other` label", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: WS });
+      await fs.init();
+      await expect(fs.diffCount("")).rejects.toThrow(/non-empty/);
+    });
+  });
 });

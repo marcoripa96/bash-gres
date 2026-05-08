@@ -3,6 +3,7 @@ export { deleteVersion } from "./delete-version.js";
 export { deleteVersionById } from "./delete-version-by-id.js";
 export { detach } from "./detach.js";
 export { diff } from "./diff.js";
+export { diffCount } from "./diff-count.js";
 export { diffStream } from "./diff-stream.js";
 export { fetchDiff } from "./fetch-diff.js";
 export { fork } from "./fork.js";

@@ -168,6 +168,19 @@ export interface VersionDiffEntry {
   after: EntryShape | null;
 }
 
+export interface VersionDiffOptions {
+  path?: string;
+}
+
+export interface VersionDiffStreamOptions extends VersionDiffOptions {
+  batchSize?: number;
+}
+
+export interface VersionDiffCountOptions extends VersionDiffOptions {
+  /** Count entries where either side has this node type. Omit to count all changed paths. */
+  nodeType?: NodeType;
+}
+
 export type MergeStrategy = "fail" | "ours" | "theirs";
 
 export interface ConflictEntry {

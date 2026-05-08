@@ -4,7 +4,13 @@ import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
 import { setup as coreSetup } from "../../core/setup.js";
 
 export { FsQuotaError } from "../../core/types.js";
-export type { WorkspaceUsage, WorkspaceUsageOptions } from "../../core/types.js";
+export type {
+  VersionDiffCountOptions,
+  VersionDiffOptions,
+  VersionDiffStreamOptions,
+  WorkspaceUsage,
+  WorkspaceUsageOptions,
+} from "../../core/types.js";
 
 /**
  * Structural interface matching `pg.PoolClient`.

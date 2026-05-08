@@ -1,4 +1,4 @@
-import type { VersionDiffEntry } from "../../types.js";
+import type { VersionDiffEntry, VersionDiffStreamOptions } from "../../types.js";
 import { pathToLtree, normalizePath } from "../../path-encoding.js";
 import {
   DIFF_DEFAULT_BATCH_SIZE,
@@ -15,7 +15,7 @@ import { fetchDiff } from "./fetch-diff.js";
 export const diffStream = op(async function* (
   ctx,
   other: string,
-  opts?: { path?: string; batchSize?: number },
+  opts?: VersionDiffStreamOptions,
 ): AsyncIterable<VersionDiffEntry> {
     if (other.length === 0) {
       throw new Error("diffStream: other must be a non-empty version label");

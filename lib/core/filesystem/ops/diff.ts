@@ -1,4 +1,4 @@
-import type { VersionDiffEntry } from "../../types.js";
+import type { VersionDiffEntry, VersionDiffOptions } from "../../types.js";
 import { pathToLtree, normalizePath } from "../../path-encoding.js";
 import { op } from "./context.js";
 import { fetchDiff } from "./fetch-diff.js";
@@ -19,7 +19,7 @@ import { fetchDiff } from "./fetch-diff.js";
 export const diff = op(async (
   ctx,
   other: string,
-  opts?: { path?: string },
+  opts?: VersionDiffOptions,
 ): Promise<VersionDiffEntry[]> => {
     if (other.length === 0) {
       throw new Error("diff: other must be a non-empty version label");

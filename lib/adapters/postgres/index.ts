@@ -5,7 +5,13 @@ import { setup as coreSetup } from "../../core/setup.js";
 import type postgres from "postgres";
 
 export { FsQuotaError } from "../../core/types.js";
-export type { WorkspaceUsage, WorkspaceUsageOptions } from "../../core/types.js";
+export type {
+  VersionDiffCountOptions,
+  VersionDiffOptions,
+  VersionDiffStreamOptions,
+  WorkspaceUsage,
+  WorkspaceUsageOptions,
+} from "../../core/types.js";
 
 /**
  * Wrap a postgres.js TransactionSql into a SqlClient.
