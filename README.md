@@ -236,8 +236,8 @@ bash-gres/drizzle        Drizzle adapter (setup, PgFileSystem, createDrizzleClie
 ## Development
 
 ```sh
-docker compose up -d   # start postgres on localhost:5433
-npm test               # run tests
+docker compose up -d   # start postgres on localhost:5434
+TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5434/bashgres_test npm test
 npm run typecheck      # type check
 npm run build          # compile to dist/
 ```

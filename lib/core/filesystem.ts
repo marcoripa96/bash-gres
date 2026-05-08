@@ -27,7 +27,7 @@ import {
   hybridSearch,
   validateEmbedding,
 } from "./search.js";
-import { FsBase } from "./filesystem/base.js";
+import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
 import { filesystemOpsContext } from "./filesystem/ops/context.js";
 import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
 import {
@@ -44,7 +44,7 @@ import {
 } from "./filesystem/internals/glob.js";
 import type { SqlParam } from "./types.js";
 
-export class PgFileSystem extends FsBase {
+export class PgFileSystem extends FsWriteOpsBase {
   [filesystemOpsContext](): FilesystemOpsContext<this> {
     const self = this;
     return {

@@ -58,17 +58,17 @@ await bash.exec("echo hello > /file.txt");
 
 ```sh
 npm run build        # tsc -> dist/
-npm run test         # vitest (requires postgres on localhost:5433)
+npm run test         # vitest (set TEST_DATABASE_URL for compose postgres on localhost:5434)
 npm run typecheck    # tsc --noEmit
 ```
 
 ### Running tests
 
-Tests require PostgreSQL with ltree extension on `localhost:5433`:
+Tests require PostgreSQL with ltree extension on `localhost:5434`:
 
 ```sh
 docker compose up -d
-npm test
+TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5434/bashgres_test npm test
 ```
 
 Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup via `tests/global-setup.ts`.

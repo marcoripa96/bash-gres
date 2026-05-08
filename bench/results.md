@@ -1,6 +1,6 @@
 # bash-gres bench results
 
-PostgreSQL on `localhost:5433` (docker compose). 1000-file workspaces unless noted.
+PostgreSQL on `localhost:5434` (docker compose). 1000-file workspaces unless noted.
 
 ## main vs cow-redesign
 

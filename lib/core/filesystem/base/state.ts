@@ -1,0 +1,363 @@
+import { randomUUID } from "crypto";
+import type { PgFileSystemOptions, SqlClient, SqlParam } from "../../types.js";
+import { FsError, SqlError } from "../../types.js";
+import { readonlySqlClient } from "../../readonly.js";
+import { normalizePath } from "../../path-encoding.js";
+import {
+  compileExcludes,
+  excludeWhereSql,
+  isExcluded,
+  type CompiledExcludes,
+} from "../../exclude.js";
+import {
+  DEFAULT_MAX_CP_NODES,
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_FILE_SIZE,
+  DEFAULT_MAX_FILES,
+  DEFAULT_MAX_SYMLINK_DEPTH,
+  DEFAULT_STATEMENT_TIMEOUT_MS,
+  DEFAULT_VERSION,
+} from "../internals/constants.js";
+
+export class FsStateBase {
+  protected client: SqlClient;
+  protected rawDb: SqlClient;
+  readonly workspaceId: string;
+  /**
+   * Mutable backing for the public `version` getter. Internal code that needs
+   * to change the instance's label after a successful commit (e.g. `renameVersion()`)
+   * writes here.
+   */
+  protected versionLabel: string;
+  readonly permissions: { read: boolean; write: boolean };
+  protected maxFileSize: number;
+  protected maxReadSize: number | undefined;
+  protected maxFiles: number;
+  protected maxWorkspaceBytes: number | undefined;
+  protected maxDepth: number;
+  protected maxSymlinkDepth: number;
+  protected maxCpNodes: number;
+  protected statementTimeoutMs: number;
+  protected embed?: (text: string) => Promise<number[]>;
+  protected embeddingDimensions?: number;
+  protected rootDir: string;
+  protected versionRootPath: string;
+  protected excludes: CompiledExcludes;
+  protected readonly baseOptions: PgFileSystemOptions;
+  protected cachedVersionId: number | null = null;
+  protected cachedVersionRootId: number | null = null;
+  protected blobsHasEmbeddingCache: boolean | null = null;
+  /**
+   * Optimistic visible-node count for `validateNodeCount`. Avoids running a
+   * `COUNT(*)` over the COW-resolved view of the whole workspace on every
+   * write while there's still comfortable headroom under `maxFiles`. May
+   * drift upward when entries are removed (we never decrement); the drift
+   * is self-correcting because as the cache approaches `maxFiles` we fall
+   * back to the real `COUNT` and reset.
+   */
+  protected cachedNodeCount: number | null = null;
+  /**
+   * When non-null, this instance is a transaction-bound facade. All `withWorkspace()`
+   * calls on the facade run `fn(txClient)` directly instead of opening a new
+   * transaction. The outer `transaction()` call has already wired up RLS
+   * (`app.workspace_id`) and `statement_timeout` on this client.
+   */
+  protected txClient: SqlClient | null = null;
+  /**
+   * Hooks queued by tx-bound facade methods (e.g. `renameVersion()`) to apply
+   * instance-state mutations on the originating instance only after the outer
+   * transaction commits. Set on the facade by `transaction()`; never mutated on
+   * a top-level instance.
+   */
+  protected postCommitHooks: Array<() => void> | null = null;
+  /**
+   * The instance that produced this facade via `createTxFacade()`. Used so that
+   * post-commit hooks (such as label updates) can target the surviving outer
+   * instance rather than the transient facade.
+   */
+  protected originInstance: this | null = null;
+  /**
+   * Lazily-built `SqlClient` that auto-injects `set_config('app.workspace_id',...)`
+   * and `set_config('statement_timeout',...)` as a CTE on every read query.
+   * Lets single-statement reads bypass the BEGIN/SET/COMMIT triplet — the
+   * `set_config(local=true)` calls take effect inside the implicit per-statement
+   * transaction so RLS and the timeout are still honored.
+   */
+  private cachedReadOnlyClient: SqlClient | null = null;
+
+  constructor(options: PgFileSystemOptions) {
+    const perms = {
+      read: options.permissions?.read ?? true,
+      write: options.permissions?.write ?? true,
+    };
+    this.permissions = perms;
+    this.rawDb = options.db;
+    this.client = perms.write ? options.db : readonlySqlClient(options.db);
+    this.workspaceId = options.workspaceId ?? randomUUID();
+    this.versionLabel = options.version ?? DEFAULT_VERSION;
+    if (this.versionLabel.length === 0) {
+      throw new Error("version must be a non-empty string");
+    }
+    this.maxFileSize = options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE;
+    this.maxReadSize = options.maxReadSize;
+    this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
+    this.maxWorkspaceBytes = options.maxWorkspaceBytes;
+    this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    this.maxSymlinkDepth =
+      options.maxSymlinkDepth ?? DEFAULT_MAX_SYMLINK_DEPTH;
+    this.maxCpNodes = options.maxCpNodes ?? DEFAULT_MAX_CP_NODES;
+    this.statementTimeoutMs =
+      options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
+    this.embed = options.embed;
+    this.embeddingDimensions = options.embeddingDimensions;
+    this.rootDir = normalizePath(options.rootDir ?? "/");
+    this.versionRootPath = normalizePath(options.versionRoot ?? "/");
+    this.excludes = compileExcludes(
+      options.exclude,
+      this.rootDir,
+      this.workspaceId,
+    );
+    this.baseOptions = {
+      ...options,
+      workspaceId: this.workspaceId,
+      versionRoot: this.versionRootPath,
+    };
+  }
+
+  /**
+   * The version label this instance is bound to. Backed by a mutable private field
+   * so that operations like `renameVersion()` can update the label after commit.
+   */
+  get version(): string {
+    return this.versionLabel;
+  }
+
+  /** Absolute workspace path that owns this instance's version graph. */
+  get versionRoot(): string {
+    return this.versionRootPath;
+  }
+
+  // -- Transaction wrapper (sets RLS context + timeout) -----------------------
+
+  /**
+   * Open a transaction on `client`, install the per-tx workspace + timeout
+   * settings, and run `fn`. Used by both `withWorkspace()` and `transaction()`.
+   */
+  protected runInWorkspace<T>(
+    client: SqlClient,
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    return client.transaction(async (tx) => {
+      await tx.query(
+        `SELECT
+           set_config('app.workspace_id', $1, true),
+           set_config('statement_timeout', $2, true)`,
+        [this.workspaceId, String(this.statementTimeoutMs)],
+      );
+      return fn(tx);
+    });
+  }
+
+  /**
+   * Run `fn` inside a workspace-scoped transaction. If this instance is a
+   * transaction-bound facade (i.e. `txClient` is set), reuse the open
+   * transaction directly. Maps PostgreSQL "read-only transaction" violations
+   * (SQLSTATE 25006) into the public `EPERM` `FsError`.
+   */
+  protected async withWorkspace<T>(
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    try {
+      if (this.txClient) {
+        return await fn(this.txClient);
+      }
+      return await this.runInWorkspace(this.client, fn);
+    } catch (e) {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Read-only variant of `withWorkspace`. When not inside an outer transaction,
+   * runs `fn` against a wrapper client that injects `set_config` for RLS and
+   * statement timeout as a CTE on every query — saving the BEGIN/SET/COMMIT
+   * round-trips that a normal `withWorkspace` would incur. Each query inside
+   * `fn` runs in its own implicit transaction; callers must not depend on
+   * cross-query snapshot atomicity (real filesystem reads aren't atomic across
+   * calls either).
+   */
+  protected async withReadOnlyWorkspace<T>(
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    try {
+      if (this.txClient) {
+        return await fn(this.txClient);
+      }
+      return await fn(this.getReadOnlyClient());
+    } catch (e) {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
+    }
+  }
+
+  private getReadOnlyClient(): SqlClient {
+    if (this.cachedReadOnlyClient) return this.cachedReadOnlyClient;
+    const inner = this.client;
+    const workspaceId = this.workspaceId;
+    const timeoutStr = String(this.statementTimeoutMs);
+    const wrap = (text: string, params: SqlParam[]): { sql: string; params: SqlParam[] } => {
+      const wsIdx = params.length + 1;
+      const toIdx = params.length + 2;
+      const setupCte = `_ws AS MATERIALIZED (SELECT set_config('app.workspace_id', $${wsIdx}, true) AS ws, set_config('statement_timeout', $${toIdx}, true) AS st)`;
+      const stripped = text.replace(/^[\s;]+/, "");
+      const withMatch = /^WITH(\s+RECURSIVE)?(\s+)/i.exec(stripped);
+      const wrappedText = withMatch
+        ? `WITH${withMatch[1] ?? ""}${withMatch[2]}${setupCte}, ${stripped.slice(withMatch[0].length)}`
+        : `WITH ${setupCte} ${stripped}`;
+      return { sql: wrappedText, params: [...params, workspaceId, timeoutStr] };
+    };
+    this.cachedReadOnlyClient = {
+      query: async (text, params = []) => {
+        const w = wrap(text, params);
+        return inner.query(w.sql, w.params);
+      },
+      transaction: inner.transaction.bind(inner),
+    };
+    return this.cachedReadOnlyClient;
+  }
+
+  /**
+   * Run `fn` inside a single database transaction. `fn` receives a
+   * transaction-bound facade for the same workspace, version, permissions,
+   * limits, and rootDir. Multiple operations on the facade share the same
+   * transaction: if `fn` throws or rejects, every write rolls back; if `fn`
+   * returns, the transaction commits and the return value is the
+   * `transaction()` result.
+   *
+   * Re-entrant: calling `transaction()` on a facade that is already inside an
+   * outer transaction reuses that outer transaction (no nested savepoints).
+   *
+   * Read-only instances still produce a read-only transaction; writes inside
+   * `fn` raise `FsError(EPERM)`.
+   *
+   * The facade should not be retained after `fn` resolves — its underlying
+   * SQL transaction has closed and further calls will fail.
+   */
+  async transaction<T>(fn: (tx: this) => Promise<T>): Promise<T> {
+    if (this.txClient) {
+      return fn(this);
+    }
+    const hooks: Array<() => void> = [];
+    try {
+      const value = await this.runInWorkspace(this.client, async (sqlTx) => {
+        const facade = this.createTxFacade(sqlTx, hooks);
+        return fn(facade);
+      });
+      // Outer tx committed — apply queued post-commit state mutations on this
+      // instance. If the tx threw, we skip these and the instance's state is
+      // unchanged.
+      for (const hook of hooks) hook();
+      return value;
+    } catch (e) {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw new FsError("EPERM", "read-only file system", "/");
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Build a transaction-bound facade that shares this instance's configuration
+   * and runs every operation against the supplied SQL transaction client.
+   */
+  protected createTxFacade(
+    sqlTx: SqlClient,
+    postCommitHooks: Array<() => void>,
+  ): this {
+    const Ctor = this.constructor as new (opts: PgFileSystemOptions) => this;
+    const facade = new Ctor({
+      ...this.baseOptions,
+      db: this.rawDb,
+      // Use the live label, not the construction-time one, so a facade created
+      // after a successful renameVersion() still points at the right version.
+      version: this.versionLabel,
+    });
+    facade.txClient = sqlTx;
+    facade.cachedVersionId = this.cachedVersionId;
+    facade.cachedVersionRootId = this.cachedVersionRootId;
+    facade.postCommitHooks = postCommitHooks;
+    facade.originInstance = this;
+    return facade;
+  }
+
+  // -- Path translation & access guards ---------------------------------------
+
+  protected toInternalPath(userPath: string): string {
+    const p = normalizePath(userPath);
+    if (this.rootDir === "/") return p;
+    return p === "/" ? this.rootDir : normalizePath(this.rootDir + p);
+  }
+
+  protected toUserPath(internalPath: string): string {
+    if (this.rootDir === "/") return internalPath;
+    if (internalPath === this.rootDir) return "/";
+    return internalPath.slice(this.rootDir.length);
+  }
+
+  protected guardRead(userPath: string): string {
+    return this.toInternalPath(normalizePath(userPath));
+  }
+
+  protected guardWrite(userPath: string): string {
+    return this.toInternalPath(normalizePath(userPath));
+  }
+
+  /**
+   * Build the SQL fragment that filters out excluded paths from a result set.
+   * Returns `{ sql: "TRUE", params: [] }` when no patterns are configured.
+   *
+   * `pathExpr` names the ltree path column in the surrounding query
+   * (e.g. `e.path`, `path`, `src.path`). `nextParamIdx` is the next free `$N`.
+   */
+  protected buildExcludeClause(
+    pathExpr: string,
+    nextParamIdx: number,
+  ): { sql: string; params: SqlParam[] } {
+    return excludeWhereSql(this.excludes, pathExpr, nextParamIdx);
+  }
+
+  /**
+   * Throw `ENOENT` if `internalPath` matches an exclude pattern. Used by every
+   * public write method so that excluded paths are invisible to writers, not
+   * merely shadowed at read time.
+   */
+  protected guardExcludedWrite(
+    internalPath: string,
+    op: string,
+    userPath: string,
+  ): void {
+    if (this.excludes.empty) return;
+    if (isExcluded(this.excludes, internalPath)) {
+      throw new FsError("ENOENT", `no such file or directory, ${op}`, userPath);
+    }
+  }
+
+  protected guardRootBoundary(internalPath: string): void {
+    if (this.rootDir === "/") return;
+    if (
+      internalPath !== this.rootDir &&
+      !internalPath.startsWith(this.rootDir + "/")
+    ) {
+      throw new FsError(
+        "EACCES",
+        "symlink target outside root boundary",
+        this.toUserPath(internalPath),
+      );
+    }
+  }
+}
