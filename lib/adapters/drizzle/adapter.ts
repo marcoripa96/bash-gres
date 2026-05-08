@@ -217,5 +217,11 @@ export type DrizzlePgFileSystemOptions = Omit<PgFileSystemOptions, "db"> & {
 export class PgFileSystem extends CorePgFileSystem {
   constructor(options: DrizzlePgFileSystemOptions) {
     super({ ...options, db: createDrizzleClient(options.db) });
+    // The core stored the wrapped `SqlClient` as `rawDb` because that's what
+    // it received. Replace it with the original Drizzle db so fork() and
+    // createVersionedFilesystem() pass the un-wrapped value back into this
+    // constructor for a fresh (single-level) wrap. Otherwise children get a
+    // SqlClient-of-SqlClient whose `query` calls `db.execute` on a SqlClient.
+    this.rawDb = options.db;
   }
 }

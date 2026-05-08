@@ -21,7 +21,17 @@ import {
 
 export class FsStateBase {
   protected client: SqlClient;
-  protected rawDb: SqlClient;
+  /**
+   * The value the adapter wants threaded back into its own constructor when the
+   * core needs to reconstruct a sibling instance (fork, scope, tx facade). For
+   * raw `CorePgFileSystem` consumers this is the same `SqlClient` as `client`;
+   * for adapters (drizzle, node-postgres, postgres-js) it is the original
+   * un-wrapped user db so the adapter constructor's `createXClient(options.db)`
+   * runs exactly once per chain. Storing the wrapped `SqlClient` here would
+   * make adapter forks wrap a `SqlClient` again, producing a client that
+   * dispatches to a non-existent `db.execute` and crashes on first query.
+   */
+  protected rawDb: unknown;
   readonly workspaceId: string;
   /**
    * Mutable backing for the public `version` getter. Internal code that needs
@@ -282,7 +292,10 @@ export class FsStateBase {
     const Ctor = this.constructor as new (opts: PgFileSystemOptions) => this;
     const facade = new Ctor({
       ...this.baseOptions,
-      db: this.rawDb,
+      // `rawDb` is opaque to the core — it's whatever the adapter stored as the
+      // input it wants to receive again. The cast satisfies the static
+      // signature; the runtime type matches the adapter's constructor input.
+      db: this.rawDb as SqlClient,
       // Use the live label, not the construction-time one, so a facade created
       // after a successful renameVersion() still points at the right version.
       version: this.versionLabel,

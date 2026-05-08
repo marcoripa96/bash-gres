@@ -168,6 +168,9 @@ export type NodePgFileSystemOptions = Omit<PgFileSystemOptions, "db"> & {
 export class PgFileSystem extends CorePgFileSystem {
   constructor(options: NodePgFileSystemOptions) {
     super({ ...options, db: createNodePgClient(options.db) });
+    // See drizzle adapter: keep the un-wrapped raw db here so child instances
+    // produced by fork() / scope helpers re-wrap from the original source.
+    this.rawDb = options.db;
   }
 }
 

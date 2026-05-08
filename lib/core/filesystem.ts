@@ -91,7 +91,9 @@ export class PgFileSystem extends FsWriteOpsBase {
         ) => this;
         const scoped = new Ctor({
           ...self.baseOptions,
-          db: self.rawDb,
+          // See note on `rawDb` in `FsStateBase`: opaque to the core, fed back
+          // verbatim into whichever constructor the adapter exposes.
+          db: self.rawDb as SqlClient,
           rootDir: internalPath,
           versionRoot: internalPath,
           version,
@@ -110,7 +112,8 @@ export class PgFileSystem extends FsWriteOpsBase {
         ) => this;
         const child = new Ctor({
           ...self.baseOptions,
-          db: self.rawDb,
+          // See note on `rawDb` in `FsStateBase`.
+          db: self.rawDb as SqlClient,
           version: newVersion,
         });
         if (self.txClient) {

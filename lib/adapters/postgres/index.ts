@@ -136,6 +136,9 @@ export type PostgresPgFileSystemOptions<TTypes extends Record<string, unknown> =
 export class PgFileSystem extends CorePgFileSystem {
   constructor(options: PostgresPgFileSystemOptions) {
     super({ ...options, db: createPostgresClient(options.db) });
+    // See drizzle adapter: keep the un-wrapped raw db here so child instances
+    // produced by fork() / scope helpers re-wrap from the original source.
+    this.rawDb = options.db;
   }
 }
 
