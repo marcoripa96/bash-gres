@@ -505,6 +505,7 @@ export class FsBase {
       [this.workspaceId, id],
     );
     this.cachedVersionId = id;
+    this.cachedNodeCount = 0;
     return id;
   }
 

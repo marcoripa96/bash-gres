@@ -134,12 +134,16 @@ export class PgFileSystem extends FsBase {
     await this.withWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
-      await tx.query(
+      const rootInsert = await tx.query(
         `INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
          VALUES ($1, $2, $3::ltree, 'directory', $4)
-         ON CONFLICT (workspace_id, version_id, path) DO NOTHING`,
+         ON CONFLICT (workspace_id, version_id, path) DO NOTHING
+         RETURNING 1`,
         [this.workspaceId, versionId, rootLtree, 0o755],
       );
+      if (this.cachedNodeCount !== null && rootInsert.rows.length > 0) {
+        this.cachedNodeCount++;
+      }
 
       if (this.rootDir !== "/") {
         await this.internalMkdir(tx, versionId, this.rootDir, {

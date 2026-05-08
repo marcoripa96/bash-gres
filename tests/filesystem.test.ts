@@ -82,10 +82,10 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
       expect(counted.transactions()).toBe(1);
 
       await fastFs.writeFile("/first.txt", "first");
-      expect(counted.transactions()).toBe(2);
+      expect(counted.transactions()).toBe(1);
 
       await fastFs.writeFile("/second.txt", "second");
-      expect(counted.transactions()).toBe(2);
+      expect(counted.transactions()).toBe(1);
       expect(await fastFs.readFile("/second.txt")).toBe("second");
     });
 
@@ -99,10 +99,10 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
 
       await fastFs.init();
       await fastFs.writeFile("/warm.txt", "warm");
-      expect(counted.transactions()).toBe(2);
+      expect(counted.transactions()).toBe(1);
 
       await fastFs.writeFile("/a/b/file.txt", "deep");
-      expect(counted.transactions()).toBe(3);
+      expect(counted.transactions()).toBe(2);
       expect(await fastFs.readFile("/a/b/file.txt")).toBe("deep");
     });
 
