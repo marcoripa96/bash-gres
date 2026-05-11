@@ -75,13 +75,12 @@ function buildVersions() {
       createdAt: timestamp("created_at", { withTimezone: true })
         .notNull()
         .defaultNow(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
     },
     (table) => [
-      uniqueIndex("unique_workspace_version_root_label").on(
-        table.workspaceId,
-        table.versionRootId,
-        table.label,
-      ),
+      uniqueIndex("unique_workspace_version_root_label")
+        .on(table.workspaceId, table.versionRootId, table.label)
+        .where(sql`${table.versionRootId} IS NOT NULL AND ${table.deletedAt} IS NULL`),
       index("idx_fs_versions_parent").on(
         table.workspaceId,
         table.versionRootId,

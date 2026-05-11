@@ -25,10 +25,11 @@ export const fork = op(async (
       // both ancestor INSERTs become no-ops.
       const r = await tx.query<{ new_id: number | null; existing_id: number | null }>(
         `WITH existing AS (
-           SELECT id FROM fs_versions
-           WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
-           LIMIT 1
-         ),
+            SELECT id FROM fs_versions
+            WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+              AND deleted_at IS NULL
+            LIMIT 1
+          ),
          new_version AS (
            INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
            SELECT $1, $2, $3, $4

@@ -11,11 +11,13 @@ import { diffCount } from "./diff-count.js";
 import { diffStream } from "./diff-stream.js";
 import { fork } from "./fork.js";
 import { getUsage } from "./get-usage.js";
+import { listHistory } from "./list-history.js";
 import { listVersions } from "./list-versions.js";
 import { merge } from "./merge.js";
 import { promoteTo } from "./promote-to.js";
 import { renameVersion } from "./rename-version.js";
 import { revert } from "./revert.js";
+import { sweepHistory } from "./sweep-history.js";
 import { versioned } from "./versioned.js";
 
 type DropContext<TOp> = TOp extends (
@@ -33,6 +35,7 @@ export interface FilesystemOpsApi<TFs> {
   diffStream: DropContext<typeof diffStream<TFs>>;
   fork: DropContext<typeof fork<TFs>>;
   detach: DropContext<typeof detach<TFs>>;
+  listHistory: DropContext<typeof listHistory<TFs>>;
   listVersions: DropContext<typeof listVersions<TFs>>;
   deleteVersion: DropContext<typeof deleteVersion<TFs>>;
   renameVersion: DropContext<typeof renameVersion<TFs>>;
@@ -40,6 +43,7 @@ export interface FilesystemOpsApi<TFs> {
   merge: DropContext<typeof merge<TFs>>;
   cherryPick: DropContext<typeof cherryPick<TFs>>;
   revert: DropContext<typeof revert<TFs>>;
+  sweepHistory: DropContext<typeof sweepHistory<TFs>>;
 }
 
 type FilesystemOperation<
@@ -86,6 +90,7 @@ export function installFilesystemOps<
   installOp(prototype, "diffStream", diffStream<TFs>);
   installOp(prototype, "fork", fork<TFs>);
   installOp(prototype, "detach", detach<TFs>);
+  installOp(prototype, "listHistory", listHistory<TFs>);
   installOp(prototype, "listVersions", listVersions<TFs>);
   installOp(prototype, "deleteVersion", deleteVersion<TFs>);
   installOp(prototype, "renameVersion", renameVersion<TFs>);
@@ -93,4 +98,5 @@ export function installFilesystemOps<
   installOp(prototype, "merge", merge<TFs>);
   installOp(prototype, "cherryPick", cherryPick<TFs>);
   installOp(prototype, "revert", revert<TFs>);
+  installOp(prototype, "sweepHistory", sweepHistory<TFs>);
 }

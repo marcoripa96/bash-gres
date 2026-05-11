@@ -235,7 +235,7 @@ describe.each(TEST_ADAPTERS)(
         expect(labels).toContain(result.displacedLabel);
       });
 
-      it("dropPrevious: true deletes the displaced version", async () => {
+      it("dropPrevious: true hides the displaced label but keeps git-like history", async () => {
         const fs = new PgFileSystem({
           db: client,
           workspaceId: WS,
@@ -256,12 +256,20 @@ describe.each(TEST_ADAPTERS)(
         const labels = await exp.listVersions();
         expect(labels).toEqual(["main"]);
 
+        const history = await exp.listHistory();
+        expect(history[0]!.version).toBe("main");
+        expect(history[0]!.parentVersion).toMatch(/^main-prev-\d{14}-\d+$/);
+        expect(history[0]!.changes.map((entry) => `${entry.change}:${entry.path}`)).toEqual([
+          "added:/extra.txt",
+        ]);
+        expect(history[1]!.deletedAt).toBeInstanceOf(Date);
+
         // Promoted version still has every file it had before.
         expect(await exp.readFile("/shared.txt")).toBe("from-main");
         expect(await exp.readFile("/extra.txt")).toBe("from-exp");
       });
 
-      it("rolls back the entire promotion if deleting the previous fails (descendants)", async () => {
+      it("dropPrevious: true preserves history even when the previous version has descendants", async () => {
         const fs = new PgFileSystem({
           db: client,
           workspaceId: WS,
@@ -278,19 +286,15 @@ describe.each(TEST_ADAPTERS)(
         const exp = await fs.fork("exp");
         await exp.writeFile("/extra.txt", "from-exp");
 
-        const beforeLabels = (await fs.listVersions()).slice();
-        const beforeMainId = await getVersionId(client, WS, "main");
+        const result = await exp.promoteTo("main", { dropPrevious: true });
 
-        await expect(
-          exp.promoteTo("main", { dropPrevious: true }),
-        ).rejects.toThrow(/descendants/);
+        expect(result.droppedPrevious).toBe(true);
+        expect(exp.version).toBe("main");
+        expect(await fs.listVersions()).toEqual(["main", "sibling"]);
 
-        // Full rollback: labels, parentage, and instance state are unchanged.
-        expect(exp.version).toBe("exp");
-        const afterLabels = (await fs.listVersions()).slice();
-        expect(afterLabels).toEqual(beforeLabels);
-        const afterMainId = await getVersionId(client, WS, "main");
-        expect(afterMainId).toBe(beforeMainId);
+        const history = await exp.listHistory();
+        expect(history[0]!.changes.some((entry) => entry.path === "/extra.txt")).toBe(true);
+        expect(history.some((entry) => entry.deletedAt !== null)).toBe(true);
       });
 
       it("descendants of the promoted version keep their visible contents", async () => {

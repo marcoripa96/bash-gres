@@ -90,8 +90,9 @@ export class FsVersionBase extends FsStateBase {
 
     const existingVersion = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
-       LIMIT 1`,
+        WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+          AND deleted_at IS NULL
+        LIMIT 1`,
       [this.workspaceId, versionRootId, DEFAULT_VERSION],
     );
     if (existingVersion.rows.length > 0) return;
@@ -145,8 +146,9 @@ export class FsVersionBase extends FsStateBase {
     const versionRootId = await this.getVersionRootId(tx);
     const r = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
-       LIMIT 1`,
+        WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+          AND deleted_at IS NULL
+        LIMIT 1`,
       [this.workspaceId, versionRootId, this.versionLabel],
     );
     if (r.rows.length === 0) {
@@ -163,8 +165,9 @@ export class FsVersionBase extends FsStateBase {
     const versionRootId = await this.getVersionRootId(tx);
     const existing = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
-       LIMIT 1`,
+        WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+          AND deleted_at IS NULL
+        LIMIT 1`,
       [this.workspaceId, versionRootId, this.versionLabel],
     );
     if (existing.rows.length > 0) {
@@ -197,8 +200,9 @@ export class FsVersionBase extends FsStateBase {
     const versionRootId = await this.getVersionRootId(tx);
     const r = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
-       WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
-       LIMIT 1`,
+        WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+          AND deleted_at IS NULL
+        LIMIT 1`,
       [this.workspaceId, versionRootId, label],
     );
     return r.rows.length > 0 ? Number(r.rows[0]!.id) : null;

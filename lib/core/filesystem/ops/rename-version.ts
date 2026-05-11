@@ -45,7 +45,7 @@ export const renameVersion = op(async (
   return result;
 });
 
-async function renameVersionInTransaction<TFs>(
+export async function renameVersionInTransaction<TFs>(
   ctx: FilesystemOpsContext<TFs>,
   tx: SqlClient,
   newLabel: string,
@@ -59,6 +59,7 @@ async function renameVersionInTransaction<TFs>(
   const targetRows = await tx.query<{ id: number }>(
     `SELECT id FROM fs_versions
      WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+       AND deleted_at IS NULL
      FOR UPDATE`,
     [ctx.workspaceId, versionRootId, newLabel],
   );

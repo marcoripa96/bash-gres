@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS fs_versions (
     version_root_id    bigint REFERENCES fs_version_roots(id) ON DELETE RESTRICT,
     label              text NOT NULL CHECK (length(label) > 0),
     parent_version_id  bigint REFERENCES fs_versions(id) ON DELETE RESTRICT,
-    created_at         timestamptz NOT NULL DEFAULT now()
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    deleted_at         timestamptz
 );
 
 CREATE TABLE IF NOT EXISTS version_ancestors (
@@ -59,6 +60,12 @@ EXCEPTION WHEN duplicate_column THEN
 END $$;
 
 DO $$ BEGIN
+  ALTER TABLE fs_versions ADD COLUMN deleted_at timestamptz;
+EXCEPTION WHEN duplicate_column THEN
+  NULL;
+END $$;
+
+DO $$ BEGIN
   ALTER TABLE fs_versions
     ADD CONSTRAINT fs_versions_version_root_id_fkey
     FOREIGN KEY (version_root_id) REFERENCES fs_version_roots(id) ON DELETE RESTRICT;
@@ -67,6 +74,7 @@ EXCEPTION WHEN duplicate_object THEN
 END $$;
 
 ALTER TABLE fs_versions DROP CONSTRAINT IF EXISTS unique_workspace_version_label;
+DROP INDEX IF EXISTS unique_workspace_version_root_label;
 DROP INDEX IF EXISTS idx_fs_versions_parent;
 
 INSERT INTO fs_version_roots (workspace_id, path)
@@ -92,7 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_fs_version_roots_path_gist
 -- Version labels are unique within a version root, not the whole workspace
 CREATE UNIQUE INDEX IF NOT EXISTS unique_workspace_version_root_label
   ON fs_versions (workspace_id, version_root_id, label)
-  WHERE version_root_id IS NOT NULL;
+  WHERE version_root_id IS NOT NULL AND deleted_at IS NULL;
 
 -- Visibility lookup: per-workspace, per-path, ordered by version
 CREATE INDEX IF NOT EXISTS idx_fs_entries_path_version

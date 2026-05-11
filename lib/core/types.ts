@@ -181,6 +181,33 @@ export interface VersionDiffCountOptions extends VersionDiffOptions {
   nodeType?: NodeType;
 }
 
+export interface VersionHistoryOptions extends VersionDiffOptions {
+  /** Maximum number of versions to return from the current version backwards. */
+  limit?: number;
+  /** Include the root version as additions from an empty tree. Default: true. */
+  includeRoot?: boolean;
+}
+
+export interface VersionHistoryEntry {
+  versionId: number;
+  version: string;
+  parentVersionId: number | null;
+  parentVersion: string | null;
+  createdAt: Date;
+  /** Set when the branch/ref label was deleted but history was retained. */
+  deletedAt: Date | null;
+  changes: VersionDiffEntry[];
+}
+
+export interface SweepHistoryResult {
+  /** Active versions retained as self-contained snapshots. */
+  keptVersions: number;
+  /** Hidden/deleted versions physically removed. */
+  removedVersions: number;
+  removedEntries: number;
+  removedBlobs: number;
+}
+
 export type MergeStrategy = "fail" | "ours" | "theirs";
 
 export interface ConflictEntry {

@@ -6,6 +6,7 @@ export const listVersions = op(async (ctx): Promise<string[]> => {
       const r = await tx.query<{ label: string }>(
         `SELECT label FROM fs_versions
          WHERE workspace_id = $1 AND version_root_id = $2
+           AND deleted_at IS NULL
          ORDER BY label`,
         [ctx.workspaceId, versionRootId],
       );

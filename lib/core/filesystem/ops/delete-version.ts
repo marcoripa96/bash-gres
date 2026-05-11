@@ -15,6 +15,7 @@ export const deleteVersion = op(async (
       const r = await tx.query<{ id: number }>(
         `SELECT id FROM fs_versions
          WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
+           AND deleted_at IS NULL
          LIMIT 1`,
         [ctx.workspaceId, versionRootId, version],
       );

@@ -50,7 +50,7 @@ export const getUsage = op(async (
            WHERE node_type = 'file' AND blob_hash IS NOT NULL
           )
           SELECT
-            (SELECT COUNT(*) FROM fs_versions WHERE workspace_id = $1 AND version_root_id = $5) AS versions,
+            (SELECT COUNT(*) FROM fs_versions WHERE workspace_id = $1 AND version_root_id = $5 AND deleted_at IS NULL) AS versions,
             (SELECT COUNT(*)
              FROM fs_entries e
              JOIN fs_versions v ON v.workspace_id = e.workspace_id AND v.id = e.version_id

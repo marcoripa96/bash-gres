@@ -55,6 +55,17 @@ async function countAncestors(
   return Number(r.rows[0]?.count ?? 0);
 }
 
+async function countVersions(
+  client: SqlClient,
+  workspaceId: string,
+): Promise<number> {
+  const r = await client.query<CountRow>(
+    `SELECT COUNT(*)::int AS count FROM fs_versions WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+  return Number(r.rows[0]?.count ?? 0);
+}
+
 describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
   let client: SqlClient;
   let teardown: () => Promise<void>;
@@ -306,8 +317,8 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
   });
 
-  describe("GC on deleteVersion", () => {
-    it("removes blobs no longer referenced after the version's entries are deleted", async () => {
+  describe("git-like deleteVersion", () => {
+    it("hides the version label but preserves blobs and entries for history", async () => {
       const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
       await v1.init();
       await v1.writeFile("/keep.txt", "keep");
@@ -319,13 +330,16 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
 
       await v1.deleteVersion("v2");
 
-      // v2's unique blob "ephemeral" is now unreferenced -> GC'd.
-      expect(await countBlobs(client, WS)).toBe(blobsAfterV1);
+      // v2's unique blob is retained because deleting a version removes the
+      // active label/ref, not the underlying commit data.
+      expect(await countBlobs(client, WS)).toBe(blobsAfterV1 + 1);
+      expect(await countEntries(client, WS, "v2")).toBeGreaterThan(0);
+      expect(await v1.listVersions()).toEqual(["v1"]);
       // v1's blob is intact.
       expect(await v1.readFile("/keep.txt")).toBe("keep");
     });
 
-    it("does not GC a blob still referenced by another version", async () => {
+    it("keeps shared blobs readable after deleting a label", async () => {
       const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
       await v1.init();
       await v1.writeFile("/shared.txt", "still-needed");
@@ -336,25 +350,28 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       const v3 = await v1.fork("v3");
       await v3.writeFile("/another.txt", "still-needed"); // same blob hash
 
-      // Delete v3. Its entry for /another.txt goes away, but the blob is still
-      // referenced by v1's entry for /shared.txt (same content, same hash).
+      // Delete v3's active label. Its entries remain as retained history.
       await v1.deleteVersion("v3");
 
       expect(await v1.readFile("/shared.txt")).toBe("still-needed");
       expect(await v2.readFile("/shared.txt")).toBe("still-needed");
     });
 
-    it("refuses to delete a version with descendants", async () => {
+    it("allows deleting a label with descendants and preserves ancestry", async () => {
       const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
       await v1.init();
       const v2 = await v1.fork("v2");
-      await v2.fork("v3");
+      const v3 = await v2.fork("v3");
 
-      // Delete v2 from a sibling viewpoint (v1 is the parent of v2 and ancestor of v3).
-      await expect(v1.deleteVersion("v2")).rejects.toThrow(/descendants/);
+      await v1.deleteVersion("v2");
+
+      expect(await v1.listVersions()).toEqual(["v1", "v3"]);
+      const history = await v3.listHistory();
+      const deletedAncestor = history.find((entry) => entry.version === "v2");
+      expect(deletedAncestor?.deletedAt).not.toBeNull();
     });
 
-    it("removes closure rows for the deleted version", async () => {
+    it("keeps closure rows for deleted labels", async () => {
       const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
       await v1.init();
       await v1.fork("v2");
@@ -363,8 +380,64 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       await v1.deleteVersion("v2");
       const afterDelete = await countAncestors(client, WS);
 
-      // Removed v2's two closure rows (self + parent).
-      expect(afterDelete).toBe(beforeDelete - 2);
+      expect(afterDelete).toBe(beforeDelete);
+    });
+  });
+
+  describe("sweepHistory", () => {
+    it("physically removes deleted history while preserving the active snapshot", async () => {
+      const main = new PgFileSystem({ db: client, workspaceId: WS, version: "main" });
+      await main.init();
+      await main.writeFile("/base.txt", "base");
+
+      const exp = await main.fork("exp");
+      await exp.writeFile("/exp.txt", "exp");
+      await exp.promoteTo("main", { dropPrevious: true });
+
+      expect(await exp.listVersions()).toEqual(["main"]);
+      expect((await exp.listHistory()).length).toBeGreaterThan(1);
+      const versionsBefore = await countVersions(client, WS);
+      const blobsBefore = await countBlobs(client, WS);
+
+      const result = await exp.sweepHistory();
+
+      expect(result.keptVersions).toBe(1);
+      expect(result.removedVersions).toBe(versionsBefore - 1);
+      expect(result.removedBlobs).toBeLessThanOrEqual(blobsBefore);
+      expect(await countVersions(client, WS)).toBe(1);
+      expect(await countAncestors(client, WS)).toBe(1);
+      expect(await exp.listVersions()).toEqual(["main"]);
+      expect(await exp.readFile("/base.txt")).toBe("base");
+      expect(await exp.readFile("/exp.txt")).toBe("exp");
+
+      const history = await exp.listHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0]!.parentVersion).toBeNull();
+      expect(history[0]!.changes.map((entry) => entry.path)).toEqual(
+        expect.arrayContaining(["/base.txt", "/exp.txt"]),
+      );
+    });
+
+    it("flattens multiple active labels and removes their shared ancestry", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/shared.txt", "from-v1");
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/v2.txt", "from-v2");
+
+      const result = await v2.sweepHistory();
+
+      expect(result.keptVersions).toBe(2);
+      expect(result.removedVersions).toBe(0);
+      expect(await v1.listVersions()).toEqual(["v1", "v2"]);
+      expect(await countAncestors(client, WS)).toBe(2);
+      expect(await v2.readFile("/shared.txt")).toBe("from-v1");
+      expect(await v2.readFile("/v2.txt")).toBe("from-v2");
+
+      const history = await v2.listHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0]!.parentVersion).toBeNull();
     });
   });
 
@@ -618,22 +691,17 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       expect(after).toEqual(before);
     });
 
-    it("makes the former ancestor deletable when no other child references it", async () => {
+    it("allows deleting a former ancestor label while preserving inherited history", async () => {
       const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
       await v1.init();
       await v1.writeFile("/inherited.txt", "from v1");
 
       const v2 = await v1.fork("v2");
-      // While v2 is still attached, v1 cannot be deleted (it has a child).
-      await expect(v2.deleteVersion("v1")).rejects.toThrow(/descendants/);
-
-      await v2.detach();
-
-      // Now v2 is detached and v1 has no children left, so v1 is deletable.
       await v2.deleteVersion("v1");
       expect((await v2.listVersions()).sort()).toEqual(["v2"]);
 
-      // The materialized content survives.
+      const history = await v2.listHistory();
+      expect(history.some((entry) => entry.version === "v1" && entry.deletedAt !== null)).toBe(true);
       expect(await v2.readFile("/inherited.txt")).toBe("from v1");
     });
 
