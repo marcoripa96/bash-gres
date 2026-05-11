@@ -141,7 +141,12 @@ export class PgFileSystem extends FsWriteOpsBase {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
       const rootInsert = await tx.query(
-        `INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
+        `WITH version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $2
+           RETURNING 1
+         )
+         INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
          VALUES ($1, $2, $3::ltree, 'directory', $4)
          ON CONFLICT (workspace_id, version_id, path) DO NOTHING
          RETURNING 1`,
@@ -999,7 +1004,12 @@ export class PgFileSystem extends FsWriteOpsBase {
       const lt = pathToLtree(ltreeToPath(node.path), this.workspaceId);
       // Insert/update entry at current version preserving everything but mtime.
       await tx.query(
-        `INSERT INTO fs_entries
+        `WITH version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $2
+           RETURNING 1
+         )
+         INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
             symlink_target, mode, size_bytes, mtime)
          VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, $9)

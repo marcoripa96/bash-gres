@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS fs_versions (
     label              text NOT NULL CHECK (length(label) > 0),
     parent_version_id  bigint REFERENCES fs_versions(id) ON DELETE RESTRICT,
     created_at         timestamptz NOT NULL DEFAULT now(),
-    deleted_at         timestamptz
+    deleted_at         timestamptz,
+    last_write_at      timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS version_ancestors (
@@ -90,6 +91,33 @@ FROM fs_version_roots r
 WHERE v.version_root_id IS NULL
   AND r.workspace_id = v.workspace_id
   AND nlevel(r.path) = 1;
+
+-- Add last_write_at as nullable so the backfill can distinguish unmigrated
+-- rows from rows already written under the new code path. Backfill from
+-- MAX(mtime) of entries written directly into each version_id; fall back to
+-- created_at for COW branches that have no direct entries yet. Then tighten
+-- to NOT NULL with a default of now() for future inserts.
+DO $$ BEGIN
+  ALTER TABLE fs_versions ADD COLUMN last_write_at timestamptz;
+EXCEPTION WHEN duplicate_column THEN
+  NULL;
+END $$;
+
+UPDATE fs_versions v
+SET last_write_at = COALESCE(m.max_mtime, v.created_at)
+FROM (
+  SELECT version_id, MAX(mtime) AS max_mtime
+  FROM fs_entries
+  GROUP BY version_id
+) m
+WHERE v.last_write_at IS NULL AND m.version_id = v.id;
+
+UPDATE fs_versions
+SET last_write_at = created_at
+WHERE last_write_at IS NULL;
+
+ALTER TABLE fs_versions ALTER COLUMN last_write_at SET DEFAULT now();
+ALTER TABLE fs_versions ALTER COLUMN last_write_at SET NOT NULL;
 `;
 
 const INDEXES_DDL = `

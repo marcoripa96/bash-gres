@@ -76,6 +76,9 @@ function buildVersions() {
         .notNull()
         .defaultNow(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      lastWriteAt: timestamp("last_write_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
     },
     (table) => [
       uniqueIndex("unique_workspace_version_root_label")

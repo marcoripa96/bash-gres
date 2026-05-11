@@ -66,7 +66,12 @@ export const detach = op(async (ctx): Promise<void> => {
     //    owned by V (`src.version_id = V`) are skipped so we never INSERT a
     //    duplicate of V's own row.
     await tx.query(
-      `INSERT INTO fs_entries (
+      `WITH version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING 1
+       )
+       INSERT INTO fs_entries (
          workspace_id, version_id, path, blob_hash, node_type,
          symlink_target, mode, size_bytes, mtime, created_at
        )

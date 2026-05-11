@@ -10,6 +10,7 @@ import { diff } from "./diff.js";
 import { diffCount } from "./diff-count.js";
 import { diffStream } from "./diff-stream.js";
 import { fork } from "./fork.js";
+import { getLastModified } from "./get-last-modified.js";
 import { getUsage } from "./get-usage.js";
 import { listHistory } from "./list-history.js";
 import { listVersions } from "./list-versions.js";
@@ -30,6 +31,7 @@ type DropContext<TOp> = TOp extends (
   : never;
 
 export interface FilesystemOpsApi<TFs> {
+  getLastModified: DropContext<typeof getLastModified<TFs>>;
   getUsage: DropContext<typeof getUsage<TFs>>;
   versioned: DropContext<typeof versioned<TFs>>;
   diff: DropContext<typeof diff<TFs>>;
@@ -87,6 +89,7 @@ function installOp<
 export function installFilesystemOps<
   TFs extends FilesystemOpsHost<TFs> & FilesystemOpsApi<TFs>,
 >(prototype: TFs): void {
+  installOp(prototype, "getLastModified", getLastModified<TFs>);
   installOp(prototype, "getUsage", getUsage<TFs>);
   installOp(prototype, "versioned", versioned<TFs>);
   installOp(prototype, "diff", diff<TFs>);

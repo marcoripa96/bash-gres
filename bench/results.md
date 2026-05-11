@@ -2270,3 +2270,62 @@ BENCH_LABEL=cow-redesign npm run bench
 | writeFile (new file in existing dir) | p95 | 6.29 ms |
 | writeFile (overwrite existing) | median | 6.00 ms |
 | writeFile (overwrite existing) | p95 | 6.52 ms |
+
+## last-write-bump  _(2026-05-11T16:23:53.699Z)_
+
+| Scenario | Metric | Value |
+| --- | --- | --- |
+| fork after 100 files | fork() | 6.49 ms |
+| fork after 1000 files | fork() | 2.44 ms |
+| fork after 5000 files | fork() | 4.27 ms |
+| read at depth 1 | median | 0.38 ms |
+| read at depth 1 | p95 | 0.51 ms |
+| read at depth 5 | median | 0.33 ms |
+| read at depth 5 | p95 | 0.47 ms |
+| read at depth 25 | median | 0.33 ms |
+| read at depth 25 | p95 | 0.51 ms |
+| read at depth 50 | median | 0.40 ms |
+| read at depth 50 | p95 | 0.56 ms |
+| storage: 1000 files, fork+1 edit | entry/node rows | 1001 -> 1002 |
+| storage: 1000 files, fork+1 edit | blob rows | 1000 -> 1001 |
+| storage: 1000 files, fork+1 edit | total bytes (whole DB) | 8.61 MiB -> 8.61 MiB (Δ 0 B) |
+| deleteVersion (1000 files, 100 edited) | elapsed | 9.19 ms |
+| promoteTo dropPrevious (1000 files, 100 edited) | elapsed | 42.57 ms |
+| readdir(/d) at depth 10, 100 files | median | 1.57 ms |
+| readdir(/d) at depth 10, 100 files | p95 | 2.01 ms |
+| readFileBuffer (text, 200 lines) | median | 0.30 ms |
+| readFileBuffer (text, 200 lines) | p95 | 0.39 ms |
+| readFileBuffer (binary, 8 KiB) | median | 0.35 ms |
+| readFileBuffer (binary, 8 KiB) | p95 | 0.50 ms |
+| readFileRange (8 KiB, 64 B slice) | median | 0.32 ms |
+| readFileRange (8 KiB, 64 B slice) | p95 | 0.47 ms |
+| readFileLines (200 lines, 10-line slice) | median | 0.52 ms |
+| readFileLines (200 lines, 10-line slice) | p95 | 0.68 ms |
+| listVersions (6 versions) | median | 0.20 ms |
+| listVersions (6 versions) | p95 | 0.30 ms |
+| getUsage (50 files, depth 5) | median | 1.30 ms |
+| getUsage (50 files, depth 5) | p95 | 1.68 ms |
+| diff (cur vs sibling, 50 files) | median | 1.19 ms |
+| diff (cur vs sibling, 50 files) | p95 | 1.53 ms |
+| listHistory metadata (20 versions) | median | 0.62 ms |
+| listHistory metadata (20 versions) | p95 | 0.72 ms |
+| listHistory with changes (20 versions) | median | 0.57 ms |
+| listHistory with changes (20 versions) | p95 | 0.60 ms |
+| sweepHistory (21 active versions) | elapsed | 42.33 ms |
+| listHistory metadata first page (100/1001) | elapsed | 1.16 ms |
+| listHistory metadata all pages (1001) | elapsed | 11.00 ms |
+| listHistory metadata all pages (1001) | pages | 11 |
+| listHistory metadata all pages (1001) | entries | 1001 |
+| listHistory changes first page (100/1001) | elapsed | 4.89 ms |
+| listHistory metadata first page (100/1001) | has nextCursor | true |
+| listHistory paths first page (100/1001) | elapsed | 4.44 ms |
+| listHistory paths all pages (1001) | elapsed | 47.40 ms |
+| listHistory paths all pages (1001) | pages | 11 |
+| listHistory paths all pages (1001) | entries | 1001 |
+| versionDiff (single hop, head) | median | 0.84 ms |
+| versionDiff (single hop, head) | p95 | 1.04 ms |
+| versionDiff (root, full visible tree) | elapsed | 0.44 ms |
+| writeFile (new file in existing dir) | median | 5.94 ms |
+| writeFile (new file in existing dir) | p95 | 6.56 ms |
+| writeFile (overwrite existing) | median | 5.95 ms |
+| writeFile (overwrite existing) | p95 | 6.28 ms |

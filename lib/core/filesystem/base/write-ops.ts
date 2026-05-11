@@ -175,6 +175,11 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            ON CONFLICT (workspace_id, hash) DO UPDATE SET
              embedding = COALESCE(fs_blobs.embedding, EXCLUDED.embedding)
            RETURNING 1
+         ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $7
+           RETURNING 1
          )
          INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
@@ -205,6 +210,11 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (workspace_id, hash) DO NOTHING
+           RETURNING 1
+         ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $6
            RETURNING 1
          )
          INSERT INTO fs_entries
@@ -243,8 +253,18 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     symlinkTarget: string | null,
   ): Promise<void> {
     const lt = pathToLtree(posixPath, this.workspaceId);
+    // Inline the last_write_at bump as a CTE so the entry write and the
+    // version bookkeeping land in one round-trip. Data-modifying CTEs run
+    // unconditionally; we only call upsertEntry as part of an actual write,
+    // so it's safe to bump regardless of whether the INSERT is a fresh row
+    // or an overwrite.
     await tx.query(
-      `INSERT INTO fs_entries
+      `WITH version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING 1
+       )
+       INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type,
           symlink_target, mode, size_bytes, mtime)
        VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, now())
@@ -275,7 +295,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
   ): Promise<void> {
     const lt = pathToLtree(posixPath, this.workspaceId);
     await tx.query(
-      `INSERT INTO fs_entries
+      `WITH version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING 1
+       )
+       INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
        VALUES ($1, $2, $3::ltree, NULL, $4, 0, 0, now())
        ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
@@ -305,7 +330,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     ];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     await tx.query(
-      `INSERT INTO fs_entries
+      `WITH version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING 1
+       )
+       INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
        SELECT $1, $2, visible.path, NULL, $4, 0, 0, now()
        FROM (
@@ -353,7 +383,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     ];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     await tx.query(
-      `INSERT INTO fs_entries
+      `WITH version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING 1
+       )
+       INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type,
           symlink_target, mode, size_bytes, mtime)
        SELECT
@@ -498,6 +533,11 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       await tx.query(
         `WITH input(path, blob_hash, node_type, symlink_target, mode, size_bytes) AS (
            VALUES ${values.join(", ")}
+         ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $2
+           RETURNING 1
          )
          INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
@@ -739,6 +779,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              size_bytes = EXCLUDED.size_bytes,
              mtime = now()
            RETURNING (xmax = 0) AS inserted
+         ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $6
+             AND EXISTS (SELECT 1 FROM validation WHERE status = 'ok')
+           RETURNING 1
          )
          SELECT validation.status,
                 (SELECT inserted FROM entry_upsert) AS inserted
@@ -852,6 +898,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              size_bytes = EXCLUDED.size_bytes,
              mtime = now()
            RETURNING (xmax = 0) AS inserted
+         ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $6
+             AND EXISTS (SELECT 1 FROM validation WHERE status = 'ok')
+           RETURNING 1
          )
          SELECT validation.status,
                 (SELECT inserted FROM entry_upsert) AS inserted
@@ -946,6 +998,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            mode = EXCLUDED.mode,
            size_bytes = 0,
            mtime = now()
+         RETURNING 1
+       ),
+       version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+           AND NOT EXISTS (SELECT 1 FROM invalid)
          RETURNING 1
        )
        SELECT

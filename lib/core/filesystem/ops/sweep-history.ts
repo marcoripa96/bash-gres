@@ -150,7 +150,12 @@ async function materializeVersionsBatch<TFs>(
   activeIds: number[],
 ): Promise<void> {
   await tx.query(
-    `INSERT INTO fs_entries (
+    `WITH version_bump AS (
+       UPDATE fs_versions SET last_write_at = now()
+       WHERE workspace_id = $1 AND id = ANY($2::bigint[])
+       RETURNING 1
+     )
+     INSERT INTO fs_entries (
        workspace_id, version_id, path, blob_hash, node_type,
        symlink_target, mode, size_bytes, mtime, created_at
      )

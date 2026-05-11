@@ -7,6 +7,7 @@ export { diffCount } from "./diff-count.js";
 export { diffStream } from "./diff-stream.js";
 export { fetchDiff } from "./fetch-diff.js";
 export { fork } from "./fork.js";
+export { getLastModified } from "./get-last-modified.js";
 export { getUsage } from "./get-usage.js";
 export { installFilesystemOps } from "./install.js";
 export type { FilesystemOpsApi } from "./install.js";
