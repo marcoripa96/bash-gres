@@ -141,15 +141,18 @@ export class PgFileSystem extends FsWriteOpsBase {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
       const rootInsert = await tx.query(
-        `WITH version_bump AS (
+        `WITH ins AS (
+           INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
+           VALUES ($1, $2, $3::ltree, 'directory', $4)
+           ON CONFLICT (workspace_id, version_id, path) DO NOTHING
+           RETURNING 1
+         ),
+         version_bump AS (
            UPDATE fs_versions SET last_write_at = now()
-           WHERE workspace_id = $1 AND id = $2
+           WHERE workspace_id = $1 AND id = $2 AND EXISTS (SELECT 1 FROM ins)
            RETURNING 1
          )
-         INSERT INTO fs_entries (workspace_id, version_id, path, node_type, mode)
-         VALUES ($1, $2, $3::ltree, 'directory', $4)
-         ON CONFLICT (workspace_id, version_id, path) DO NOTHING
-         RETURNING 1`,
+         SELECT 1 FROM ins`,
         [this.workspaceId, versionId, rootLtree, 0o755],
       );
       if (this.cachedNodeCount !== null && rootInsert.rows.length > 0) {

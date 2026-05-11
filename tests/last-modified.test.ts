@@ -83,6 +83,16 @@ describe.each(TEST_ADAPTERS)("getLastModified [%s]", (_name, factory) => {
     expect(next.getTime()).toBeGreaterThan(prev.getTime());
   });
 
+  it("does not advance when re-init is a no-op", async () => {
+    await fs.writeFile("/a.txt", "hello");
+    const before = (await fs.getLastModified())!;
+    await sleep(20);
+    const same = new PgFileSystem({ db: client, workspaceId: "lastmod-workspace" });
+    await same.init();
+    const after = (await fs.getLastModified())!;
+    expect(after.getTime()).toBe(before.getTime());
+  });
+
   it("does not advance on read", async () => {
     await fs.writeFile("/a.txt", "hello");
     const before = (await fs.getLastModified())!;
