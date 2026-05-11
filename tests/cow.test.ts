@@ -656,6 +656,113 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       await fs.init();
       await expect(fs.versionDiff(999_999)).rejects.toThrow(/not found/);
     });
+
+    describe("includeContent", () => {
+      it("omits content fields by default", async () => {
+        let fs = new PgFileSystem({
+          db: client,
+          workspaceId: WS,
+          version: "v0",
+          historyRetention: "retain",
+        });
+        await fs.init();
+        await fs.writeFile("/a.txt", "a0");
+        fs = await fs.fork("v1");
+        await fs.writeFile("/a.txt", "a1");
+
+        const page = await fs.listHistory({ limit: 5 });
+        const v1Entry = page.entries.find((e) => e.version === "v1")!;
+        const detail = await fs.versionDiff(v1Entry.versionId);
+        const e = detail.find((c) => c.path === "/a.txt")!;
+        expect(e.beforeContent).toBeUndefined();
+        expect(e.afterContent).toBeUndefined();
+      });
+
+      it("populates content for added / modified / removed / directory entries", async () => {
+        let fs = new PgFileSystem({
+          db: client,
+          workspaceId: WS,
+          version: "v0",
+          historyRetention: "retain",
+        });
+        await fs.init();
+        await fs.writeFile("/keep.txt", "keep0");
+        await fs.writeFile("/drop.txt", "doomed");
+        await fs.mkdir("/dir");
+
+        fs = await fs.fork("v1");
+        await fs.writeFile("/keep.txt", "keep1");
+        await fs.writeFile("/new.txt", "fresh");
+        await fs.rm("/drop.txt");
+
+        const page = await fs.listHistory({ limit: 5 });
+        const v1Entry = page.entries.find((e) => e.version === "v1")!;
+        const detail = await fs.versionDiff(v1Entry.versionId, { includeContent: true });
+        const byPath = new Map(detail.map((c) => [c.path, c]));
+
+        const modified = byPath.get("/keep.txt")!;
+        expect(modified.change).toBe("modified");
+        expect(modified.beforeContent).toBe("keep0");
+        expect(modified.afterContent).toBe("keep1");
+
+        const added = byPath.get("/new.txt")!;
+        expect(added.change).toBe("added");
+        expect(added.beforeContent).toBeNull();
+        expect(added.afterContent).toBe("fresh");
+
+        const removed = byPath.get("/drop.txt")!;
+        expect(removed.change).toBe("removed");
+        expect(removed.beforeContent).toBe("doomed");
+        expect(removed.afterContent).toBeNull();
+      });
+
+      it("returns null content for symlinks and directories on both sides", async () => {
+        let fs = new PgFileSystem({
+          db: client,
+          workspaceId: WS,
+          version: "v0",
+          historyRetention: "retain",
+        });
+        await fs.init();
+        await fs.writeFile("/target.txt", "t");
+
+        fs = await fs.fork("v1");
+        await fs.mkdir("/d");
+        await fs.symlink("/target.txt", "/link");
+
+        const page = await fs.listHistory({ limit: 5 });
+        const v1Entry = page.entries.find((e) => e.version === "v1")!;
+        const detail = await fs.versionDiff(v1Entry.versionId, { includeContent: true });
+        const byPath = new Map(detail.map((c) => [c.path, c]));
+
+        const dir = byPath.get("/d")!;
+        expect(dir.afterContent).toBeNull();
+        expect(dir.beforeContent).toBeNull();
+
+        const link = byPath.get("/link")!;
+        expect(link.afterContent).toBeNull();
+        expect(link.beforeContent).toBeNull();
+      });
+
+      it("returns content for root-version additions (parent NULL)", async () => {
+        const fs = new PgFileSystem({
+          db: client,
+          workspaceId: WS,
+          version: "v0",
+          historyRetention: "retain",
+        });
+        await fs.init();
+        await fs.writeFile("/a.txt", "hello");
+
+        const page = await fs.listHistory({ limit: 5 });
+        const root = page.entries.find((e) => e.parentVersionId === null)!;
+        const detail = await fs.versionDiff(root.versionId, { includeContent: true });
+        const a = detail.find((c) => c.path === "/a.txt")!;
+        expect(a.change).toBe("added");
+        expect(a.beforeContent).toBeNull();
+        expect(a.afterContent).toBe("hello");
+      });
+    });
   });
 
   describe("versionDiffStream", () => {

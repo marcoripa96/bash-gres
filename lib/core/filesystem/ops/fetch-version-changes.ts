@@ -1,4 +1,9 @@
-import type { SqlClient, SqlParam, VersionDiffEntry } from "../../types.js";
+import type {
+  EntryShape,
+  SqlClient,
+  SqlParam,
+  VersionDiffEntry,
+} from "../../types.js";
 import { ltreeToPath } from "../../path-encoding.js";
 import { mapDiffSide } from "../internals/entry-shapes.js";
 import { op, type FilesystemOpsContext } from "./context.js";
@@ -11,12 +16,16 @@ interface ChangeRow {
   o_mode: number | null;
   o_size: number | string | null;
   o_mtime: Date | string | null;
+  o_content: string | null;
+  o_binary: Uint8Array | null;
   p_type: string | null;
   p_hash: Uint8Array | null;
   p_link: string | null;
   p_mode: number | null;
   p_size: number | string | null;
   p_mtime: Date | string | null;
+  p_content: string | null;
+  p_binary: Uint8Array | null;
 }
 
 const NULL_P_SHAPE_COLS = `
@@ -47,6 +56,22 @@ const FULL_P_SHAPE_COLS = `
   pv.size_bytes     AS p_size,
   pv.mtime          AS p_mtime`;
 
+const NULL_O_CONTENT_COLS = `
+  NULL::text  AS o_content,
+  NULL::bytea AS o_binary`;
+
+const NULL_P_CONTENT_COLS = `
+  NULL::text  AS p_content,
+  NULL::bytea AS p_binary`;
+
+const FULL_O_CONTENT_COLS = `
+  (CASE WHEN w.node_type = 'tombstone' THEN NULL ELSE ob.content     END) AS o_content,
+  (CASE WHEN w.node_type = 'tombstone' THEN NULL ELSE ob.binary_data END) AS o_binary`;
+
+const FULL_P_CONTENT_COLS = `
+  pb.content     AS p_content,
+  pb.binary_data AS p_binary`;
+
 /**
  * COW-shortcut diff for a single version against its parent (or against an
  * empty tree when `parentVersionId === null`). Reads the "after" side
@@ -57,7 +82,8 @@ const FULL_P_SHAPE_COLS = `
  *
  * Supports keyset pagination by encoded ltree path (`page.cursor`) and an
  * optional `pathsOnly` projection that omits shape columns for cheaper
- * scans.
+ * scans. When `includeContent` is on (and `pathsOnly` is off), LEFT JOINs
+ * `fs_blobs` on both sides and returns text content on each entry.
  */
 export const fetchVersionChanges = op(async <TFs>(
   ctx: FilesystemOpsContext<TFs>,
@@ -67,7 +93,9 @@ export const fetchVersionChanges = op(async <TFs>(
   scopeLtree: string,
   page: { cursor: string | null; limit: number } | null,
   pathsOnly: boolean,
+  includeContent: boolean = false,
 ): Promise<{ entries: VersionDiffEntry[]; lastLtree: string | null }> => {
+  const withContent = includeContent && !pathsOnly;
   const params: SqlParam[] = [ctx.workspaceId, versionId, scopeLtree];
   let parentClause = "";
   if (parentVersionId !== null) {
@@ -89,15 +117,26 @@ export const fetchVersionChanges = op(async <TFs>(
 
   const oShapeCols = pathsOnly ? NULL_O_SHAPE_COLS : FULL_O_SHAPE_COLS;
   const pShapeCols = pathsOnly ? NULL_P_SHAPE_COLS : FULL_P_SHAPE_COLS;
+  const oContentCols = withContent ? FULL_O_CONTENT_COLS : NULL_O_CONTENT_COLS;
+  const pContentCols = withContent ? FULL_P_CONTENT_COLS : NULL_P_CONTENT_COLS;
+  const oBlobJoin = withContent
+    ? `LEFT JOIN fs_blobs ob ON ob.workspace_id = $1 AND ob.hash = w.blob_hash`
+    : "";
+  const pBlobJoin = withContent
+    ? `LEFT JOIN fs_blobs pb ON pb.workspace_id = $1 AND pb.hash = pv.blob_hash`
+    : "";
 
   const sql = parentVersionId === null
     ? `SELECT
          w.path::text AS path,
          w.node_type  AS o_type,
          ${oShapeCols},
+         ${oContentCols},
          NULL::text   AS p_type,
-         ${NULL_P_SHAPE_COLS}
+         ${NULL_P_SHAPE_COLS},
+         ${NULL_P_CONTENT_COLS}
        FROM fs_entries w
+       ${oBlobJoin}
        WHERE w.workspace_id = $1
          AND w.version_id  = $2
          AND w.path       <@ $3::ltree
@@ -137,10 +176,14 @@ export const fetchVersionChanges = op(async <TFs>(
          w.path::text AS path,
          (CASE WHEN w.node_type = 'tombstone' THEN NULL ELSE w.node_type END) AS o_type,
          ${oShapeCols},
+         ${oContentCols},
          pv.node_type AS p_type,
-         ${pShapeCols}
+         ${pShapeCols},
+         ${pContentCols}
        FROM v_writes w
        LEFT JOIN parent_visible pv ON pv.pv_path = w.path
+       ${oBlobJoin}
+       ${pBlobJoin}
        WHERE (w.node_type != 'tombstone' OR pv.node_type IS NOT NULL)
          AND (
            w.node_type = 'tombstone'
@@ -172,14 +215,30 @@ export const fetchVersionChanges = op(async <TFs>(
           : row.o_type !== row.p_type
             ? "type-changed"
             : "modified";
-    return {
+    const entry: VersionDiffEntry = {
       path: ctx.toUserPath(ltreeToPath(row.path)),
       change,
       before,
       after,
     };
+    if (withContent) {
+      entry.beforeContent = decodeBlobContent(before, row.p_content, row.p_binary);
+      entry.afterContent = decodeBlobContent(after, row.o_content, row.o_binary);
+    }
+    return entry;
   });
   const lastLtree =
     result.rows.length > 0 ? result.rows[result.rows.length - 1]!.path : null;
   return { entries, lastLtree };
 });
+
+function decodeBlobContent(
+  side: EntryShape | null,
+  content: string | null,
+  binary: Uint8Array | null,
+): string | null {
+  if (side === null || side.type !== "file") return null;
+  if (content !== null) return content;
+  if (binary !== null) return new TextDecoder().decode(binary);
+  return "";
+}

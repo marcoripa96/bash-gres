@@ -166,10 +166,25 @@ export interface VersionDiffEntry {
   change: "added" | "removed" | "modified" | "type-changed";
   before: EntryShape | null;
   after: EntryShape | null;
+  /**
+   * File content on the parent side, populated only when the caller passes
+   * `includeContent: true`. `null` for directories, symlinks, removed-side
+   * absence, and files with no blob (empty). Binary blobs are decoded as
+   * UTF-8 — callers needing raw bytes should fall back to `readFile`.
+   */
+  beforeContent?: string | null;
+  /** File content on the version side. See `beforeContent`. */
+  afterContent?: string | null;
 }
 
 export interface VersionDiffOptions {
   path?: string;
+  /**
+   * Populate `beforeContent` / `afterContent` on each entry by joining
+   * `fs_blobs`. Off by default. Only meaningful for files; directories and
+   * symlinks return `null` on the corresponding side.
+   */
+  includeContent?: boolean;
 }
 
 export interface VersionDiffStreamOptions extends VersionDiffOptions {

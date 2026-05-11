@@ -38,7 +38,7 @@ export const versionDiffStream = op(async function* (
       return fetchVersionChanges(ctx, tx, versionId, parentVersionId, scopeLtree, {
         cursor,
         limit: batchSize,
-      }, false);
+      }, false, opts?.includeContent ?? false);
     });
     for (const entry of entries) yield entry;
     if (entries.length < batchSize) return;

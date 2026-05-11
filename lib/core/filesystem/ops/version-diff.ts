@@ -46,6 +46,7 @@ export const versionDiff = op(async (
       scopeLtree,
       null,
       false,
+      opts?.includeContent ?? false,
     );
     return entries;
   });
