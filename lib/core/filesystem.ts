@@ -63,6 +63,9 @@ export class PgFileSystem extends FsWriteOpsBase {
       get maxWorkspaceBytes() {
         return self.maxWorkspaceBytes;
       },
+      get historyRetention() {
+        return self.historyRetention;
+      },
       guardRead: (userPath) => self.guardRead(userPath),
       toInternalPath: (userPath) => self.toInternalPath(userPath),
       toUserPath: (internalPath) => self.toUserPath(internalPath),

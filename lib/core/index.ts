@@ -30,6 +30,7 @@ export {
   type VersionDiffCountOptions,
   type VersionHistoryOptions,
   type VersionHistoryEntry,
+  type VersionHistoryResult,
   type SweepHistoryResult,
   type MergeStrategy,
   type ConflictEntry,

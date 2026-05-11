@@ -36,6 +36,23 @@ interface Result {
   value: string;
 }
 
+type HistoryCapableFs = PgFileSystem & {
+  listHistory?: (opts?: {
+    limit?: number;
+    cursor?: string;
+    includeRoot?: boolean;
+    includeChanges?: boolean | "paths";
+  }) => Promise<{
+    entries: Array<{ versionId: number; parentVersionId: number | null }>;
+    nextCursor: string | null;
+  }>;
+  versionDiff?: (
+    versionId: number,
+    opts?: { path?: string },
+  ) => Promise<unknown[]>;
+  sweepHistory?: () => Promise<unknown>;
+};
+
 const results: Result[] = [];
 
 function record(scenario: string, metric: string, value: string) {
@@ -277,6 +294,31 @@ async function benchDeleteVersionGC(schema: "old" | "new") {
   record(`deleteVersion (1000 files, 100 edited)`, "elapsed", fmtMs(ns));
 }
 
+async function benchPromoteDropPrevious(schema: "old" | "new") {
+  if (schema !== "new") return;
+  const ws = "bench-promote-drop-previous";
+  await resetWs(ws, schema);
+
+  const N = 1000;
+  const main = new PgFileSystem({
+    db: client,
+    workspaceId: ws,
+    version: "main",
+    maxFiles: N + 200,
+  });
+  await main.init();
+  for (let i = 0; i < N; i++) {
+    await main.writeFile(`/file-${i}.txt`, `content-${i}`);
+  }
+  const exp = await main.fork("exp");
+  for (let i = 0; i < 100; i++) {
+    await exp.writeFile(`/file-${i}.txt`, `edited-${i}`);
+  }
+
+  const { ns } = await time(() => exp.promoteTo("main", { dropPrevious: true }));
+  record("promoteTo dropPrevious (1000 files, 100 edited)", "elapsed", fmtMs(ns));
+}
+
 async function benchDirListingUnderDivergence(schema: "old" | "new") {
   const ws = "bench-listing";
   await resetWs(ws, schema);
@@ -422,6 +464,171 @@ async function benchReadOnlyOps(schema: "old" | "new") {
   record("diff (cur vs sibling, 50 files)", "p95", fmtMs(p95(samples)));
 }
 
+async function benchHistoryOps(schema: "old" | "new") {
+  if (schema !== "new") return;
+  const ws = "bench-history-ops";
+  await resetWs(ws, schema);
+
+  const root = new PgFileSystem({
+    db: client,
+    workspaceId: ws,
+    version: "main",
+    maxFiles: 2000,
+    historyRetention: "retain",
+  }) as HistoryCapableFs;
+  await root.init();
+  for (let i = 0; i < 50; i++) {
+    await root.writeFile(`/base-${i}.txt`, `base-${i}`);
+  }
+
+  let cur: HistoryCapableFs = root;
+  for (let d = 1; d <= 20; d++) {
+    cur = await cur.fork(`v${d}`) as HistoryCapableFs;
+    await cur.writeFile(`/edit-${d}.txt`, `edit-${d}`);
+  }
+  if (!cur.listHistory || !cur.sweepHistory) return;
+
+  for (let i = 0; i < 3; i++) await cur.listHistory({ limit: 20, includeChanges: false });
+  let samples: bigint[] = [];
+  for (let i = 0; i < 30; i++) {
+    const { ns } = await time(() => cur.listHistory!({ limit: 20, includeChanges: false }));
+    samples.push(ns);
+  }
+  record("listHistory metadata (20 versions)", "median", fmtMs(median(samples)));
+  record("listHistory metadata (20 versions)", "p95", fmtMs(p95(samples)));
+
+  for (let i = 0; i < 3; i++) await cur.listHistory({ limit: 20 });
+  samples = [];
+  for (let i = 0; i < 10; i++) {
+    const { ns } = await time(() => cur.listHistory!({ limit: 20 }));
+    samples.push(ns);
+  }
+  record("listHistory with changes (20 versions)", "median", fmtMs(median(samples)));
+  record("listHistory with changes (20 versions)", "p95", fmtMs(p95(samples)));
+
+  const { ns } = await time(() => cur.sweepHistory!());
+  record("sweepHistory (21 active versions)", "elapsed", fmtMs(ns));
+}
+
+async function benchHistoryPagination1000(schema: "old" | "new") {
+  if (schema !== "new") return;
+  const ws = "bench-history-1000";
+  await resetWs(ws, schema);
+
+  let fs = new PgFileSystem({
+    db: client,
+    workspaceId: ws,
+    version: "v0",
+    maxFiles: 3000,
+    historyRetention: "retain",
+    statementTimeoutMs: 60_000,
+  }) as HistoryCapableFs;
+  await fs.init();
+  await fs.writeFile("/v0.txt", "v0");
+  for (let i = 1; i <= 1000; i++) {
+    fs = await fs.fork(`v${i}`) as HistoryCapableFs;
+    await fs.writeFile(`/v${i}.txt`, `v${i}`);
+  }
+  if (!fs.listHistory) return;
+
+  const { result: firstPage, ns: firstPageNs } = await time(() =>
+    fs.listHistory!({ limit: 100, includeChanges: false }),
+  );
+  const firstPageResult = firstPage as { nextCursor: string | null };
+  record("listHistory metadata first page (100/1001)", "elapsed", fmtMs(firstPageNs));
+
+  let cursor: string | null = null;
+  let pages = 0;
+  let entries = 0;
+  const { ns: allMetadataNs } = await time(async () => {
+    do {
+      const page = await fs.listHistory!({
+        limit: 100,
+        cursor: cursor ?? undefined,
+        includeChanges: false,
+      }) as { entries: unknown[]; nextCursor: string | null };
+      pages++;
+      entries += page.entries.length;
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+  });
+  record("listHistory metadata all pages (1001)", "elapsed", fmtMs(allMetadataNs));
+  record("listHistory metadata all pages (1001)", "pages", String(pages));
+  record("listHistory metadata all pages (1001)", "entries", String(entries));
+
+  const { ns: firstChangesNs } = await time(() =>
+    fs.listHistory!({ limit: 100, includeChanges: true }),
+  );
+  record("listHistory changes first page (100/1001)", "elapsed", fmtMs(firstChangesNs));
+  record(
+    "listHistory metadata first page (100/1001)",
+    "has nextCursor",
+    String(firstPageResult.nextCursor !== null),
+  );
+
+  // paths-mode: cheap path+kind summary per row
+  const { ns: firstPathsNs } = await time(() =>
+    fs.listHistory!({ limit: 100, includeChanges: "paths" }),
+  );
+  record("listHistory paths first page (100/1001)", "elapsed", fmtMs(firstPathsNs));
+
+  cursor = null;
+  let pathsPages = 0;
+  let pathsEntries = 0;
+  const { ns: allPathsNs } = await time(async () => {
+    do {
+      const page = await fs.listHistory!({
+        limit: 100,
+        cursor: cursor ?? undefined,
+        includeChanges: "paths",
+      });
+      pathsPages++;
+      pathsEntries += page.entries.length;
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+  });
+  record("listHistory paths all pages (1001)", "elapsed", fmtMs(allPathsNs));
+  record("listHistory paths all pages (1001)", "pages", String(pathsPages));
+  record("listHistory paths all pages (1001)", "entries", String(pathsEntries));
+
+  // versionDiff: simulate "user clicks on a single entry"
+  if (fs.versionDiff) {
+    const headPage = await fs.listHistory!({ limit: 1, includeChanges: false });
+    const headEntry = headPage.entries[0]!;
+    for (let i = 0; i < 3; i++) await fs.versionDiff(headEntry.versionId);
+    const samples: bigint[] = [];
+    for (let i = 0; i < 30; i++) {
+      const { ns } = await time(() => fs.versionDiff!(headEntry.versionId));
+      samples.push(ns);
+    }
+    record("versionDiff (single hop, head)", "median", fmtMs(median(samples)));
+    record("versionDiff (single hop, head)", "p95", fmtMs(p95(samples)));
+
+    // Also time the root entry: full visible-tree-as-added path.
+    let rootCursor: string | null = null;
+    let rootEntry: { versionId: number; parentVersionId: number | null } | undefined;
+    let rootPage: {
+      entries: Array<{ versionId: number; parentVersionId: number | null }>;
+      nextCursor: string | null;
+    };
+    do {
+      rootPage = await fs.listHistory!({
+        limit: 200,
+        cursor: rootCursor ?? undefined,
+        includeChanges: false,
+      });
+      rootEntry = rootPage.entries.find(
+        (e: { parentVersionId: number | null }) => e.parentVersionId === null,
+      );
+      rootCursor = rootPage.nextCursor;
+    } while (!rootEntry && rootCursor !== null);
+    if (rootEntry) {
+      const { ns: rootNs } = await time(() => fs.versionDiff!(rootEntry!.versionId));
+      record("versionDiff (root, full visible tree)", "elapsed", fmtMs(rootNs));
+    }
+  }
+}
+
 async function benchWriteFile(schema: "old" | "new") {
   const ws = "bench-writefile";
   await resetWs(ws, schema);
@@ -510,6 +717,9 @@ async function main() {
   printHeader("deleteVersion + GC");
   await benchDeleteVersionGC(schema);
 
+  printHeader("promoteTo dropPrevious");
+  await benchPromoteDropPrevious(schema);
+
   printHeader("readdir under version divergence");
   await benchDirListingUnderDivergence(schema);
 
@@ -518,6 +728,14 @@ async function main() {
 
   printHeader("read-only ops (listVersions/getUsage/diff)");
   await benchReadOnlyOps(schema);
+
+  printHeader("history ops");
+  await benchHistoryOps(schema);
+
+  if (process.env["BENCH_HISTORY_1000"] === "1") {
+    printHeader("history pagination 1000");
+    await benchHistoryPagination1000(schema);
+  }
 
   printHeader("writeFile latency");
   await benchWriteFile(schema);

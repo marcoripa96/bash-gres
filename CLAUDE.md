@@ -37,6 +37,7 @@ await bash.exec("echo hello > /file.txt");
 
 - `lib/core/types.ts`: `SqlClient`, `FsError`, `SqlError`, all option/result interfaces
 - `lib/core/filesystem.ts`: `PgFileSystem` class with all fs operations (implements `IFileSystem`)
+- `lib/core/filesystem/ops/`: per-op implementations installed onto `PgFileSystem.prototype` (one file per op, e.g. `list-history.ts`, `version-diff.ts`, `merge.ts`); shared SQL helpers live next to them (`fetch-diff.ts`, `fetch-page-changes.ts`, `fetch-version-changes.ts`)
 - `lib/core/setup.ts`: idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `lib/core/path-encoding.ts`: path <-> ltree conversion using `_xHEX_` delimited encoding
 - `lib/core/search.ts`: BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
@@ -44,6 +45,13 @@ await bash.exec("echo hello > /file.txt");
 - `lib/adapters/drizzle/schema.ts`: Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/node-postgres/index.ts`: wraps `pg.Pool` into `SqlClient` (structural `NodePgPool` interface)
 - `lib/adapters/postgres/index.ts`: wraps `postgres.Sql` into `SqlClient`
+
+### Git-like history APIs
+
+- `listHistory({ limit?, cursor?, includeChanges?, includeRoot?, path? })`: paginated ancestor walk from current version backwards. `includeChanges`: `false` (default, metadata only), `"paths"` (cheap `{ path, change }` summary), `true` (full `VersionDiffEntry` with before/after shapes). All three modes hit a single batched query (`fetch-page-changes.ts`) — paths and full are nearly the same cost.
+- `versionDiff(versionId, { path? })`: full diff for a single history entry, by numeric `versionId` from `listHistory`. Bypasses the label resolver, so it works for deleted-but-retained entries and for root entries (parent NULL → diff vs empty tree). Uses the COW shortcut (`WHERE version_id = V` for the "after" side, scoped parent-visibility for the "before") so it skips the full-tree FULL OUTER JOIN that label-based `diff(other)` runs.
+- `versionDiffStream(versionId, { path?, batchSize? })`: streaming variant with keyset pagination by ltree path.
+- `sweepHistory()`: physically flatten retained history. Materializes inherited entries into each active version in one batched `INSERT ... SELECT` over `version_ancestors` (`ROW_NUMBER() PARTITION BY descendant_id, path ORDER BY depth`), nulls active parents, deletes inactive rows + closure rows + orphan blobs. Run on a `historyRetention: "retain"` workspace to compact it.
 
 ## Database
 

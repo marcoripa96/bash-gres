@@ -164,6 +164,114 @@ for await (const change of v2.diffStream("v1", { batchSize: 500 })) {
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
+          Browsing History
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          <code className="font-mono text-foreground/80">listHistory()</code>{" "}
+          walks ancestors of the current version with keyset pagination, like{" "}
+          <code className="font-mono text-foreground/80">git log</code>. The{" "}
+          <code className="font-mono text-foreground/80">includeChanges</code>{" "}
+          option controls how much per-entry detail comes back:{" "}
+          <code className="font-mono text-foreground/80">false</code> (default,
+          metadata only),{" "}
+          <code className="font-mono text-foreground/80">&quot;paths&quot;</code>{" "}
+          (cheap{" "}
+          <code className="font-mono text-foreground/80">{"{ path, change }"}</code>{" "}
+          summary), or{" "}
+          <code className="font-mono text-foreground/80">true</code> (full{" "}
+          <code className="font-mono text-foreground/80">VersionDiffEntry</code>{" "}
+          with before/after shapes). All three modes share a single batched
+          query, so paths-mode and full-changes mode are within ~5% of each
+          other on large pages.
+        </p>
+        <CodeBlock
+          code={`// 1. List page metadata + per-row "what changed" summary.
+const page = await fs.listHistory({
+  limit: 20,
+  includeChanges: "paths",
+})
+
+for (const entry of page.entries) {
+  // entry.versionId, entry.version, entry.parentVersion,
+  // entry.createdAt, entry.deletedAt, entry.changes
+  console.log(entry.version, entry.changes.length, "changes")
+}
+
+if (page.nextCursor) {
+  const next = await fs.listHistory({
+    limit: 20,
+    cursor: page.nextCursor,
+    includeChanges: "paths",
+  })
+}`}
+        />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          For the click-to-detail flow, pass the numeric{" "}
+          <code className="font-mono text-foreground/80">versionId</code> from a
+          history entry to{" "}
+          <code className="font-mono text-foreground/80">versionDiff()</code>.
+          Unlike label-based{" "}
+          <code className="font-mono text-foreground/80">diff(other)</code>, it
+          works for the root entry (parent NULL → diff vs empty tree) and for
+          deleted-but-retained entries.
+        </p>
+        <CodeBlock
+          code={`// Click an entry → full diff against its parent.
+const detail = await fs.versionDiff(page.entries[0]!.versionId)
+// detail: VersionDiffEntry[] with full before/after shapes
+
+// Or stream large diffs page-by-page.
+for await (const change of fs.versionDiffStream(
+  page.entries[0]!.versionId,
+  { batchSize: 100 },
+)) {
+  console.log(change.path, change.change)
+}`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          Retention & Sweep
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          By default,{" "}
+          <code className="font-mono text-foreground/80">deleteVersion()</code>{" "}
+          physically removes a version&apos;s rows. Pass{" "}
+          <code className="font-mono text-foreground/80">historyRetention: &quot;retain&quot;</code>{" "}
+          to keep deleted versions in history with{" "}
+          <code className="font-mono text-foreground/80">deletedAt !== null</code>{" "}
+          so they still show up in{" "}
+          <code className="font-mono text-foreground/80">listHistory()</code>{" "}
+          and can be diffed via{" "}
+          <code className="font-mono text-foreground/80">versionDiff()</code>.
+          Run{" "}
+          <code className="font-mono text-foreground/80">sweepHistory()</code>{" "}
+          to compact a retain-mode workspace back into self-contained snapshots
+          and GC blobs no live entry references.
+        </p>
+        <CodeBlock
+          code={`const fs = new PgFileSystem({
+  db: sql,
+  workspaceId: "workspace-1",
+  version: "main",
+  historyRetention: "retain",
+})
+
+// ... fork, edit, deleteVersion, promoteTo over time ...
+
+const result = await fs.sweepHistory()
+// {
+//   keptVersions: 3,         // active labels materialised as snapshots
+//   removedVersions: 12,     // deleted/orphaned versions physically removed
+//   removedEntries: 487,
+//   removedBlobs: 41,
+// }`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
           Merge, Cherry-Pick & Revert
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
@@ -327,10 +435,30 @@ await draft.promoteTo("live")`}
                 <td className="py-2 pr-4 font-mono">Promise&lt;string[]&gt;</td>
                 <td className="py-2">Distinct versions present in the active version root</td>
               </tr>
-              <tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">listHistory(opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;VersionHistoryResult&gt;</td>
+                <td className="py-2">Paginated walk of ancestor history with cursor-based pagination. <code className="font-mono">includeChanges</code>: <code className="font-mono">false</code> | <code className="font-mono">&quot;paths&quot;</code> | <code className="font-mono">true</code>.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">versionDiff(versionId, opts?)</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;VersionDiffEntry[]&gt;</td>
+                <td className="py-2">Full diff for a single history entry by numeric <code className="font-mono">versionId</code>. Works for root and deleted-but-retained entries.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">versionDiffStream(versionId, opts?)</td>
+                <td className="py-2 pr-4 font-mono">AsyncIterable&lt;VersionDiffEntry&gt;</td>
+                <td className="py-2">Streaming variant of <code className="font-mono">versionDiff</code> with keyset pagination by ltree path.</td>
+              </tr>
+              <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">deleteVersion(name)</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;void&gt;</td>
                 <td className="py-2">Drop every row for <code className="font-mono">name</code>. Throws if <code className="font-mono">name</code> equals the current version.</td>
+              </tr>
+              <tr>
+                <td className="py-2 pr-4 font-mono">sweepHistory()</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;SweepHistoryResult&gt;</td>
+                <td className="py-2">Compact a retain-mode workspace: materialise active labels into self-contained snapshots, drop inactive history, GC orphan blobs.</td>
               </tr>
             </tbody>
           </table>

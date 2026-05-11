@@ -1,17 +1,16 @@
 import type {
-  SqlClient,
   SqlParam,
-  VersionDiffEntry,
   VersionHistoryEntry,
   VersionHistoryOptions,
+  VersionHistoryResult,
 } from "../../types.js";
-import { ltreeToPath, normalizePath, pathToLtree } from "../../path-encoding.js";
-import { mapDiffSide } from "../internals/entry-shapes.js";
-import { op, type FilesystemOpsContext } from "./context.js";
-import { fetchDiff } from "./fetch-diff.js";
+import { normalizePath, pathToLtree } from "../../path-encoding.js";
+import { op } from "./context.js";
+import { fetchPageChanges } from "./fetch-page-changes.js";
 
 interface HistoryVersionRow {
   id: number | string;
+  depth: number | string;
   label: string;
   parent_version_id: number | string | null;
   parent_label: string | null;
@@ -19,33 +18,34 @@ interface HistoryVersionRow {
   deleted_at: Date | string | null;
 }
 
-interface RootEntryRow {
-  path: string;
-  node_type: string;
-  blob_hash: Uint8Array | null;
-  symlink_target: string | null;
-  mode: number;
-  size_bytes: number | string;
-  mtime: Date | string;
-}
-
 export const listHistory = op(async (
   ctx,
   opts?: VersionHistoryOptions,
-): Promise<VersionHistoryEntry[]> => {
+): Promise<VersionHistoryResult> => {
   const scopeUser = opts?.path ? normalizePath(opts.path) : "/";
   ctx.guardRead(scopeUser);
   const internalScope = ctx.toInternalPath(scopeUser);
   const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);
   const limit = Math.max(1, Math.min(opts?.limit ?? 100, 1000));
+  const cursor = decodeCursor(opts?.cursor);
   const includeRoot = opts?.includeRoot ?? true;
+  const changesMode: false | "paths" | true = opts?.includeChanges ?? false;
 
   return ctx.withReadOnlyWorkspace(async (tx) => {
     const versionRootId = await ctx.getVersionRootId(tx);
     const currentId = await ctx.getCurrentVersionId(tx);
+    const params: SqlParam[] = [ctx.workspaceId, currentId, versionRootId];
+    let cursorClause = "";
+    if (cursor !== null) {
+      params.push(cursor.depth);
+      cursorClause = `AND a.depth > $${params.length}`;
+    }
+    params.push(limit + 1);
+
     const versions = await tx.query<HistoryVersionRow>(
       `SELECT
          v.id,
+         a.depth,
          v.label,
          v.parent_version_id,
          p.label AS parent_label,
@@ -58,83 +58,70 @@ export const listHistory = op(async (
        LEFT JOIN fs_versions p
          ON p.workspace_id = v.workspace_id
         AND p.id = v.parent_version_id
-       WHERE a.workspace_id = $1
-         AND a.descendant_id = $2
-         AND v.version_root_id = $3
-       ORDER BY a.depth ASC
-       LIMIT $4`,
-      [ctx.workspaceId, currentId, versionRootId, limit],
+        WHERE a.workspace_id = $1
+          AND a.descendant_id = $2
+          AND v.version_root_id = $3
+          ${cursorClause}
+        ORDER BY a.depth ASC
+        LIMIT $${params.length}`,
+      params,
     );
 
-    const entries: VersionHistoryEntry[] = [];
-    for (const row of versions.rows) {
+    const pageRows = versions.rows.slice(0, limit);
+    const visibleRows = includeRoot
+      ? pageRows
+      : pageRows.filter((row) => row.parent_version_id !== null);
+
+    const changesByVersion =
+      changesMode === false || visibleRows.length === 0
+        ? new Map<number, []>()
+        : await fetchPageChanges(
+            ctx,
+            tx,
+            visibleRows.map((row) => Number(row.id)),
+            scopeLtree,
+            changesMode === "paths",
+          );
+
+    const entries: VersionHistoryEntry[] = visibleRows.map((row) => {
       const versionId = Number(row.id);
       const parentVersionId =
         row.parent_version_id === null ? null : Number(row.parent_version_id);
-      if (parentVersionId === null && !includeRoot) continue;
-      const changes = parentVersionId === null
-        ? await fetchRootAdds(ctx, tx, versionId, scopeLtree)
-        : (await fetchDiff(ctx, tx, parentVersionId, versionId, scopeLtree, null)).entries;
-
-      entries.push({
+      return {
         versionId,
         version: row.label,
         parentVersionId,
         parentVersion: row.parent_label,
         createdAt: new Date(row.created_at),
         deletedAt: row.deleted_at === null ? null : new Date(row.deleted_at),
-        changes,
-      });
-    }
-    return entries;
+        changes: changesByVersion.get(versionId) ?? [],
+      };
+    });
+    const last = pageRows[pageRows.length - 1];
+    return {
+      entries,
+      nextCursor:
+        versions.rows.length > limit && last ? encodeCursor(Number(last.depth)) : null,
+    };
   });
 });
 
-async function fetchRootAdds<TFs>(
-  ctx: FilesystemOpsContext<TFs>,
-  tx: SqlClient,
-  versionId: number,
-  scopeLtree: string,
-): Promise<VersionDiffEntry[]> {
-  const params: SqlParam[] = [ctx.workspaceId, versionId, scopeLtree];
-  const exc = ctx.buildExcludeClause("e.path", params.length + 1);
-  params.push(...exc.params);
-  const result = await tx.query<RootEntryRow>(
-    `WITH visible_raw AS (
-       SELECT DISTINCT ON (e.path)
-         e.path,
-         e.node_type,
-         e.blob_hash,
-         e.symlink_target,
-         e.mode,
-         e.size_bytes,
-         e.mtime
-       FROM fs_entries e
-       JOIN version_ancestors a
-         ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-       WHERE e.workspace_id = $1
-         AND a.descendant_id = $2
-         AND e.path <@ $3::ltree
-         AND ${exc.sql}
-       ORDER BY e.path, a.depth ASC
-     )
-     SELECT * FROM visible_raw
-     WHERE node_type != 'tombstone'
-     ORDER BY path`,
-    params,
-  );
+function encodeCursor(depth: number): string {
+  return Buffer.from(JSON.stringify({ depth })).toString("base64url");
+}
 
-  return result.rows.map((row) => ({
-    path: ctx.toUserPath(ltreeToPath(row.path)),
-    change: "added",
-    before: null,
-    after: mapDiffSide(
-      row.node_type,
-      row.blob_hash,
-      row.symlink_target,
-      row.mode,
-      row.size_bytes,
-      new Date(row.mtime),
-    ),
-  }));
+function decodeCursor(cursor: string | undefined): { depth: number } | null {
+  if (cursor === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (typeof parsed === "object" && parsed !== null && "depth" in parsed) {
+      const depth = parsed.depth;
+      if (typeof depth === "number" && Number.isInteger(depth) && depth >= 0) {
+        return { depth };
+      }
+    }
+  } catch {
+    // fall through
+  }
+  throw new Error("listHistory: invalid cursor");
 }

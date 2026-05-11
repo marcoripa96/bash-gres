@@ -3,6 +3,7 @@ import { op, type FilesystemOpsContext } from "./context.js";
 
 interface VersionIdRow {
   id: number | string;
+  deleted_at: Date | string | null;
 }
 
 interface CountRow {
@@ -19,15 +20,15 @@ export const sweepHistory = op(async (
 ): Promise<SweepHistoryResult> => {
   return ctx.withWorkspace(async (tx) => {
     const versionRootId = await ctx.getVersionRootId(tx);
-    const allRows = await tx.query<VersionIdRow>(
-      `SELECT id
+    const versionRows = await tx.query<VersionIdRow>(
+      `SELECT id, deleted_at
        FROM fs_versions
        WHERE workspace_id = $1 AND version_root_id = $2
        ORDER BY id
        FOR UPDATE`,
       [ctx.workspaceId, versionRootId],
     );
-    const allIds = allRows.rows.map((row) => Number(row.id));
+    const allIds = versionRows.rows.map((row) => Number(row.id));
     if (allIds.length === 0) {
       return {
         keptVersions: 0,
@@ -37,20 +38,14 @@ export const sweepHistory = op(async (
       };
     }
 
-    const activeRows = await tx.query<VersionIdRow>(
-      `SELECT id
-       FROM fs_versions
-       WHERE workspace_id = $1
-         AND version_root_id = $2
-         AND deleted_at IS NULL
-       ORDER BY id`,
-      [ctx.workspaceId, versionRootId],
-    );
-    const activeIds = activeRows.rows.map((row) => Number(row.id));
+    const activeIds = versionRows.rows
+      .filter((row) => row.deleted_at === null)
+      .map((row) => Number(row.id));
+    const activeIdSet = new Set(activeIds);
     await ctx.lockVersions(tx, allIds);
 
-    for (const versionId of activeIds) {
-      await materializeVersion(ctx, tx, versionId);
+    if (activeIds.length > 0) {
+      await materializeVersionsBatch(ctx, tx, activeIds);
     }
 
     if (activeIds.length > 0) {
@@ -70,7 +65,7 @@ export const sweepHistory = op(async (
       );
     }
 
-    const inactiveIds = allIds.filter((id) => !activeIds.includes(id));
+    const inactiveIds = allIds.filter((id) => !activeIdSet.has(id));
     let removedEntries = 0;
     let removedVersions = 0;
     if (inactiveIds.length > 0) {
@@ -108,12 +103,12 @@ export const sweepHistory = op(async (
       removedVersions = Number(deletedVersions.rows[0]?.count ?? 0);
     }
 
-    for (const versionId of activeIds) {
+    if (activeIds.length > 0) {
       await tx.query(
         `INSERT INTO version_ancestors (workspace_id, descendant_id, ancestor_id, depth)
-         VALUES ($1, $2, $2, 0)
+         SELECT $1, id, id, 0 FROM unnest($2::bigint[]) AS t(id)
          ON CONFLICT DO NOTHING`,
-        [ctx.workspaceId, versionId],
+        [ctx.workspaceId, activeIds],
       );
     }
 
@@ -141,10 +136,18 @@ export const sweepHistory = op(async (
   });
 });
 
-async function materializeVersion<TFs>(
+/**
+ * Materialize all `activeIds` in a single SQL statement: for each
+ * (descendant_id, path) pair across the active set, pick the deepest
+ * ancestor's row (`ROW_NUMBER() ... ORDER BY depth ASC`), skip the cases
+ * where the deepest source is the descendant itself (already physically
+ * present) or a tombstone, and insert the rest under the descendant's
+ * version_id. Replaces N round-trips × N full-tree scans.
+ */
+async function materializeVersionsBatch<TFs>(
   ctx: FilesystemOpsContext<TFs>,
   tx: SqlClient,
-  versionId: number,
+  activeIds: number[],
 ): Promise<void> {
   await tx.query(
     `INSERT INTO fs_entries (
@@ -152,23 +155,29 @@ async function materializeVersion<TFs>(
        symlink_target, mode, size_bytes, mtime, created_at
      )
      SELECT
-       $1, $2,
+       $1, src.descendant_id,
        src.path, src.blob_hash, src.node_type,
        src.symlink_target, src.mode, src.size_bytes, src.mtime, now()
      FROM (
-       SELECT DISTINCT ON (e.path)
-              e.path, e.blob_hash, e.node_type, e.symlink_target,
-              e.mode, e.size_bytes, e.mtime, e.version_id
-       FROM fs_entries e
-       JOIN version_ancestors a
-         ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-       WHERE e.workspace_id = $1
-         AND a.descendant_id = $2
-       ORDER BY e.path, a.depth ASC
+       SELECT
+         a.descendant_id,
+         e.path, e.blob_hash, e.node_type, e.symlink_target,
+         e.mode, e.size_bytes, e.mtime, e.version_id AS source_version_id,
+         ROW_NUMBER() OVER (
+           PARTITION BY a.descendant_id, e.path
+           ORDER BY a.depth ASC
+         ) AS rn
+       FROM version_ancestors a
+       JOIN fs_entries e
+         ON e.workspace_id = a.workspace_id
+        AND e.version_id = a.ancestor_id
+       WHERE a.workspace_id = $1
+         AND a.descendant_id = ANY($2::bigint[])
      ) src
-     WHERE src.version_id <> $2
+     WHERE src.rn = 1
+       AND src.source_version_id <> src.descendant_id
        AND src.node_type <> 'tombstone'
      ON CONFLICT (workspace_id, version_id, path) DO NOTHING`,
-    [ctx.workspaceId, versionId],
+    [ctx.workspaceId, activeIds],
   );
 }

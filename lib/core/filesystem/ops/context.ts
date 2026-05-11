@@ -24,6 +24,7 @@ export interface FilesystemOpsContext<TFs> {
   readonly maxFiles: number;
   readonly maxFileSize: number;
   readonly maxWorkspaceBytes: number | undefined;
+  readonly historyRetention: "retain" | "discard";
 
   guardRead(userPath: string): string;
   toInternalPath(userPath: string): string;

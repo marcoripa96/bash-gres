@@ -240,6 +240,7 @@ describe.each(TEST_ADAPTERS)(
           db: client,
           workspaceId: WS,
           version: "main",
+          historyRetention: "retain",
         });
         await fs.init();
         await fs.writeFile("/shared.txt", "from-main");
@@ -256,7 +257,7 @@ describe.each(TEST_ADAPTERS)(
         const labels = await exp.listVersions();
         expect(labels).toEqual(["main"]);
 
-        const history = await exp.listHistory();
+        const history = (await exp.listHistory({ includeChanges: true })).entries;
         expect(history[0]!.version).toBe("main");
         expect(history[0]!.parentVersion).toMatch(/^main-prev-\d{14}-\d+$/);
         expect(history[0]!.changes.map((entry) => `${entry.change}:${entry.path}`)).toEqual([
@@ -274,6 +275,7 @@ describe.each(TEST_ADAPTERS)(
           db: client,
           workspaceId: WS,
           version: "main",
+          historyRetention: "retain",
         });
         await fs.init();
         await fs.writeFile("/shared.txt", "from-main");
@@ -292,9 +294,32 @@ describe.each(TEST_ADAPTERS)(
         expect(exp.version).toBe("main");
         expect(await fs.listVersions()).toEqual(["main", "sibling"]);
 
-        const history = await exp.listHistory();
+        const history = (await exp.listHistory({ includeChanges: true })).entries;
         expect(history[0]!.changes.some((entry) => entry.path === "/extra.txt")).toBe(true);
         expect(history.some((entry) => entry.deletedAt !== null)).toBe(true);
+      });
+
+      it("dropPrevious: true uses physical deletion when historyRetention is discard", async () => {
+        const fs = new PgFileSystem({
+          db: client,
+          workspaceId: WS,
+          version: "main",
+          historyRetention: "discard",
+        });
+        await fs.init();
+        await fs.writeFile("/shared.txt", "from-main");
+
+        const exp = await fs.fork("exp");
+        await exp.writeFile("/extra.txt", "from-exp");
+
+        const result = await exp.promoteTo("main", { dropPrevious: true });
+
+        expect(result).toEqual({ label: "main", droppedPrevious: true });
+        expect(await exp.listVersions()).toEqual(["main"]);
+        const history = (await exp.listHistory()).entries;
+        expect(history).toHaveLength(1);
+        expect(await exp.readFile("/shared.txt")).toBe("from-main");
+        expect(await exp.readFile("/extra.txt")).toBe("from-exp");
       });
 
       it("descendants of the promoted version keep their visible contents", async () => {

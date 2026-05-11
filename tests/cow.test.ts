@@ -88,7 +88,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
 
   describe("fork is O(1)", () => {
     it("does not copy fs_entries rows when forking", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
 
       // Seed many files at v1
@@ -105,7 +110,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("populates the closure table with depth-incremented ancestors plus self", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
 
       // v1 is a root, so its closure has 1 row: (v1, v1, 0).
@@ -157,7 +167,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("forked write of identical content does not duplicate the blob", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/x.txt", "same");
       const v2 = await v1.fork("v2");
@@ -197,7 +212,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
 
   describe("tombstone semantics", () => {
     it("rm in child does not remove the file in the parent version", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/keep.txt", "in v1");
 
@@ -210,7 +230,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("recursive rm in child tombstones whole subtree without touching parent", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.mkdir("/dir/sub", { recursive: true });
       await v1.writeFile("/dir/a.txt", "1");
@@ -227,7 +252,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("re-creating a tombstoned path makes it visible again", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/x.txt", "first");
       const v2 = await v1.fork("v2");
@@ -242,7 +272,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
 
   describe("branching", () => {
     it("two siblings forked from the same parent diverge independently", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/shared.txt", "parent");
 
@@ -258,7 +293,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("grandchild inherits through the full chain", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/grandparent.txt", "from v1");
       const v2 = await v1.fork("v2");
@@ -319,7 +359,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
 
   describe("git-like deleteVersion", () => {
     it("hides the version label but preserves blobs and entries for history", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/keep.txt", "keep");
       const blobsAfterV1 = await countBlobs(client, WS);
@@ -340,7 +385,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("keeps shared blobs readable after deleting a label", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/shared.txt", "still-needed");
 
@@ -358,7 +408,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("allows deleting a label with descendants and preserves ancestry", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       const v2 = await v1.fork("v2");
       const v3 = await v2.fork("v3");
@@ -366,13 +421,18 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       await v1.deleteVersion("v2");
 
       expect(await v1.listVersions()).toEqual(["v1", "v3"]);
-      const history = await v3.listHistory();
+      const history = (await v3.listHistory()).entries;
       const deletedAncestor = history.find((entry) => entry.version === "v2");
       expect(deletedAncestor?.deletedAt).not.toBeNull();
     });
 
     it("keeps closure rows for deleted labels", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.fork("v2");
 
@@ -384,9 +444,330 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
   });
 
+  describe("listHistory pagination", () => {
+    it("pages through history with a cursor", async () => {
+      let fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.writeFile("/v0.txt", "v0");
+      for (let i = 1; i <= 5; i++) {
+        fs = await fs.fork(`v${i}`);
+        await fs.writeFile(`/v${i}.txt`, `v${i}`);
+      }
+
+      const first = await fs.listHistory({ limit: 2, includeChanges: false });
+      expect(first.entries.map((entry) => entry.version)).toEqual(["v5", "v4"]);
+      expect(first.nextCursor).not.toBeNull();
+      expect(first.entries.every((entry) => entry.changes.length === 0)).toBe(true);
+
+      const second = await fs.listHistory({
+        limit: 2,
+        cursor: first.nextCursor!,
+        includeChanges: false,
+      });
+      expect(second.entries.map((entry) => entry.version)).toEqual(["v3", "v2"]);
+      expect(second.nextCursor).not.toBeNull();
+
+      const third = await fs.listHistory({
+        limit: 2,
+        cursor: second.nextCursor!,
+        includeChanges: false,
+      });
+      expect(third.entries.map((entry) => entry.version)).toEqual(["v1", "v0"]);
+      expect(third.nextCursor).toBeNull();
+    });
+
+    it("rejects invalid cursors", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: WS, version: "v0" });
+      await fs.init();
+      await expect(fs.listHistory({ cursor: "not-a-cursor" })).rejects.toThrow(/invalid cursor/);
+    });
+  });
+
+  describe("listHistory paths mode", () => {
+    it("returns path + change kind without before/after shapes", async () => {
+      let fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.writeFile("/a.txt", "a0");
+      await fs.writeFile("/b.txt", "b0");
+
+      fs = await fs.fork("v1");
+      await fs.writeFile("/a.txt", "a1");        // modified
+      await fs.writeFile("/c.txt", "c1");        // added
+      await fs.rm("/b.txt");                      // removed
+
+      const page = await fs.listHistory({ limit: 5, includeChanges: "paths" });
+      const v1Entry = page.entries.find((e) => e.version === "v1")!;
+      const byPath = new Map(v1Entry.changes.map((c) => [c.path, c]));
+      expect(byPath.get("/a.txt")?.change).toBe("modified");
+      expect(byPath.get("/b.txt")?.change).toBe("removed");
+      expect(byPath.get("/c.txt")?.change).toBe("added");
+      for (const c of v1Entry.changes) {
+        expect(c.before).toBeNull();
+        expect(c.after).toBeNull();
+      }
+
+      const v0Entry = page.entries.find((e) => e.version === "v0")!;
+      const v0Files = v0Entry.changes
+        .map((c) => c.path)
+        .filter((p) => p !== "/")
+        .sort();
+      expect(v0Files).toEqual(["/a.txt", "/b.txt"]);
+      expect(v0Entry.changes.every((c) => c.change === "added")).toBe(true);
+      expect(v0Entry.changes.every((c) => c.before === null && c.after === null)).toBe(true);
+    });
+
+    it("scopes changes to opts.path", async () => {
+      let fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.mkdir("/src", { recursive: true });
+      await fs.writeFile("/src/a.txt", "a0");
+      await fs.writeFile("/other.txt", "o0");
+
+      fs = await fs.fork("v1");
+      await fs.writeFile("/src/a.txt", "a1");
+      await fs.writeFile("/other.txt", "o1");
+
+      const page = await fs.listHistory({
+        limit: 5,
+        includeChanges: "paths",
+        path: "/src",
+      });
+      const v1Entry = page.entries.find((e) => e.version === "v1")!;
+      expect(v1Entry.changes.map((c) => c.path)).toEqual(["/src/a.txt"]);
+    });
+  });
+
+  describe("versionDiff", () => {
+    it("returns full diff for a non-root entry by versionId", async () => {
+      let fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.writeFile("/a.txt", "a0");
+
+      fs = await fs.fork("v1");
+      await fs.writeFile("/a.txt", "a1");
+      await fs.writeFile("/b.txt", "b1");
+
+      const page = await fs.listHistory({ limit: 5 });
+      const v1Entry = page.entries.find((e) => e.version === "v1")!;
+
+      const detail = await fs.versionDiff(v1Entry.versionId);
+      const byPath = new Map(detail.map((c) => [c.path, c]));
+      expect(byPath.get("/a.txt")?.change).toBe("modified");
+      expect(byPath.get("/a.txt")?.before).not.toBeNull();
+      expect(byPath.get("/a.txt")?.after).not.toBeNull();
+      expect(byPath.get("/b.txt")?.change).toBe("added");
+      expect(byPath.get("/b.txt")?.before).toBeNull();
+    });
+
+    it("returns added entries for a root version", async () => {
+      const fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.writeFile("/a.txt", "a0");
+      await fs.writeFile("/b.txt", "b0");
+
+      const page = await fs.listHistory({ limit: 5 });
+      const root = page.entries.find((e) => e.parentVersionId === null)!;
+
+      const detail = await fs.versionDiff(root.versionId);
+      const files = detail
+        .map((c) => c.path)
+        .filter((p) => p !== "/")
+        .sort();
+      expect(files).toEqual(["/a.txt", "/b.txt"]);
+      expect(detail.every((c) => c.change === "added")).toBe(true);
+      expect(detail.every((c) => c.before === null && c.after !== null)).toBe(true);
+    });
+
+    it("works for deleted-but-retained versions", async () => {
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
+      await v1.init();
+      await v1.writeFile("/a.txt", "a1");
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/b.txt", "b2");
+
+      const v3 = await v2.fork("v3");
+      await v1.deleteVersion("v2");
+
+      const page = await v3.listHistory({ limit: 5 });
+      const deleted = page.entries.find((e) => e.version === "v2")!;
+      expect(deleted.deletedAt).not.toBeNull();
+
+      const detail = await v3.versionDiff(deleted.versionId);
+      expect(detail.map((c) => c.path)).toEqual(["/b.txt"]);
+      expect(detail[0]!.change).toBe("added");
+    });
+
+    it("scopes to opts.path", async () => {
+      let fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.mkdir("/src", { recursive: true });
+      await fs.writeFile("/src/a.txt", "a0");
+      await fs.writeFile("/other.txt", "o0");
+
+      fs = await fs.fork("v1");
+      await fs.writeFile("/src/a.txt", "a1");
+      await fs.writeFile("/other.txt", "o1");
+
+      const page = await fs.listHistory({ limit: 5 });
+      const v1Entry = page.entries.find((e) => e.version === "v1")!;
+
+      const detail = await fs.versionDiff(v1Entry.versionId, { path: "/src" });
+      expect(detail.map((c) => c.path)).toEqual(["/src/a.txt"]);
+    });
+
+    it("rejects unknown versionId", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: WS, version: "v0" });
+      await fs.init();
+      await expect(fs.versionDiff(999_999)).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe("versionDiffStream", () => {
+    it("yields the same entries as versionDiff for a non-root entry", async () => {
+      let fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      await fs.writeFile("/a.txt", "a0");
+
+      fs = await fs.fork("v1");
+      for (let i = 0; i < 5; i++) {
+        await fs.writeFile(`/n${i}.txt`, `n${i}`);
+      }
+
+      const page = await fs.listHistory({ limit: 5 });
+      const v1Entry = page.entries.find((e) => e.version === "v1")!;
+
+      const streamed: string[] = [];
+      for await (const c of fs.versionDiffStream(v1Entry.versionId, { batchSize: 2 })) {
+        streamed.push(c.path);
+      }
+      const snapshot = await fs.versionDiff(v1Entry.versionId);
+      expect(streamed.sort()).toEqual(snapshot.map((c) => c.path).sort());
+    });
+
+    it("yields all root-version entries in a single pass", async () => {
+      const fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v0",
+        historyRetention: "retain",
+      });
+      await fs.init();
+      for (let i = 0; i < 4; i++) {
+        await fs.writeFile(`/r${i}.txt`, `r${i}`);
+      }
+
+      const page = await fs.listHistory({ limit: 5 });
+      const root = page.entries.find((e) => e.parentVersionId === null)!;
+
+      const streamed: string[] = [];
+      for await (const c of fs.versionDiffStream(root.versionId, { batchSize: 1 })) {
+        streamed.push(c.path);
+      }
+      const files = streamed.filter((p) => p !== "/").sort();
+      expect(files).toEqual(["/r0.txt", "/r1.txt", "/r2.txt", "/r3.txt"]);
+    });
+  });
+
+  describe("discard history deleteVersion", () => {
+    it("is the default deleteVersion behavior", async () => {
+      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      await v1.init();
+      await v1.writeFile("/keep.txt", "keep");
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/throwaway.txt", "ephemeral");
+      await v1.deleteVersion("v2");
+
+      expect(await countEntries(client, WS, "v2")).toBe(0);
+      expect(await v1.listVersions()).toEqual(["v1"]);
+    });
+
+    it("physically deletes entries and GCs unique blobs", async () => {
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "discard",
+      });
+      await v1.init();
+      await v1.writeFile("/keep.txt", "keep");
+      const blobsAfterV1 = await countBlobs(client, WS);
+
+      const v2 = await v1.fork("v2");
+      await v2.writeFile("/throwaway.txt", "ephemeral");
+      expect(await countBlobs(client, WS)).toBe(blobsAfterV1 + 1);
+
+      await v1.deleteVersion("v2");
+
+      expect(await countBlobs(client, WS)).toBe(blobsAfterV1);
+      expect(await countEntries(client, WS, "v2")).toBe(0);
+      expect(await v1.listVersions()).toEqual(["v1"]);
+    });
+
+    it("refuses physical deletion when the target has descendants", async () => {
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "discard",
+      });
+      await v1.init();
+      const v2 = await v1.fork("v2");
+      await v2.fork("v3");
+
+      await expect(v1.deleteVersion("v2")).rejects.toThrow(/descendants/);
+    });
+  });
+
   describe("sweepHistory", () => {
     it("physically removes deleted history while preserving the active snapshot", async () => {
-      const main = new PgFileSystem({ db: client, workspaceId: WS, version: "main" });
+      const main = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "main",
+        historyRetention: "retain",
+      });
       await main.init();
       await main.writeFile("/base.txt", "base");
 
@@ -395,7 +776,7 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       await exp.promoteTo("main", { dropPrevious: true });
 
       expect(await exp.listVersions()).toEqual(["main"]);
-      expect((await exp.listHistory()).length).toBeGreaterThan(1);
+      expect((await exp.listHistory()).entries.length).toBeGreaterThan(1);
       const versionsBefore = await countVersions(client, WS);
       const blobsBefore = await countBlobs(client, WS);
 
@@ -410,7 +791,7 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       expect(await exp.readFile("/base.txt")).toBe("base");
       expect(await exp.readFile("/exp.txt")).toBe("exp");
 
-      const history = await exp.listHistory();
+      const history = (await exp.listHistory({ includeChanges: true })).entries;
       expect(history).toHaveLength(1);
       expect(history[0]!.parentVersion).toBeNull();
       expect(history[0]!.changes.map((entry) => entry.path)).toEqual(
@@ -435,7 +816,7 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       expect(await v2.readFile("/shared.txt")).toBe("from-v1");
       expect(await v2.readFile("/v2.txt")).toBe("from-v2");
 
-      const history = await v2.listHistory();
+      const history = (await v2.listHistory()).entries;
       expect(history).toHaveLength(1);
       expect(history[0]!.parentVersion).toBeNull();
     });
@@ -692,7 +1073,12 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
 
     it("allows deleting a former ancestor label while preserving inherited history", async () => {
-      const v1 = new PgFileSystem({ db: client, workspaceId: WS, version: "v1" });
+      const v1 = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        version: "v1",
+        historyRetention: "retain",
+      });
       await v1.init();
       await v1.writeFile("/inherited.txt", "from v1");
 
@@ -700,7 +1086,7 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
       await v2.deleteVersion("v1");
       expect((await v2.listVersions()).sort()).toEqual(["v2"]);
 
-      const history = await v2.listHistory();
+      const history = (await v2.listHistory()).entries;
       expect(history.some((entry) => entry.version === "v1" && entry.deletedAt !== null)).toBe(true);
       expect(await v2.readFile("/inherited.txt")).toBe("from v1");
     });

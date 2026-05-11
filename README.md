@@ -191,8 +191,43 @@ Versioning primitives include:
 - `revert(target, { paths?, pathScope? })` to restore selected paths to another version.
 - `detach()` to materialize a version into a standalone snapshot independent of ancestors.
 - `renameVersion(label, { swap? })` and `promoteTo(label, { dropPrevious? })` for deploy labels.
+- `listHistory({ limit?, cursor?, includeChanges?, includeRoot?, path? })` to walk ancestor history with keyset pagination, plus `versionDiff(versionId, { path? })` and `versionDiffStream(versionId, { path?, batchSize? })` to fetch the diff for a single history entry.
+- `sweepHistory()` to physically flatten retained history into self-contained snapshots and GC orphan blobs.
 
 The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. A typical deploy flow is `fork()` a draft, edit it, optionally `merge()` or `revert()` changes, then `promoteTo("live")`. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the full versioning guide.
+
+### Browsing history
+
+`listHistory()` returns ancestor versions paginated by depth from the current version backwards. `includeChanges` controls how much per-entry detail comes back: `false` (default, just metadata), `"paths"` (cheap path + change-kind summary), or `true` (full `before`/`after` shapes). All three modes share a single batched query, so paths-mode and full-changes mode are within ~5% of each other on large pages.
+
+```ts
+const fs = new PgFileSystem({
+  db: sql,
+  workspaceId: "app",
+  version: "main",
+  historyRetention: "retain",   // keep deleted versions in history
+})
+
+// 1. List page metadata + per-row "what changed" summary.
+const page = await fs.listHistory({ limit: 20, includeChanges: "paths" })
+for (const entry of page.entries) {
+  console.log(entry.version, entry.createdAt, entry.changes.length, "changes")
+  // entry.changes: [{ path, change: "added"|"removed"|"modified"|"type-changed" }]
+}
+if (page.nextCursor) { /* fetch next page with { cursor: page.nextCursor } */ }
+
+// 2. Click an entry → full diff against its parent (works for root and
+//    deleted-but-retained entries too).
+const detail = await fs.versionDiff(page.entries[0]!.versionId)
+// detail: VersionDiffEntry[] with full before/after shapes
+
+// 3. Or stream large diffs page-by-page.
+for await (const change of fs.versionDiffStream(page.entries[0]!.versionId, { batchSize: 100 })) {
+  // ...
+}
+```
+
+`historyRetention: "retain"` keeps deleted version rows visible in history (with `deletedAt !== null`); the default `"discard"` physically removes them. Run `sweepHistory()` to compact a retain-mode workspace back into self-contained snapshots and GC blobs no live entry references.
 
 ## Search
 

@@ -184,8 +184,21 @@ export interface VersionDiffCountOptions extends VersionDiffOptions {
 export interface VersionHistoryOptions extends VersionDiffOptions {
   /** Maximum number of versions to return from the current version backwards. */
   limit?: number;
+  /** Cursor returned by a previous `listHistory()` page. */
+  cursor?: string;
   /** Include the root version as additions from an empty tree. Default: true. */
   includeRoot?: boolean;
+  /**
+   * Per-version change detail. `false` (default): omit. `"paths"`: cheap
+   * `{ path, change }` summary (path-level only; `before`/`after` are `null`).
+   * `true`: full `VersionDiffEntry` with before/after shapes.
+   */
+  includeChanges?: boolean | "paths";
+}
+
+export interface VersionHistoryResult {
+  entries: VersionHistoryEntry[];
+  nextCursor: string | null;
 }
 
 export interface VersionHistoryEntry {
@@ -277,6 +290,8 @@ export interface PgFileSystemOptions {
   version?: string;
   /** Internal: version root path. Defaults to workspace root. */
   versionRoot?: string;
+  /** Retain deleted version rows for git-like history, or physically discard them. Default: "discard". */
+  historyRetention?: "retain" | "discard";
   permissions?: FsPermissions;
   rootDir?: string;
   /**

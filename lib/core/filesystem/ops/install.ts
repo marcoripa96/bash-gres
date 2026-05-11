@@ -19,6 +19,8 @@ import { renameVersion } from "./rename-version.js";
 import { revert } from "./revert.js";
 import { sweepHistory } from "./sweep-history.js";
 import { versioned } from "./versioned.js";
+import { versionDiff } from "./version-diff.js";
+import { versionDiffStream } from "./version-diff-stream.js";
 
 type DropContext<TOp> = TOp extends (
   ctx: infer _Ctx,
@@ -44,6 +46,8 @@ export interface FilesystemOpsApi<TFs> {
   cherryPick: DropContext<typeof cherryPick<TFs>>;
   revert: DropContext<typeof revert<TFs>>;
   sweepHistory: DropContext<typeof sweepHistory<TFs>>;
+  versionDiff: DropContext<typeof versionDiff<TFs>>;
+  versionDiffStream: DropContext<typeof versionDiffStream<TFs>>;
 }
 
 type FilesystemOperation<
@@ -99,4 +103,6 @@ export function installFilesystemOps<
   installOp(prototype, "cherryPick", cherryPick<TFs>);
   installOp(prototype, "revert", revert<TFs>);
   installOp(prototype, "sweepHistory", sweepHistory<TFs>);
+  installOp(prototype, "versionDiff", versionDiff<TFs>);
+  installOp(prototype, "versionDiffStream", versionDiffStream<TFs>);
 }

@@ -50,6 +50,7 @@ export class FsStateBase {
   protected statementTimeoutMs: number;
   protected embed?: (text: string) => Promise<number[]>;
   protected embeddingDimensions?: number;
+  protected historyRetention: "retain" | "discard";
   protected rootDir: string;
   protected versionRootPath: string;
   protected excludes: CompiledExcludes;
@@ -120,6 +121,7 @@ export class FsStateBase {
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
+    this.historyRetention = options.historyRetention ?? "discard";
     this.rootDir = normalizePath(options.rootDir ?? "/");
     this.versionRootPath = normalizePath(options.versionRoot ?? "/");
     this.excludes = compileExcludes(
@@ -131,6 +133,7 @@ export class FsStateBase {
       ...options,
       workspaceId: this.workspaceId,
       versionRoot: this.versionRootPath,
+      historyRetention: this.historyRetention,
     };
   }
 

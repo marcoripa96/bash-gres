@@ -21,6 +21,6 @@ export const deleteVersion = op(async (
       );
       if (r.rows.length === 0) return;
       const targetId = Number(r.rows[0]!.id);
-      await deleteVersionById(ctx, tx, targetId);
+      await deleteVersionById(ctx, tx, targetId, ctx.historyRetention);
     });
   });

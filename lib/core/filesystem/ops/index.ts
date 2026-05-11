@@ -18,3 +18,5 @@ export { renameVersion } from "./rename-version.js";
 export { revert } from "./revert.js";
 export { sweepHistory } from "./sweep-history.js";
 export { versioned } from "./versioned.js";
+export { versionDiff } from "./version-diff.js";
+export { versionDiffStream } from "./version-diff-stream.js";
