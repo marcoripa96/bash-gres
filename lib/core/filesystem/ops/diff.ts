@@ -32,7 +32,15 @@ export const diff = op(async (
       const ourId = await ctx.getCurrentVersionId(tx);
       const theirId = await ctx.requireVersionIdByLabel(tx, other);
       const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);
-      const { entries } = await fetchDiff(ctx, tx, ourId, theirId, scopeLtree, null);
+      const { entries } = await fetchDiff(
+        ctx,
+        tx,
+        ourId,
+        theirId,
+        scopeLtree,
+        null,
+        opts?.includeContent ?? false,
+      );
       return entries;
     });
   });

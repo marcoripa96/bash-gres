@@ -83,3 +83,21 @@ export function classifyDiffChange(
   if (before.type !== after.type) return "type-changed";
   return "modified";
 }
+
+/**
+ * Resolve a `fs_blobs` row into text content for a diff entry. Returns
+ * `null` for non-files (directories, symlinks, absent side); falls back to
+ * UTF-8 decoding of `binary_data` when the row has no `content` column —
+ * the storage layer chooses one or the other based on whether the blob
+ * was originally text.
+ */
+export function decodeBlobContent(
+  side: EntryShape | null,
+  content: string | null,
+  binary: Uint8Array | null,
+): string | null {
+  if (side === null || side.type !== "file") return null;
+  if (content !== null) return content;
+  if (binary !== null) return new TextDecoder().decode(binary);
+  return "";
+}

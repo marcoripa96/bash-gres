@@ -320,4 +320,83 @@ describe.each(TEST_ADAPTERS)("PgFileSystem.diff [%s]", (_name, factory) => {
       await expect(fs.diffCount("")).rejects.toThrow(/non-empty/);
     });
   });
+
+  describe("includeContent", () => {
+    it("omits beforeContent/afterContent when not requested", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      await a.writeFile("/keep.txt", "keep0");
+      const b = await a.fork("b");
+      await b.writeFile("/keep.txt", "keep1");
+
+      const diff = await a.diff("b");
+      expect(diff).toHaveLength(1);
+      expect(diff[0]!.beforeContent).toBeUndefined();
+      expect(diff[0]!.afterContent).toBeUndefined();
+    });
+
+    it("populates content for added/modified/removed files", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      await a.writeFile("/keep.txt", "keep0");
+      await a.writeFile("/doomed.txt", "doomed");
+      const b = await a.fork("b");
+      await b.writeFile("/keep.txt", "keep1");
+      await b.writeFile("/fresh.txt", "fresh");
+      await b.rm("/doomed.txt");
+
+      const diff = (await a.diff("b", { includeContent: true })).sort(byPath);
+      expect(diff).toHaveLength(3);
+
+      const doomed = diff.find((e) => e.path === "/doomed.txt")!;
+      expect(doomed.change).toBe("removed"); // present in a, deleted in b
+      expect(doomed.beforeContent).toBe("doomed");
+      expect(doomed.afterContent).toBeNull();
+
+      const fresh = diff.find((e) => e.path === "/fresh.txt")!;
+      expect(fresh.change).toBe("added"); // absent in a, added in b
+      expect(fresh.beforeContent).toBeNull();
+      expect(fresh.afterContent).toBe("fresh");
+
+      const keep = diff.find((e) => e.path === "/keep.txt")!;
+      expect(keep.change).toBe("modified");
+      expect(keep.beforeContent).toBe("keep0");
+      expect(keep.afterContent).toBe("keep1");
+    });
+
+    it("returns null content for directories and symlinks", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      const b = await a.fork("b");
+      await b.mkdir("/new-dir");
+      await b.writeFile("/new-dir/target.txt", "target");
+      await b.symlink("/new-dir/target.txt", "/link");
+
+      const diff = (await a.diff("b", { includeContent: true })).sort(byPath);
+      const dir = diff.find((e) => e.path === "/new-dir")!;
+      expect(dir.beforeContent).toBeNull();
+      expect(dir.afterContent).toBeNull();
+      const link = diff.find((e) => e.path === "/link")!;
+      expect(link.beforeContent).toBeNull();
+      expect(link.afterContent).toBeNull();
+    });
+
+    it("propagates includeContent through diffStream", async () => {
+      const a = new PgFileSystem({ db: client, workspaceId: WS, version: "a" });
+      await a.init();
+      const b = await a.fork("b");
+      await b.writeFile("/only.txt", "streamed");
+
+      const collected: VersionDiffEntry[] = [];
+      for await (const e of a.diffStream("b", {
+        batchSize: 10,
+        includeContent: true,
+      })) {
+        collected.push(e);
+      }
+      expect(collected).toHaveLength(1);
+      expect(collected[0]!.beforeContent).toBeNull();
+      expect(collected[0]!.afterContent).toBe("streamed");
+    });
+  });
 });

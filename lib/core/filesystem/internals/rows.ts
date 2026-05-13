@@ -40,12 +40,16 @@ export interface DiffRow {
   o_mode: number | null;
   o_size: number | string | null;
   o_mtime: Date | null;
+  o_content: string | null;
+  o_binary: Uint8Array | null;
   t_type: string | null;
   t_hash: Uint8Array | null;
   t_link: string | null;
   t_mode: number | null;
   t_size: number | string | null;
   t_mtime: Date | null;
+  t_content: string | null;
+  t_binary: Uint8Array | null;
 }
 
 export interface UsageRow {

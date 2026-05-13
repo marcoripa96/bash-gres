@@ -26,16 +26,22 @@ export const diffStream = op(async function* (
     const requested = opts?.batchSize ?? DIFF_DEFAULT_BATCH_SIZE;
     const batchSize = Math.max(1, Math.min(requested, DIFF_MAX_BATCH_SIZE));
 
+    const includeContent = opts?.includeContent ?? false;
     let cursor: string | null = null;
     while (true) {
       const { entries, lastLtree } = await ctx.withReadOnlyWorkspace(async (tx) => {
         const ourId = await ctx.getCurrentVersionId(tx);
         const theirId = await ctx.requireVersionIdByLabel(tx, other);
         const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);
-        return fetchDiff(ctx, tx, ourId, theirId, scopeLtree, {
-          cursor,
-          limit: batchSize,
-        });
+        return fetchDiff(
+          ctx,
+          tx,
+          ourId,
+          theirId,
+          scopeLtree,
+          { cursor, limit: batchSize },
+          includeContent,
+        );
       });
       for (const entry of entries) yield entry;
       if (entries.length < batchSize) return;

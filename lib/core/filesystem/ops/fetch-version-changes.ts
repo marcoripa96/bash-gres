@@ -1,11 +1,6 @@
-import type {
-  EntryShape,
-  SqlClient,
-  SqlParam,
-  VersionDiffEntry,
-} from "../../types.js";
+import type { SqlClient, SqlParam, VersionDiffEntry } from "../../types.js";
 import { ltreeToPath } from "../../path-encoding.js";
-import { mapDiffSide } from "../internals/entry-shapes.js";
+import { decodeBlobContent, mapDiffSide } from "../internals/entry-shapes.js";
 import { op, type FilesystemOpsContext } from "./context.js";
 
 interface ChangeRow {
@@ -232,13 +227,3 @@ export const fetchVersionChanges = op(async <TFs>(
   return { entries, lastLtree };
 });
 
-function decodeBlobContent(
-  side: EntryShape | null,
-  content: string | null,
-  binary: Uint8Array | null,
-): string | null {
-  if (side === null || side.type !== "file") return null;
-  if (content !== null) return content;
-  if (binary !== null) return new TextDecoder().decode(binary);
-  return "";
-}

@@ -1,14 +1,39 @@
 import type { SqlClient, SqlParam, VersionDiffEntry } from "../../types.js";
 import { ltreeToPath } from "../../path-encoding.js";
-import { classifyDiffChange, mapDiffSide } from "../internals/entry-shapes.js";
+import {
+  classifyDiffChange,
+  decodeBlobContent,
+  mapDiffSide,
+} from "../internals/entry-shapes.js";
 import type { DiffRow } from "../internals/rows.js";
 import { op } from "./context.js";
+
+const NULL_O_CONTENT_COLS = `
+  NULL::text  AS o_content,
+  NULL::bytea AS o_binary`;
+
+const NULL_T_CONTENT_COLS = `
+  NULL::text  AS t_content,
+  NULL::bytea AS t_binary`;
+
+const FULL_O_CONTENT_COLS = `
+  ob.content     AS o_content,
+  ob.binary_data AS o_binary`;
+
+const FULL_T_CONTENT_COLS = `
+  tb.content     AS t_content,
+  tb.binary_data AS t_binary`;
 
 /**
  * Run the actual diff SQL: two visible-entry CTEs, FULL OUTER JOIN by path,
  * filter out equal rows. Returns rows already mapped to `VersionDiffEntry`
  * plus the encoded-ltree path of the last row, suitable as the next
  * keyset-pagination cursor.
+ *
+ * When `includeContent` is true, LEFT JOINs `fs_blobs` on both sides and
+ * populates `beforeContent` / `afterContent` on each entry. The join is
+ * restricted to changed paths (already filtered by the equal-row WHERE
+ * clause) so identical files never touch the blob table.
  */
 export const fetchDiff = op(async (
   ctx,
@@ -17,6 +42,7 @@ export const fetchDiff = op(async (
   theirId: number,
   scopeLtree: string,
   page: { cursor: string | null; limit: number } | null,
+  includeContent: boolean = false,
 ): Promise<{ entries: VersionDiffEntry[]; lastLtree: string | null }> => {
     const params: SqlParam[] = [ctx.workspaceId, ourId, theirId, scopeLtree];
     let cursorClause = "";
@@ -31,6 +57,16 @@ export const fetchDiff = op(async (
     }
     const exc = ctx.buildExcludeClause("e.path", params.length + 1);
     params.push(...exc.params);
+
+    const oContentCols = includeContent ? FULL_O_CONTENT_COLS : NULL_O_CONTENT_COLS;
+    const tContentCols = includeContent ? FULL_T_CONTENT_COLS : NULL_T_CONTENT_COLS;
+    const oBlobJoin = includeContent
+      ? `LEFT JOIN fs_blobs ob ON ob.workspace_id = $1 AND ob.hash = ours.blob_hash`
+      : "";
+    const tBlobJoin = includeContent
+      ? `LEFT JOIN fs_blobs tb ON tb.workspace_id = $1 AND tb.hash = theirs.blob_hash`
+      : "";
+
     const sql = `
       WITH ours_raw AS (
         SELECT DISTINCT ON (e.path)
@@ -78,14 +114,18 @@ export const fetchDiff = op(async (
         ours.mode AS o_mode,
         ours.size_bytes AS o_size,
         ours.mtime AS o_mtime,
+        ${oContentCols},
         theirs.node_type AS t_type,
         theirs.blob_hash AS t_hash,
         theirs.symlink_target AS t_link,
         theirs.mode AS t_mode,
         theirs.size_bytes AS t_size,
-        theirs.mtime AS t_mtime
+        theirs.mtime AS t_mtime,
+        ${tContentCols}
       FROM ours
       FULL OUTER JOIN theirs USING (path)
+      ${oBlobJoin}
+      ${tBlobJoin}
       WHERE (
         ours.node_type IS NULL
         OR theirs.node_type IS NULL
@@ -118,12 +158,17 @@ export const fetchDiff = op(async (
         row.t_size,
         row.t_mtime,
       );
-      entries.push({
+      const entry: VersionDiffEntry = {
         path: ctx.toUserPath(ltreeToPath(row.path)),
         change: classifyDiffChange(before, after),
         before,
         after,
-      });
+      };
+      if (includeContent) {
+        entry.beforeContent = decodeBlobContent(before, row.o_content, row.o_binary);
+        entry.afterContent = decodeBlobContent(after, row.t_content, row.t_binary);
+      }
+      entries.push(entry);
     }
     const lastLtree =
       result.rows.length > 0 ? result.rows[result.rows.length - 1]!.path : null;
