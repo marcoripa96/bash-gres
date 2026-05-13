@@ -287,6 +287,11 @@ export interface WorkspaceUsage {
   visibleFiles: number;
   visibleDirectories: number;
   visibleSymlinks: number;
+  /** Deduplicated blob stats across every live version in the version root, under `path`. Present when `includeAcrossVersions` was set. */
+  acrossVersions?: {
+    referencedBlobBytes: number;
+    referencedBlobCount: number;
+  };
   limits: {
     maxFiles: number;
     maxFileSize: number;
@@ -297,6 +302,8 @@ export interface WorkspaceUsage {
 export interface WorkspaceUsageOptions {
   /** Scope visible/logical counts to this user path and its descendants. */
   path?: string;
+  /** Also compute deduplicated blob bytes/count across every live version in the version root. Returned on `acrossVersions`. */
+  includeAcrossVersions?: boolean;
 }
 
 export interface PgFileSystemOptions {

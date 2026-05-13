@@ -115,6 +115,60 @@ describe.each(TEST_ADAPTERS)("workspace usage [%s]", (_name, factory) => {
     expect(usage.visibleSymlinks).toBe(1);
   });
 
+  it("reports deduplicated blob usage across all versions of a versioned directory", async () => {
+    await fs.mkdir("/db", { versioned: true });
+    const dbMain = await fs.versioned("/db");
+
+    await dbMain.writeFile("/a.txt", "aaaa"); // 4 bytes
+    await dbMain.writeFile("/b.txt", "bbbb"); // 4 bytes
+
+    const dbDraft = await dbMain.fork("draft");
+    await dbDraft.writeFile("/a.txt", "AAAAAA"); // 6 bytes — replaces a.txt in draft only
+
+    const dbStale = await dbMain.fork("stale");
+    await dbStale.rm("/b.txt"); // tombstones b.txt in stale; doesn't drop the blob
+
+    const mainUsage = await dbMain.getUsage({ includeAcrossVersions: true });
+    const draftUsage = await dbDraft.getUsage({ includeAcrossVersions: true });
+
+    expect(mainUsage.acrossVersions).toBeDefined();
+    expect(mainUsage.acrossVersions).toEqual(draftUsage.acrossVersions);
+
+    // Distinct blobs referenced by *any* version inside /db: aaaa, bbbb, AAAAAA.
+    expect(mainUsage.acrossVersions!.referencedBlobCount).toBe(3);
+    expect(mainUsage.acrossVersions!.referencedBlobBytes).toBe(14);
+
+    // Per-version values shouldn't equal the across-versions value — summing
+    // them would over-count (main 8 + draft 10 + stale 4 = 22 > 14).
+    expect(mainUsage.referencedBlobBytes).toBe(8);
+    expect(draftUsage.referencedBlobBytes).toBe(10);
+  });
+
+  it("omits acrossVersions when includeAcrossVersions is not set", async () => {
+    await fs.mkdir("/db", { versioned: true });
+    const dbMain = await fs.versioned("/db");
+    await dbMain.writeFile("/a.txt", "x");
+
+    const usage = await dbMain.getUsage();
+    expect(usage.acrossVersions).toBeUndefined();
+  });
+
+  it("scopes acrossVersions by path inside a versioned directory", async () => {
+    await fs.mkdir("/db", { versioned: true });
+    const dbMain = await fs.versioned("/db");
+    await dbMain.writeFile("/keep/k.txt", "kk"); // 2 bytes
+    await dbMain.writeFile("/drop/d.txt", "ddd"); // 3 bytes
+    await dbMain.fork("draft");
+
+    const scoped = await dbMain.getUsage({
+      path: "/keep",
+      includeAcrossVersions: true,
+    });
+
+    expect(scoped.acrossVersions!.referencedBlobCount).toBe(1);
+    expect(scoped.acrossVersions!.referencedBlobBytes).toBe(2);
+  });
+
   it("enforces maxWorkspaceBytes with structured ENOSPC errors", async () => {
     const limited = new PgFileSystem({
       db: client,

@@ -64,6 +64,8 @@ export interface UsageRow {
   visible_directories: number | string;
   visible_symlinks: number | string;
   logical_bytes: number | string;
+  across_referenced_blob_bytes: number | string | null;
+  across_referenced_blob_count: number | string | null;
 }
 
 export interface VersionRootRow {

@@ -23,6 +23,40 @@ export const getUsage = op(async (
         versionRootId,
       ];
       const exc = ctx.buildExcludeClause("e.path", baseParams.length + 1);
+      const acrossSelectSql = options?.includeAcrossVersions
+        ? `,
+         versions_in_root AS (
+           SELECT id FROM fs_versions
+           WHERE workspace_id = $1 AND version_root_id = $5 AND deleted_at IS NULL
+         ),
+         across_visible_blobs AS (
+           SELECT DISTINCT picked.blob_hash
+           FROM versions_in_root vir
+           CROSS JOIN LATERAL (
+             SELECT DISTINCT ON (e.path)
+               e.node_type, e.blob_hash
+             FROM fs_entries e
+             JOIN version_ancestors a
+               ON a.workspace_id = e.workspace_id
+              AND a.ancestor_id = e.version_id
+             WHERE e.workspace_id = $1
+               AND a.descendant_id = vir.id
+               AND e.path <@ $4::ltree
+               AND ${exc.sql}
+             ORDER BY e.path, a.depth ASC
+           ) picked
+           WHERE picked.node_type = 'file' AND picked.blob_hash IS NOT NULL
+         )`
+        : "";
+      const acrossColumnsSql = options?.includeAcrossVersions
+        ? `,
+           (SELECT COUNT(*) FROM across_visible_blobs) AS across_referenced_blob_count,
+           (SELECT COALESCE(SUM(b.size_bytes), 0)
+            FROM across_visible_blobs av
+            JOIN fs_blobs b ON b.workspace_id = $1 AND b.hash = av.blob_hash) AS across_referenced_blob_bytes`
+        : `,
+           NULL::bigint AS across_referenced_blob_count,
+           NULL::bigint AS across_referenced_blob_bytes`;
       const r = await tx.query<UsageRow>(
         `WITH visible_raw AS (
            SELECT DISTINCT ON (e.path)
@@ -48,7 +82,7 @@ export const getUsage = op(async (
            SELECT DISTINCT blob_hash
            FROM visible
            WHERE node_type = 'file' AND blob_hash IS NOT NULL
-          )
+          )${acrossSelectSql}
           SELECT
             (SELECT COUNT(*) FROM fs_versions WHERE workspace_id = $1 AND version_root_id = $5 AND deleted_at IS NULL) AS versions,
             (SELECT COUNT(*)
@@ -68,7 +102,7 @@ export const getUsage = op(async (
            (SELECT COUNT(*) FROM visible WHERE node_type = 'file') AS visible_files,
            (SELECT COUNT(*) FROM visible WHERE node_type = 'directory') AS visible_directories,
            (SELECT COUNT(*) FROM visible WHERE node_type = 'symlink') AS visible_symlinks,
-           (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes`,
+           (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes${acrossColumnsSql}`,
         [...baseParams, ...exc.params],
       );
       const row = r.rows[0]!;
@@ -87,6 +121,14 @@ export const getUsage = op(async (
         visibleFiles: Number(row.visible_files),
         visibleDirectories: Number(row.visible_directories),
         visibleSymlinks: Number(row.visible_symlinks),
+        ...(options?.includeAcrossVersions
+          ? {
+              acrossVersions: {
+                referencedBlobBytes: Number(row.across_referenced_blob_bytes),
+                referencedBlobCount: Number(row.across_referenced_blob_count),
+              },
+            }
+          : {}),
         limits: {
           maxFiles: ctx.maxFiles,
           maxFileSize: ctx.maxFileSize,
