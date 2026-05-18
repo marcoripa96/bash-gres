@@ -183,6 +183,12 @@ await dbMain.listVersions()           // ["draft", "main"]
 
 Version labels are scoped to the versioned directory, so `/database` and `/user` can both have a `draft` version. Nested versioned directories are rejected.
 
+Removing a versioned directory with `rm(path, { recursive: true })` only hides the mount point from the parent filesystem. To permanently delete the version root and all versions/history stored under it, opt in explicitly:
+
+```ts
+await fs.rm("/database", { recursive: true, deleteVersionRoot: true })
+```
+
 Versioning primitives include:
 
 - `diff(other, { path? })`, `diffCount(other, { path?, nodeType? })`, and `diffStream(other, { path?, batchSize? })` to compare visible trees.

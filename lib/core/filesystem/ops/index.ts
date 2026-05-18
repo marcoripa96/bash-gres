@@ -15,6 +15,7 @@ export { listHistory } from "./list-history.js";
 export { listVersions } from "./list-versions.js";
 export { merge } from "./merge.js";
 export { promoteTo } from "./promote-to.js";
+export { removeVersionRoot } from "./remove-version-root.js";
 export { renameVersion } from "./rename-version.js";
 export { revert } from "./revert.js";
 export { sweepHistory } from "./sweep-history.js";

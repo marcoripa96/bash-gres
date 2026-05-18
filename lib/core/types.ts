@@ -106,7 +106,10 @@ export interface VersionedDirectoryOptions {
 
 export interface RmOptions {
   recursive?: boolean;
+  /** Ignore a missing path. Does not delete version-root metadata. */
   force?: boolean;
+  /** Permanently delete the version root mounted at this path. Requires recursive. */
+  deleteVersionRoot?: boolean;
 }
 
 export interface CpOptions {

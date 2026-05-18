@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
+import { pathToLtree } from "../lib/core/path-encoding.js";
 import type { SqlClient } from "./helpers.js";
 
 describe.each(TEST_ADAPTERS)("PgFileSystem versioning [%s]", (_name, factory) => {
@@ -289,6 +290,156 @@ describe.each(TEST_ADAPTERS)("PgFileSystem versioning [%s]", (_name, factory) =>
           versioned: true,
         }),
       ).rejects.toMatchObject({ code: "EINVAL" });
+    });
+
+    it("deleteVersionRoot on a versioned directory tears down the version root entirely", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      const database = await fs.versioned("/database");
+      await database.writeFile("/schema.sql", "main");
+      const draft = await database.fork("draft");
+      await draft.writeFile("/schema.sql", "draft");
+      await draft.writeFile("/migrations/001.sql", "migrate");
+
+      const dbLtree = pathToLtree("/database", "version-workspace");
+      const rootBefore = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM fs_version_roots
+         WHERE workspace_id = $1 AND path = $2::ltree`,
+        ["version-workspace", dbLtree],
+      );
+      expect(Number(rootBefore.rows[0]!.count)).toBe(1);
+
+      await fs.rm("/database", { recursive: true, deleteVersionRoot: true });
+
+      const rootAfter = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM fs_version_roots
+         WHERE workspace_id = $1 AND path = $2::ltree`,
+        ["version-workspace", dbLtree],
+      );
+      expect(Number(rootAfter.rows[0]!.count)).toBe(0);
+
+      const orphanVersions = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM fs_versions v
+         LEFT JOIN fs_version_roots r ON r.id = v.version_root_id
+         WHERE v.workspace_id = $1 AND v.version_root_id IS NOT NULL AND r.id IS NULL`,
+        ["version-workspace"],
+      );
+      expect(Number(orphanVersions.rows[0]!.count)).toBe(0);
+
+      expect(await fs.exists("/database")).toBe(false);
+      await expect(fs.versioned("/database")).rejects.toMatchObject({
+        code: "ENOTVERSIONED",
+      });
+
+      await fs.mkdir("/database", { versioned: true });
+      const reborn = await fs.versioned("/database");
+      expect(await reborn.listVersions()).toEqual(["main"]);
+      expect(await reborn.exists("/schema.sql")).toBe(false);
+    });
+
+    it("rm -r without force leaves the version root intact", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      const database = await fs.versioned("/database");
+      await database.writeFile("/schema.sql", "main");
+
+      await fs.rm("/database", { recursive: true });
+
+      const dbLtree = pathToLtree("/database", "version-workspace");
+      const rootAfter = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM fs_version_roots
+         WHERE workspace_id = $1 AND path = $2::ltree`,
+        ["version-workspace", dbLtree],
+      );
+      expect(Number(rootAfter.rows[0]!.count)).toBe(1);
+      expect(await fs.exists("/database")).toBe(false);
+
+      const revived = await fs.versioned("/database");
+      expect(await revived.readFile("/schema.sql")).toBe("main");
+    });
+
+    it("force does not tear down a version root", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      const database = await fs.versioned("/database");
+      await database.writeFile("/schema.sql", "main");
+
+      await fs.rm("/database", { recursive: true, force: true });
+
+      const revived = await fs.versioned("/database");
+      expect(await revived.readFile("/schema.sql")).toBe("main");
+    });
+
+    it("deleteVersionRoot removes a hidden version root", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      await fs.rm("/database", { recursive: true });
+
+      await fs.rm("/database", { recursive: true, deleteVersionRoot: true });
+
+      await expect(fs.versioned("/database")).rejects.toMatchObject({
+        code: "ENOTVERSIONED",
+      });
+    });
+
+    it("requires recursive for deleteVersionRoot", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+
+      await expect(
+        fs.rm("/database", { deleteVersionRoot: true }),
+      ).rejects.toMatchObject({ code: "EINVAL" });
+    });
+
+    it("force never tears down the workspace root version", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.writeFile("/a.txt", "hi");
+
+      await fs.rm("/", { recursive: true, force: true });
+
+      const rootLtree = pathToLtree("/", "version-workspace");
+      const rootRows = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM fs_version_roots
+         WHERE workspace_id = $1 AND path = $2::ltree`,
+        ["version-workspace", rootLtree],
+      );
+      expect(Number(rootRows.rows[0]!.count)).toBe(1);
+      expect(await fs.exists("/a.txt")).toBe(false);
+    });
+
+    it("rm -rf on a regular directory does not touch any version root", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/database", { versioned: true });
+      await fs.mkdir("/plain");
+      await fs.writeFile("/plain/note.txt", "hello");
+
+      await fs.rm("/plain", { recursive: true, force: true });
+
+      const dbLtree = pathToLtree("/database", "version-workspace");
+      const versionedStillThere = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM fs_version_roots
+         WHERE workspace_id = $1 AND path = $2::ltree`,
+        ["version-workspace", dbLtree],
+      );
+      expect(Number(versionedStillThere.rows[0]!.count)).toBe(1);
+    });
+
+    it("deleteVersionRoot rejects regular directories", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: "version-workspace" });
+      await fs.init();
+      await fs.mkdir("/plain");
+
+      await expect(
+        fs.rm("/plain", { recursive: true, deleteVersionRoot: true }),
+      ).rejects.toMatchObject({ code: "ENOTVERSIONED" });
+      expect(await fs.exists("/plain")).toBe(true);
     });
   });
 });

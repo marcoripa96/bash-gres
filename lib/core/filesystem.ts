@@ -33,6 +33,7 @@ import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
 import {
   deleteVersionById,
   installFilesystemOps,
+  removeVersionRoot,
   type FilesystemOpsApi,
 } from "./filesystem/ops/index.js";
 import { isExcluded } from "./exclude.js";
@@ -848,17 +849,40 @@ export class PgFileSystem extends FsWriteOpsBase {
     const internal = this.guardWrite(path);
     this.guardExcludedWrite(internal, "rm", path);
     return this.withWorkspace(async (tx) => {
+      const deleteVersionRoot = options?.deleteVersionRoot === true;
+      if (deleteVersionRoot && !options?.recursive) {
+        throw new FsError(
+          "EINVAL",
+          "deleteVersionRoot requires recursive, rm",
+          path,
+        );
+      }
+      if (
+        deleteVersionRoot &&
+        (internal === "/" || internal === this.versionRootPath)
+      ) {
+        throw new FsError(
+          "EINVAL",
+          "cannot delete active version root, rm",
+          path,
+        );
+      }
+
       const versionId = await this.getCurrentVersionId(tx);
       const node = await this.resolveEntry(tx, internal);
       if (!node) {
+        if (deleteVersionRoot) {
+          const removed = await removeVersionRoot(
+            this[filesystemOpsContext](),
+            tx,
+            internal,
+          );
+          if (removed || options?.force) return;
+        }
         if (options?.force) return;
         throw new FsError("ENOENT", "no such file or directory, rm", path);
       }
       if (node.node_type === "directory") {
-        const children = await this.listVisibleChildren(tx, internal);
-        if (children.length > 0 && !options?.recursive) {
-          throw new FsError("ENOTEMPTY", "directory not empty, rm", path);
-        }
         if (options?.recursive) {
           await this.writeTombstonesForVisibleSubtree(
             tx,
@@ -866,8 +890,28 @@ export class PgFileSystem extends FsWriteOpsBase {
             internal,
             true,
           );
+          if (deleteVersionRoot) {
+            const removed = await removeVersionRoot(
+              this[filesystemOpsContext](),
+              tx,
+              internal,
+            );
+            if (!removed) {
+              throw new FsError(
+                "ENOTVERSIONED",
+                "not a versioned directory, rm",
+                path,
+              );
+            }
+          }
           return;
         }
+        const children = await this.listVisibleChildren(tx, internal);
+        if (children.length > 0) {
+          throw new FsError("ENOTEMPTY", "directory not empty, rm", path);
+        }
+      } else if (deleteVersionRoot) {
+        throw new FsError("ENOTDIR", "not a directory, rm", path);
       }
       await this.writeTombstone(tx, versionId, internal);
     });
