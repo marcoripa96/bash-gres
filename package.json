@@ -24,6 +24,11 @@
       "import": "./dist/adapters/node-postgres/index.js",
       "default": "./dist/adapters/node-postgres/index.js"
     },
+    "./mount": {
+      "types": "./dist/mount/mount-fs.d.ts",
+      "import": "./dist/mount/mount-fs.js",
+      "default": "./dist/mount/mount-fs.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
