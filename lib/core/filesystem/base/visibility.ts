@@ -17,6 +17,7 @@ import {
   pathToLtree,
 } from "../../path-encoding.js";
 import { isExcluded } from "../../exclude.js";
+import { mountVisible } from "../../mounts.js";
 import { TOMBSTONE } from "../internals/constants.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
 import type { BlobRow, DirChildRow, EntryRow, SubtreeRow } from "../internals/rows.js";
@@ -28,6 +29,9 @@ export class FsVisibilityBase extends FsVersionBase {
     posixPath: string,
   ): Promise<EntryRow | null> {
     if (!this.excludes.empty && isExcluded(this.excludes, posixPath)) {
+      return null;
+    }
+    if (!this.mounts.empty && !mountVisible(this.mounts, posixPath)) {
       return null;
     }
     const versionId = await this.getCurrentVersionId(tx);
@@ -86,6 +90,10 @@ export class FsVisibilityBase extends FsVersionBase {
     for (const posix of posixPaths) {
       if (out.has(posix)) continue;
       if (!this.excludes.empty && isExcluded(this.excludes, posix)) {
+        out.set(posix, null);
+        continue;
+      }
+      if (!this.mounts.empty && !mountVisible(this.mounts, posix)) {
         out.set(posix, null);
         continue;
       }
@@ -182,6 +190,10 @@ export class FsVisibilityBase extends FsVersionBase {
     const lt = pathToLtree(parentPosix, this.workspaceId);
     const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<DirChildRow>(
       `WITH visible AS (
          SELECT DISTINCT ON (e.path)
@@ -201,10 +213,11 @@ export class FsVisibilityBase extends FsVersionBase {
            AND e.path != $3::ltree
            AND nlevel(e.path) = nlevel($3::ltree) + 1
            AND ${exc.sql}
+           AND ${mnt.sql}
          ORDER BY e.path, a.depth ASC
        )
        SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
-      [...baseParams, ...exc.params],
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     return r.rows;
   }
@@ -217,6 +230,10 @@ export class FsVisibilityBase extends FsVersionBase {
     const lt = pathToLtree(parentPosix, this.workspaceId);
     const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<{ path: string; node_type: string }>(
       `WITH visible AS (
          SELECT DISTINCT ON (e.path)
@@ -231,10 +248,11 @@ export class FsVisibilityBase extends FsVersionBase {
            AND e.path != $3::ltree
            AND nlevel(e.path) = nlevel($3::ltree) + 1
            AND ${exc.sql}
+           AND ${mnt.sql}
          ORDER BY e.path, a.depth ASC
        )
        SELECT path, node_type FROM visible WHERE node_type != $4 ORDER BY path`,
-      [...baseParams, ...exc.params],
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     return r.rows.map((row) => ltreeFileName(row.path));
   }
@@ -257,6 +275,10 @@ export class FsVisibilityBase extends FsVersionBase {
       TOMBSTONE,
     ];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<{
       path: string;
       node_type: string;
@@ -278,15 +300,16 @@ export class FsVisibilityBase extends FsVersionBase {
          FROM fs_entries e
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-         WHERE e.workspace_id = $1
-           AND a.descendant_id = $2
-           AND e.path <@ $3::ltree
-           AND ${exc.sql}
-         ORDER BY e.path, a.depth ASC
-       )
-       SELECT path, node_type, blob_hash, symlink_target, mode, size_bytes, mtime
-       FROM visible WHERE node_type != $4`,
-      [...baseParams, ...exc.params],
+          WHERE e.workspace_id = $1
+            AND a.descendant_id = $2
+            AND e.path <@ $3::ltree
+            AND ${exc.sql}
+            AND ${mnt.sql}
+          ORDER BY e.path, a.depth ASC
+        )
+        SELECT path, node_type, blob_hash, symlink_target, mode, size_bytes, mtime
+        FROM visible WHERE node_type != $4`,
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     const map = new Map<string, InternalEntryShape>();
     for (const row of r.rows) {
@@ -312,6 +335,10 @@ export class FsVisibilityBase extends FsVersionBase {
     const filter = includeRoot ? "" : "AND e.path != $3::ltree";
     const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<SubtreeRow>(
       `WITH visible AS (
          SELECT DISTINCT ON (e.path)
@@ -331,10 +358,11 @@ export class FsVisibilityBase extends FsVersionBase {
            AND e.path <@ $3::ltree
            ${filter}
            AND ${exc.sql}
+           AND ${mnt.sql}
          ORDER BY e.path, a.depth ASC
        )
        SELECT * FROM visible WHERE node_type != $4 ORDER BY path`,
-      [...baseParams, ...exc.params],
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     return r.rows;
   }

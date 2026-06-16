@@ -23,6 +23,10 @@ export const getUsage = op(async (
         versionRootId,
       ];
       const exc = ctx.buildExcludeClause("e.path", baseParams.length + 1);
+      const mnt = ctx.buildMountClause(
+        "e.path",
+        baseParams.length + 1 + exc.params.length,
+      );
       const acrossSelectSql = options?.includeAcrossVersions
         ? `,
          versions_in_root AS (
@@ -40,11 +44,12 @@ export const getUsage = op(async (
                ON a.workspace_id = e.workspace_id
               AND a.ancestor_id = e.version_id
              WHERE e.workspace_id = $1
-               AND a.descendant_id = vir.id
-               AND e.path <@ $4::ltree
-               AND ${exc.sql}
-             ORDER BY e.path, a.depth ASC
-           ) picked
+                AND a.descendant_id = vir.id
+                AND e.path <@ $4::ltree
+                AND ${exc.sql}
+                AND ${mnt.sql}
+              ORDER BY e.path, a.depth ASC
+            ) picked
            WHERE picked.node_type = 'file' AND picked.blob_hash IS NOT NULL
          )`
         : "";
@@ -68,11 +73,12 @@ export const getUsage = op(async (
              ON a.workspace_id = e.workspace_id
             AND a.ancestor_id = e.version_id
            WHERE e.workspace_id = $1
-             AND a.descendant_id = $2
-             AND e.path <@ $4::ltree
-             AND ${exc.sql}
-           ORDER BY e.path, a.depth ASC
-         ),
+              AND a.descendant_id = $2
+              AND e.path <@ $4::ltree
+              AND ${exc.sql}
+              AND ${mnt.sql}
+            ORDER BY e.path, a.depth ASC
+          ),
          visible AS (
            SELECT node_type, size_bytes, blob_hash
            FROM visible_raw
@@ -100,10 +106,10 @@ export const getUsage = op(async (
             JOIN fs_blobs b ON b.workspace_id = $1 AND b.hash = rb.blob_hash) AS referenced_blob_bytes,
            (SELECT COUNT(*) FROM visible) AS visible_nodes,
            (SELECT COUNT(*) FROM visible WHERE node_type = 'file') AS visible_files,
-           (SELECT COUNT(*) FROM visible WHERE node_type = 'directory') AS visible_directories,
-           (SELECT COUNT(*) FROM visible WHERE node_type = 'symlink') AS visible_symlinks,
-           (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes${acrossColumnsSql}`,
-        [...baseParams, ...exc.params],
+            (SELECT COUNT(*) FROM visible WHERE node_type = 'directory') AS visible_directories,
+            (SELECT COUNT(*) FROM visible WHERE node_type = 'symlink') AS visible_symlinks,
+            (SELECT COALESCE(SUM(size_bytes), 0) FROM visible) AS logical_bytes${acrossColumnsSql}`,
+        [...baseParams, ...exc.params, ...mnt.params],
       );
       const row = r.rows[0]!;
       return {

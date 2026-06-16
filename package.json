@@ -1,6 +1,6 @@
 {
   "name": "bash-gres",
-  "version": "2.8.5",
+  "version": "2.8.6",
   "description": "PostgreSQL-backed virtual filesystem with bash command interface",
   "type": "module",
   "exports": {
@@ -23,11 +23,6 @@
       "types": "./dist/adapters/node-postgres/index.d.ts",
       "import": "./dist/adapters/node-postgres/index.js",
       "default": "./dist/adapters/node-postgres/index.js"
-    },
-    "./mount": {
-      "types": "./dist/mount/mount-fs.d.ts",
-      "import": "./dist/mount/mount-fs.js",
-      "default": "./dist/mount/mount-fs.js"
     },
     "./package.json": "./package.json"
   },

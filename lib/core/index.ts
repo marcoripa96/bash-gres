@@ -21,6 +21,7 @@ export {
   type ReadFileLinesResult,
   type SetupOptions,
   type FsPermissions,
+  type MountSpec,
   type PgFileSystemOptions,
   type NodeType,
   type EntryShape,

@@ -41,6 +41,7 @@ await bash.exec("echo hello > /file.txt");
 - `lib/core/setup.ts`: idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `lib/core/path-encoding.ts`: path <-> ltree conversion using `_xHEX_` delimited encoding
 - `lib/core/search.ts`: BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
+- `lib/core/mounts.ts`: `mount` allow-list (default-deny scoping to subtrees of one workspace). Sibling to `exclude.ts`: `compileMounts` + `mountVisible`/`mountWritable` (JS guards) + `mountWhereSql` (the `path <@ ANY OR path @> ANY` clause threaded into every listing/walk/glob/search query via `buildMountClause`)
 - `lib/adapters/drizzle/adapter.ts`: converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `lib/adapters/drizzle/schema.ts`: Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/node-postgres/index.ts`: wraps `pg.Pool` into `SqlClient` (structural `NodePgPool` interface)
@@ -61,6 +62,7 @@ await bash.exec("echo hello > /file.txt");
 - **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set via `SET LOCAL` in every transaction
 - **Workspace ID**: text (UUID by default), scoped per `PgFileSystem` instance
 - **Version root**: `/` by default; `mkdir(path, { versioned: true })` creates a non-nested directory-level version root opened via `fs.versioned(path)`
+- **Mounts**: `new PgFileSystem({ mount: [{ path: "/users/u1" }, { path: "/general", readonly: true }, ...] })` restricts one instance to an allow-list of subtrees of a single workspace (one version graph), with identity paths — no remapping. Only paths inside a mount, plus the ancestor dirs leading to them, are visible (`ls /` shows just those branches); everything else is `ENOENT`. Writes are allowed only inside a non-readonly mount. This replaces the removed `MountFs` router for the single-workspace, scoped-per-view case; a router is only needed for cross-workspace/cross-DB unions.
 
 ## Commands
 

@@ -10,6 +10,13 @@ import {
   type CompiledExcludes,
 } from "../../exclude.js";
 import {
+  compileMounts,
+  mountVisible,
+  mountWritable,
+  mountWhereSql,
+  type CompiledMounts,
+} from "../../mounts.js";
+import {
   DEFAULT_MAX_CP_NODES,
   DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_FILE_SIZE,
@@ -54,6 +61,7 @@ export class FsStateBase {
   protected rootDir: string;
   protected versionRootPath: string;
   protected excludes: CompiledExcludes;
+  protected mounts: CompiledMounts;
   protected readonly baseOptions: PgFileSystemOptions;
   protected cachedVersionId: number | null = null;
   protected cachedVersionRootId: number | null = null;
@@ -129,6 +137,7 @@ export class FsStateBase {
       this.rootDir,
       this.workspaceId,
     );
+    this.mounts = compileMounts(options.mount, this.rootDir, this.workspaceId);
     this.baseOptions = {
       ...options,
       workspaceId: this.workspaceId,
@@ -330,7 +339,19 @@ export class FsStateBase {
   }
 
   protected guardWrite(userPath: string): string {
-    return this.toInternalPath(normalizePath(userPath));
+    const internal = this.toInternalPath(normalizePath(userPath));
+    if (!this.mounts.empty) {
+      // Out-of-scope writes look like the path doesn't exist; in-scope but
+      // read-only (a readonly mount, or an ancestor passthrough dir) is a
+      // permission error.
+      if (!mountVisible(this.mounts, internal)) {
+        throw new FsError("ENOENT", "no such file or directory", userPath);
+      }
+      if (!mountWritable(this.mounts, internal)) {
+        throw new FsError("EACCES", "permission denied", userPath);
+      }
+    }
+    return internal;
   }
 
   /**
@@ -345,6 +366,19 @@ export class FsStateBase {
     nextParamIdx: number,
   ): { sql: string; params: SqlParam[] } {
     return excludeWhereSql(this.excludes, pathExpr, nextParamIdx);
+  }
+
+  /**
+   * Build the SQL fragment that restricts a result set to mounted subtrees and
+   * the ancestor paths leading to them. `{ sql: "TRUE", params: [] }` when this
+   * instance has no mounts. Threaded into every directory-listing, walk, glob,
+   * and search query alongside `buildExcludeClause`.
+   */
+  protected buildMountClause(
+    pathExpr: string,
+    nextParamIdx: number,
+  ): { sql: string; params: SqlParam[] } {
+    return mountWhereSql(this.mounts, pathExpr, nextParamIdx);
   }
 
   /**
@@ -364,6 +398,18 @@ export class FsStateBase {
   }
 
   protected guardRootBoundary(internalPath: string): void {
+    if (!this.mounts.empty) {
+      // With mounts, the boundary is the union of visible subtrees rather than
+      // a single contiguous rootDir.
+      if (!mountVisible(this.mounts, internalPath)) {
+        throw new FsError(
+          "EACCES",
+          "symlink target outside mount boundary",
+          this.toUserPath(internalPath),
+        );
+      }
+      return;
+    }
     if (this.rootDir === "/") return;
     if (
       internalPath !== this.rootDir &&

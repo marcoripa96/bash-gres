@@ -37,17 +37,22 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     const versionId = await this.getCurrentVersionId(tx);
     const baseParams: SqlParam[] = [this.workspaceId, versionId, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM (
          SELECT DISTINCT ON (e.path) e.node_type
          FROM fs_entries e
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-         WHERE e.workspace_id = $1 AND a.descendant_id = $2
-           AND ${exc.sql}
-         ORDER BY e.path, a.depth ASC
-       ) v WHERE node_type != $3`,
-      [...baseParams, ...exc.params],
+          WHERE e.workspace_id = $1 AND a.descendant_id = $2
+            AND ${exc.sql}
+            AND ${mnt.sql}
+          ORDER BY e.path, a.depth ASC
+        ) v WHERE node_type != $3`,
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     const actual = Number(r.rows[0]?.count ?? 0);
     this.cachedNodeCount = actual + 1;
@@ -329,6 +334,10 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       TOMBSTONE,
     ];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     await tx.query(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
@@ -346,21 +355,22 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
          WHERE e.workspace_id = $1
-           AND a.descendant_id = $2
-           AND e.path <@ $3::ltree
-           ${filter}
-           AND ${exc.sql}
-         ORDER BY e.path, a.depth ASC
-       ) visible
+            AND a.descendant_id = $2
+            AND e.path <@ $3::ltree
+            ${filter}
+            AND ${exc.sql}
+            AND ${mnt.sql}
+          ORDER BY e.path, a.depth ASC
+        ) visible
        WHERE visible.node_type != $4
        ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
          blob_hash = NULL,
          node_type = $4,
          symlink_target = NULL,
          mode = 0,
-         size_bytes = 0,
-         mtime = now()`,
-      [...baseParams, ...exc.params],
+          size_bytes = 0,
+          mtime = now()`,
+      [...baseParams, ...exc.params, ...mnt.params],
     );
   }
 
@@ -382,6 +392,10 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       TOMBSTONE,
     ];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     await tx.query(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
@@ -415,12 +429,13 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          FROM fs_entries e
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-         WHERE e.workspace_id = $1
-           AND a.descendant_id = $2
-           AND e.path <@ $3::ltree
-           AND ${exc.sql}
-          ORDER BY e.path, a.depth ASC
-        ) visible
+          WHERE e.workspace_id = $1
+            AND a.descendant_id = $2
+            AND e.path <@ $3::ltree
+            AND ${exc.sql}
+            AND ${mnt.sql}
+           ORDER BY e.path, a.depth ASC
+         ) visible
         WHERE visible.node_type != $5
           ${rootFilter}
         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
@@ -428,9 +443,9 @@ export class FsWriteOpsBase extends FsVisibilityBase {
           node_type = EXCLUDED.node_type,
          symlink_target = EXCLUDED.symlink_target,
          mode = EXCLUDED.mode,
-         size_bytes = EXCLUDED.size_bytes,
-         mtime = now()`,
-      [...baseParams, ...exc.params],
+          size_bytes = EXCLUDED.size_bytes,
+          mtime = now()`,
+      [...baseParams, ...exc.params, ...mnt.params],
     );
   }
 
@@ -447,6 +462,10 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       TOMBSTONE,
     ];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<{ total: number; files: number }>(
       `WITH visible AS (
          SELECT DISTINCT ON (e.path)
@@ -456,17 +475,18 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
          WHERE e.workspace_id = $1
-           AND a.descendant_id = $2
-           AND e.path <@ $3::ltree
-           AND ${exc.sql}
-         ORDER BY e.path, a.depth ASC
-       )
+            AND a.descendant_id = $2
+            AND e.path <@ $3::ltree
+            AND ${exc.sql}
+            AND ${mnt.sql}
+          ORDER BY e.path, a.depth ASC
+        )
        SELECT
          COUNT(*)::int AS total,
          COUNT(*) FILTER (WHERE node_type = 'file')::int AS files
-       FROM visible
-       WHERE node_type != $4`,
-      [...baseParams, ...exc.params],
+        FROM visible
+        WHERE node_type != $4`,
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     return {
       total: Number(r.rows[0]?.total ?? 0),

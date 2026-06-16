@@ -76,6 +76,8 @@ export const fetchPageChanges = op(async <TFs>(
   const params: SqlParam[] = [ctx.workspaceId, versionIds, scopeLtree];
   const exc = ctx.buildExcludeClause("e.path", params.length + 1);
   params.push(...exc.params);
+  const mnt = ctx.buildMountClause("e.path", params.length + 1);
+  params.push(...mnt.params);
   const oShape = pathsOnly ? NULL_O_SHAPE : FULL_O_SHAPE;
   const pShape = pathsOnly ? NULL_P_SHAPE : FULL_P_SHAPE;
 
@@ -100,6 +102,7 @@ export const fetchPageChanges = op(async <TFs>(
         AND e.version_id = ANY($2::bigint[])
         AND e.path <@ $3::ltree
         AND ${exc.sql}
+        AND ${mnt.sql}
     ),
     -- For each (owner_v, path) in v_writes whose owner has a parent,
     -- find the deepest-ancestor entry of the parent that covers that path.

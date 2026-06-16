@@ -37,6 +37,7 @@ import {
   type FilesystemOpsApi,
 } from "./filesystem/ops/index.js";
 import { isExcluded } from "./exclude.js";
+import { mountVisible } from "./mounts.js";
 import {
   encodeBasenameForLtree,
   globToRegex,
@@ -72,6 +73,8 @@ export class PgFileSystem extends FsWriteOpsBase {
       toUserPath: (internalPath) => self.toUserPath(internalPath),
       buildExcludeClause: (pathExpr, nextParamIdx) =>
         self.buildExcludeClause(pathExpr, nextParamIdx),
+      buildMountClause: (pathExpr, nextParamIdx) =>
+        self.buildMountClause(pathExpr, nextParamIdx),
       withWorkspace: (fn) => self.withWorkspace(fn),
       withReadOnlyWorkspace: (fn) => self.withReadOnlyWorkspace(fn),
       transaction: (fn) => self.transaction(fn),
@@ -101,6 +104,9 @@ export class PgFileSystem extends FsWriteOpsBase {
           rootDir: internalPath,
           versionRoot: internalPath,
           version,
+          // A versioned sub-fs re-roots at `internalPath`; the parent's mount
+          // paths live in a different path space, so don't carry them over.
+          mount: undefined,
         });
         scoped.cachedVersionRootId = versionRootId;
         if (self.txClient) {
@@ -194,7 +200,10 @@ export class PgFileSystem extends FsWriteOpsBase {
     userPath: string,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<string> {
-    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+    if (
+      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, internal))
+    ) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -297,7 +306,10 @@ export class PgFileSystem extends FsWriteOpsBase {
     options?: ReadFileRangeOptions,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<string> {
-    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+    if (
+      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, internal))
+    ) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -409,7 +421,10 @@ export class PgFileSystem extends FsWriteOpsBase {
     limit: number | undefined,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<ReadFileLinesResult> {
-    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+    if (
+      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, internal))
+    ) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -524,7 +539,10 @@ export class PgFileSystem extends FsWriteOpsBase {
     userPath: string,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<Uint8Array> {
-    if (!this.excludes.empty && isExcluded(this.excludes, internal)) {
+    if (
+      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, internal))
+    ) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -1227,7 +1245,7 @@ export class PgFileSystem extends FsWriteOpsBase {
         this.workspaceId,
         versionId,
         query,
-        { ...opts, path: internalScope, excludes: this.excludes },
+        { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
       );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
@@ -1250,7 +1268,7 @@ export class PgFileSystem extends FsWriteOpsBase {
         this.workspaceId,
         versionId,
         embedding,
-        { ...opts, path: internalScope, excludes: this.excludes },
+        { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
       );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
@@ -1279,7 +1297,7 @@ export class PgFileSystem extends FsWriteOpsBase {
         versionId,
         query,
         embedding,
-        { ...opts, path: internalScope, excludes: this.excludes },
+        { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
       );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
@@ -1331,6 +1349,10 @@ export class PgFileSystem extends FsWriteOpsBase {
       const exc = this.buildExcludeClause("e.path", params.length + 1);
       where.push(exc.sql);
       params.push(...exc.params);
+
+      const mnt = this.buildMountClause("e.path", params.length + 1);
+      where.push(mnt.sql);
+      params.push(...mnt.params);
 
       const sql = `
         WITH visible AS (

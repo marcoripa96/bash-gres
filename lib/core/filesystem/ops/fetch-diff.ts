@@ -57,6 +57,8 @@ export const fetchDiff = op(async (
     }
     const exc = ctx.buildExcludeClause("e.path", params.length + 1);
     params.push(...exc.params);
+    const mnt = ctx.buildMountClause("e.path", params.length + 1);
+    params.push(...mnt.params);
 
     const oContentCols = includeContent ? FULL_O_CONTENT_COLS : NULL_O_CONTENT_COLS;
     const tContentCols = includeContent ? FULL_T_CONTENT_COLS : NULL_T_CONTENT_COLS;
@@ -84,6 +86,7 @@ export const fetchDiff = op(async (
           AND a.descendant_id = $2
           AND e.path <@ $4::ltree
           AND ${exc.sql}
+          AND ${mnt.sql}
         ORDER BY e.path, a.depth ASC
       ),
       ours AS (SELECT * FROM ours_raw WHERE node_type != 'tombstone'),
@@ -103,6 +106,7 @@ export const fetchDiff = op(async (
           AND a.descendant_id = $3
           AND e.path <@ $4::ltree
           AND ${exc.sql}
+          AND ${mnt.sql}
         ORDER BY e.path, a.depth ASC
       ),
       theirs AS (SELECT * FROM theirs_raw WHERE node_type != 'tombstone')

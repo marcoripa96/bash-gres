@@ -5,6 +5,11 @@ import {
   excludeWhereSql,
   type CompiledExcludes,
 } from "./exclude.js";
+import {
+  emptyMounts,
+  mountWhereSql,
+  type CompiledMounts,
+} from "./mounts.js";
 
 const MAX_SEARCH_LIMIT = 100;
 const VISIBILITY_OVERSAMPLE = 4;
@@ -40,6 +45,7 @@ interface SearchOpts {
   path?: string;
   limit?: number;
   excludes?: CompiledExcludes;
+  mounts?: CompiledMounts;
 }
 
 /**
@@ -77,6 +83,11 @@ export async function fullTextSearch(
     "e.path",
     baseParams.length + 1,
   );
+  const mnt = mountWhereSql(
+    opts?.mounts ?? emptyMounts(),
+    "e.path",
+    baseParams.length + 1 + exc.params.length,
+  );
 
   const result = await client.query<{
     path: string;
@@ -103,6 +114,7 @@ export async function fullTextSearch(
          AND a.descendant_id = $3
          AND e.path <@ $4::ltree
          AND ${exc.sql}
+         AND ${mnt.sql}
        ORDER BY e.path, a.depth ASC
      )
      SELECT v.path, c.rank
@@ -111,7 +123,7 @@ export async function fullTextSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $6`,
-    [...baseParams, ...exc.params],
+    [...baseParams, ...exc.params, ...mnt.params],
   );
 
   return result.rows.map((r) => {
@@ -150,6 +162,11 @@ export async function semanticSearch(
     "e.path",
     baseParams.length + 1,
   );
+  const mnt = mountWhereSql(
+    opts?.mounts ?? emptyMounts(),
+    "e.path",
+    baseParams.length + 1 + exc.params.length,
+  );
 
   const result = await client.query<{
     path: string;
@@ -174,6 +191,7 @@ export async function semanticSearch(
          AND a.descendant_id = $3
          AND e.path <@ $4::ltree
          AND ${exc.sql}
+         AND ${mnt.sql}
        ORDER BY e.path, a.depth ASC
      )
      SELECT v.path, c.rank
@@ -182,7 +200,7 @@ export async function semanticSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $6`,
-    [...baseParams, ...exc.params],
+    [...baseParams, ...exc.params, ...mnt.params],
   );
 
   return result.rows.map((r) => {
@@ -237,6 +255,11 @@ export async function hybridSearch(
     "e.path",
     baseParams.length + 1,
   );
+  const mnt = mountWhereSql(
+    opts?.mounts ?? emptyMounts(),
+    "e.path",
+    baseParams.length + 1 + exc.params.length,
+  );
 
   const result = await client.query<{
     path: string;
@@ -261,19 +284,20 @@ export async function hybridSearch(
        FROM fs_entries e
        JOIN version_ancestors a
          ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-       WHERE e.workspace_id = $5
-         AND a.descendant_id = $6
-         AND e.path <@ $7::ltree
-         AND ${exc.sql}
-       ORDER BY e.path, a.depth ASC
-     )
+        WHERE e.workspace_id = $5
+          AND a.descendant_id = $6
+          AND e.path <@ $7::ltree
+          AND ${exc.sql}
+          AND ${mnt.sql}
+        ORDER BY e.path, a.depth ASC
+      )
      SELECT v.path, c.rank
      FROM visible v
      JOIN candidates c ON c.hash = v.blob_hash
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $9`,
-    [...baseParams, ...exc.params],
+    [...baseParams, ...exc.params, ...mnt.params],
   );
 
   return result.rows.map((r) => {

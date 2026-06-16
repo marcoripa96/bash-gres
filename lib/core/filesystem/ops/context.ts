@@ -33,6 +33,10 @@ export interface FilesystemOpsContext<TFs> {
     pathExpr: string,
     nextParamIdx: number,
   ): { sql: string; params: SqlParam[] };
+  buildMountClause(
+    pathExpr: string,
+    nextParamIdx: number,
+  ): { sql: string; params: SqlParam[] };
 
   withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
   withReadOnlyWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;

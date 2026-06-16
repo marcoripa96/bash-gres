@@ -278,17 +278,22 @@ export class FsVersionBase extends FsStateBase {
   ): Promise<number> {
     const baseParams: SqlParam[] = [this.workspaceId, versionId, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
+    const mnt = this.buildMountClause(
+      "e.path",
+      baseParams.length + 1 + exc.params.length,
+    );
     const r = await tx.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM (
          SELECT DISTINCT ON (e.path) e.node_type
          FROM fs_entries e
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-         WHERE e.workspace_id = $1 AND a.descendant_id = $2
-           AND ${exc.sql}
-         ORDER BY e.path, a.depth ASC
-       ) v WHERE node_type != $3`,
-      [...baseParams, ...exc.params],
+          WHERE e.workspace_id = $1 AND a.descendant_id = $2
+            AND ${exc.sql}
+            AND ${mnt.sql}
+          ORDER BY e.path, a.depth ASC
+        ) v WHERE node_type != $3`,
+      [...baseParams, ...exc.params, ...mnt.params],
     );
     return Number(r.rows[0]?.count ?? 0);
   }

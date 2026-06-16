@@ -99,6 +99,8 @@ export const fetchVersionChanges = op(async <TFs>(
   }
   const exc = ctx.buildExcludeClause("w.path", params.length + 1);
   params.push(...exc.params);
+  const mnt = ctx.buildMountClause("w.path", params.length + 1);
+  params.push(...mnt.params);
   let cursorClause = "";
   let limitClause = "";
   if (page) {
@@ -134,21 +136,23 @@ export const fetchVersionChanges = op(async <TFs>(
        ${oBlobJoin}
        WHERE w.workspace_id = $1
          AND w.version_id  = $2
-         AND w.path       <@ $3::ltree
-         AND w.node_type  != 'tombstone'
-         AND ${exc.sql}
-         ${cursorClause}
-       ORDER BY w.path
+          AND w.path       <@ $3::ltree
+          AND w.node_type  != 'tombstone'
+          AND ${exc.sql}
+          AND ${mnt.sql}
+          ${cursorClause}
+        ORDER BY w.path
        ${limitClause}`
     : `WITH v_writes AS (
          SELECT w.path, w.node_type, w.blob_hash, w.symlink_target,
                 w.mode, w.size_bytes, w.mtime
          FROM fs_entries w
          WHERE w.workspace_id = $1
-           AND w.version_id  = $2
-           AND w.path       <@ $3::ltree
-           AND ${exc.sql}
-       ),
+            AND w.version_id  = $2
+            AND w.path       <@ $3::ltree
+            AND ${exc.sql}
+            AND ${mnt.sql}
+        ),
        parent_visible_raw AS (
          SELECT DISTINCT ON (e.path)
            e.path, e.node_type, e.blob_hash, e.symlink_target,
@@ -226,4 +230,3 @@ export const fetchVersionChanges = op(async <TFs>(
     result.rows.length > 0 ? result.rows[result.rows.length - 1]!.path : null;
   return { entries, lastLtree };
 });
-

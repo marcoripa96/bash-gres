@@ -309,6 +309,13 @@ export interface WorkspaceUsageOptions {
   includeAcrossVersions?: boolean;
 }
 
+export interface MountSpec {
+  /** Absolute path (in this instance's path space) to expose. */
+  path: string;
+  /** When true, the subtree is read-only: writes under it are denied. */
+  readonly?: boolean;
+}
+
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
@@ -329,6 +336,18 @@ export interface PgFileSystemOptions {
    * trailing slashes are not implemented.
    */
   exclude?: string[];
+  /**
+   * Restrict this instance to a set of mounted subtrees of the workspace. Only
+   * paths inside a mount — plus the ancestor directories that lead down to them
+   * — are visible; everything else reads as `ENOENT` (not "permission denied":
+   * it simply isn't there). Writes are allowed only inside a non-readonly
+   * mount. This is the single-workspace, scoped-per-view primitive: one version
+   * graph, many restricted windows onto it.
+   *
+   * Omit (or pass `[]`) for an unrestricted view. A mount at `/` is treated as
+   * no restriction.
+   */
+  mount?: MountSpec[];
   /** Maximum size of a single file write, in bytes. Default: 10 MiB. */
   maxFileSize?: number;
   /** If set, `readFile` rejects files larger than this many bytes. Default: unlimited. */
