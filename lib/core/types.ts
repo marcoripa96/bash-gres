@@ -319,7 +319,14 @@ export interface MountSpec {
 export interface PgFileSystemOptions {
   db: SqlClient;
   workspaceId?: string;
+  /** Select an active version by label. Mutually exclusive with `versionId`. */
   version?: string;
+  /**
+   * Open one exact version by its immutable id, including retained history whose
+   * label has been deleted. Mutually exclusive with `version` and requires
+   * `permissions.write` to be false.
+   */
+  versionId?: number;
   /** Internal: version root path. Defaults to workspace root. */
   versionRoot?: string;
   /** Retain deleted version rows for git-like history, or physically discard them. Default: "discard". */

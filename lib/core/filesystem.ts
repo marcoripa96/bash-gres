@@ -104,6 +104,7 @@ export class PgFileSystem extends FsWriteOpsBase {
           rootDir: internalPath,
           versionRoot: internalPath,
           version,
+          versionId: undefined,
           // A versioned sub-fs re-roots at `internalPath`; the parent's mount
           // paths live in a different path space, so don't carry them over.
           mount: undefined,
@@ -125,6 +126,7 @@ export class PgFileSystem extends FsWriteOpsBase {
           // See note on `rawDb` in `FsStateBase`.
           db: self.rawDb as SqlClient,
           version: newVersion,
+          versionId: undefined,
         });
         if (self.txClient) {
           child.txClient = self.txClient;

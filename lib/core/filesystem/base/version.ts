@@ -143,6 +143,35 @@ export class FsVersionBase extends FsStateBase {
 
   protected async getCurrentVersionId(tx: SqlClient): Promise<number> {
     if (this.cachedVersionId !== null) return this.cachedVersionId;
+    if (this.requestedVersionId !== null) {
+      const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
+      const requested = await tx.query<{
+        id: number;
+        label: string;
+        version_root_id: number;
+      }>(
+        `SELECT v.id, v.label, v.version_root_id
+           FROM fs_versions v
+           JOIN fs_version_roots r
+             ON r.workspace_id = v.workspace_id
+            AND r.id = v.version_root_id
+          WHERE v.workspace_id = $1
+            AND v.id = $2
+            AND r.path = $3::ltree
+          LIMIT 1`,
+        [this.workspaceId, this.requestedVersionId, rootLtree],
+      );
+      const row = requested.rows[0];
+      if (!row) {
+        throw new Error(
+          `Version id '${this.requestedVersionId}' does not exist in version root '${this.versionRootPath}' of workspace '${this.workspaceId}'.`,
+        );
+      }
+      this.cachedVersionId = Number(row.id);
+      this.cachedVersionRootId = Number(row.version_root_id);
+      this.versionLabel = row.label;
+      return this.cachedVersionId;
+    }
     const versionRootId = await this.getVersionRootId(tx);
     const r = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
@@ -162,6 +191,9 @@ export class FsVersionBase extends FsStateBase {
 
   protected async ensureVersion(tx: SqlClient): Promise<number> {
     if (this.cachedVersionId !== null) return this.cachedVersionId;
+    if (this.requestedVersionId !== null) {
+      return this.getCurrentVersionId(tx);
+    }
     const versionRootId = await this.getVersionRootId(tx);
     const existing = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions

@@ -63,6 +63,7 @@ export class FsStateBase {
   protected excludes: CompiledExcludes;
   protected mounts: CompiledMounts;
   protected readonly baseOptions: PgFileSystemOptions;
+  protected requestedVersionId: number | null = null;
   protected cachedVersionId: number | null = null;
   protected cachedVersionRootId: number | null = null;
   protected blobsHasEmbeddingCache: boolean | null = null;
@@ -105,6 +106,18 @@ export class FsStateBase {
   private cachedReadOnlyClient: SqlClient | null = null;
 
   constructor(options: PgFileSystemOptions) {
+    if (options.version !== undefined && options.versionId !== undefined) {
+      throw new Error("version and versionId are mutually exclusive");
+    }
+    if (
+      options.versionId !== undefined &&
+      (!Number.isSafeInteger(options.versionId) || options.versionId <= 0)
+    ) {
+      throw new Error("versionId must be a positive safe integer");
+    }
+    if (options.versionId !== undefined && options.permissions?.write !== false) {
+      throw new Error("versionId requires permissions.write to be false");
+    }
     const perms = {
       read: options.permissions?.read ?? true,
       write: options.permissions?.write ?? true,
@@ -114,6 +127,7 @@ export class FsStateBase {
     this.client = perms.write ? options.db : readonlySqlClient(options.db);
     this.workspaceId = options.workspaceId ?? randomUUID();
     this.versionLabel = options.version ?? DEFAULT_VERSION;
+    this.requestedVersionId = options.versionId ?? null;
     if (this.versionLabel.length === 0) {
       throw new Error("version must be a non-empty string");
     }
@@ -310,7 +324,9 @@ export class FsStateBase {
       db: this.rawDb as SqlClient,
       // Use the live label, not the construction-time one, so a facade created
       // after a successful renameVersion() still points at the right version.
-      version: this.versionLabel,
+      version:
+        this.requestedVersionId === null ? this.versionLabel : undefined,
+      versionId: this.requestedVersionId ?? undefined,
     });
     facade.txClient = sqlTx;
     facade.cachedVersionId = this.cachedVersionId;

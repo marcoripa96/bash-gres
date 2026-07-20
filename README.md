@@ -202,6 +202,29 @@ Versioning primitives include:
 
 The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. A typical deploy flow is `fork()` a draft, edit it, optionally `merge()` or `revert()` changes, then `promoteTo("live")`. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the full versioning guide.
 
+### Opening an exact historical version
+
+Labels such as `main` are movable references. For a stable snapshot, take the
+numeric `versionId` returned by `listHistory()` and open it directly. Exact
+versions are read-only and remain available after their labels are deleted when
+history retention is enabled.
+
+```ts
+const [{ versionId }] = (await fs.listHistory({ limit: 1 })).entries
+
+const snapshot = new PgFileSystem({
+  db: sql,
+  workspaceId: "app",
+  versionId,
+  permissions: { read: true, write: false },
+})
+
+await snapshot.readFile("/config.json")
+```
+
+`version` and `versionId` are mutually exclusive. An ID is also checked against
+the requested workspace and version root before any content is read.
+
 ### Browsing history
 
 `listHistory()` returns ancestor versions paginated by depth from the current version backwards. `includeChanges` controls how much per-entry detail comes back: `false` (default, just metadata), `"paths"` (cheap path + change-kind summary), or `true` (full `before`/`after` shapes). All three modes share a single batched query, so paths-mode and full-changes mode are within ~5% of each other on large pages.
