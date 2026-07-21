@@ -198,6 +198,7 @@ Versioning primitives include:
 - `detach()` to materialize a version into a standalone snapshot independent of ancestors.
 - `renameVersion(label, { swap? })` and `promoteTo(label, { dropPrevious? })` for deploy labels.
 - `listHistory({ limit?, cursor?, includeChanges?, includeRoot?, path? })` to walk ancestor history with keyset pagination, plus `versionDiff(versionId, { path? })` and `versionDiffStream(versionId, { path?, batchSize? })` to fetch the diff for a single history entry.
+- `diffVersions(from, to, { path?, includeContent? })` to compare any two versions of the root by numeric `versionId` — both sides bypass the label resolver, so deleted-but-retained versions compare fine.
 - `sweepHistory()` to physically flatten retained history into self-contained snapshots and GC orphan blobs.
 
 The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. A typical deploy flow is `fork()` a draft, edit it, optionally `merge()` or `revert()` changes, then `promoteTo("live")`. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the full versioning guide.
@@ -254,6 +255,13 @@ const detail = await fs.versionDiff(page.entries[0]!.versionId)
 for await (const change of fs.versionDiffStream(page.entries[0]!.versionId, { batchSize: 100 })) {
   // ...
 }
+
+// 4. Compare any two versions directly (not just parent/child).
+const between = await fs.diffVersions(
+  page.entries[3]!.versionId,
+  page.entries[0]!.versionId,
+  { includeContent: true },
+)
 ```
 
 `historyRetention: "retain"` keeps deleted version rows visible in history (with `deletedAt !== null`); the default `"discard"` physically removes them. Run `sweepHistory()` to compact a retain-mode workspace back into self-contained snapshots and GC blobs no live entry references.

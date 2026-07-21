@@ -9,6 +9,7 @@ import { detach } from "./detach.js";
 import { diff } from "./diff.js";
 import { diffCount } from "./diff-count.js";
 import { diffStream } from "./diff-stream.js";
+import { diffVersions } from "./diff-versions.js";
 import { fork } from "./fork.js";
 import { getLastModified } from "./get-last-modified.js";
 import { getUsage } from "./get-usage.js";
@@ -37,6 +38,7 @@ export interface FilesystemOpsApi<TFs> {
   diff: DropContext<typeof diff<TFs>>;
   diffCount: DropContext<typeof diffCount<TFs>>;
   diffStream: DropContext<typeof diffStream<TFs>>;
+  diffVersions: DropContext<typeof diffVersions<TFs>>;
   fork: DropContext<typeof fork<TFs>>;
   detach: DropContext<typeof detach<TFs>>;
   listHistory: DropContext<typeof listHistory<TFs>>;
@@ -95,6 +97,7 @@ export function installFilesystemOps<
   installOp(prototype, "diff", diff<TFs>);
   installOp(prototype, "diffCount", diffCount<TFs>);
   installOp(prototype, "diffStream", diffStream<TFs>);
+  installOp(prototype, "diffVersions", diffVersions<TFs>);
   installOp(prototype, "fork", fork<TFs>);
   installOp(prototype, "detach", detach<TFs>);
   installOp(prototype, "listHistory", listHistory<TFs>);
