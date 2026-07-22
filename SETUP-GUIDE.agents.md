@@ -354,4 +354,4 @@ For per-entity version graphs inside one workspace, use versioned directories:
   mounted snapshots for chat/voice agents. See `packages/database/src/schema/fs.ts`,
   `packages/database/drizzle/0002_bash_gres_rls.sql`,
   `packages/ai/src/knowledge-snapshot.ts`, `packages/ai/src/tools/bash.ts`.
-- **Upstream docs** — `README.md` in this repo and [bashgres.com/docs](https://bashgres.com/docs).
+- **Upstream docs** — the [bash-gres README](https://github.com/marcoripa96/bash-gres) and [bashgres.com/docs](https://bashgres.com/docs).

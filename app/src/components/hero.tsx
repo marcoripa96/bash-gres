@@ -5,9 +5,12 @@ import { AsciiHeader } from "./ascii-header";
 import { Magnetic } from "./magnetic";
 import { Marquee } from "./marquee";
 import { getPackageVersion } from "@/lib/version";
+import { getSetupGuide } from "@/lib/setup-guide";
+import { SetupWithAgentButton } from "./setup-with-agent-button";
 
 export function Hero() {
   const version = getPackageVersion();
+  const guide = getSetupGuide();
   return (
     <section className="pt-12 pb-0 lg:pt-20">
       <div className="max-w-[768px] mx-auto px-6 lg:px-8">
@@ -48,6 +51,9 @@ export function Hero() {
               </code>
               <CopyButton text="npm install bash-gres" />
             </div>
+          </Magnetic>
+          <Magnetic strength={0.4}>
+            <SetupWithAgentButton guide={guide} />
           </Magnetic>
         </div>
         <div className="mt-8">
