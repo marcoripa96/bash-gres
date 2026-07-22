@@ -63,7 +63,7 @@ bash-gres/node-postgres   pg adapter (setup, PgFileSystem, createNodePgClient)
 
 ## Step 2 — Postgres requirements
 
-- **PostgreSQL 15+** (both reference projects run pg 18).
+- **PostgreSQL 15+**.
 - **`ltree` extension** — always required. Available in stock images:
   `CREATE EXTENSION IF NOT EXISTS ltree;`
 - **`pg_textsearch`** — only if BM25 full-text search was requested. It is NOT in
@@ -72,8 +72,7 @@ bash-gres/node-postgres   pg adapter (setup, PgFileSystem, createNodePgClient)
 - **`pgvector`** — only if semantic/hybrid search was requested. Use the
   `pgvector/pgvector` image or install the extension.
 
-Custom image pattern (from datatalk `docker/db/pg18-pg_search/Dockerfile`) when
-both search features are on:
+Custom image pattern when both search features are on:
 
 ```dockerfile
 FROM pgvector/pgvector:pg18
@@ -82,7 +81,7 @@ CMD ["postgres", "-c", "shared_preload_libraries=pg_textsearch"]
 ```
 
 If the user declined both search features, a stock `postgres` image is fine —
-only `ltree` is needed (this is reco-ai's configuration).
+only `ltree` is needed.
 
 Optionally add an initdb script for fresh dev containers
 (`docker/postgres/initdb.d/01-extensions.sql`):
@@ -96,7 +95,7 @@ The only required env var is the connection string, e.g.
 
 ---
 
-## Path A — Drizzle projects (datatalk & reco-ai pattern)
+## Path A — Drizzle projects
 
 **Rule: never call bash-gres's runtime `setup()` in a Drizzle project.** It would
 double-apply the same DDL out-of-band of drizzle-kit — a drift risk every time
@@ -133,8 +132,8 @@ Run `drizzle-kit generate` so the tables and indexes land in a normal migration.
 
 `createSchema()` cannot emit `CREATE EXTENSION` or RLS policies. Generate them
 once with `generateMigrationSQL()` and paste the output into a committed SQL
-migration (reco-ai: `drizzle/0002_bash_gres_rls.sql`; datatalk keeps a
-regeneration script, `packages/database/scripts/generate-fs-bootstrap.ts`):
+migration (keeping the generation script in the repo makes regeneration easy on
+upgrades):
 
 ```ts
 import { generateMigrationSQL } from "bash-gres/drizzle"
@@ -211,9 +210,8 @@ one-off admin migration and let `setup()` handle the rest.
 
 ## Step 3 — Centralize construction in a wrapper module
 
-Both reference projects converged on the same pattern: **do not scatter
-`new PgFileSystem(...)` across the codebase.** Create one module (datatalk:
-`packages/fs`; reco-ai: `openKnowledgeSnapshot()`) that owns:
+**Do not scatter `new PgFileSystem(...)` across the codebase.** Create one
+module that owns:
 
 - **workspaceId encoding** — one function, one source of truth for tenant
   isolation, e.g. `tenantWorkspaceId(id) => \`tenant:\${id}\``.
@@ -253,13 +251,13 @@ const result = await bash.exec('echo "hi" > /notes.txt && cat /notes.txt')
 // { exitCode: 0, stdout: "hi\n", stderr: "" }
 ```
 
-**`defenseInDepth: false` is deliberate and load-bearing** (both projects do
-this, with comments): the virtual FS has no network/python/shell-out surface, and
+**`defenseInDepth: false` is deliberate and load-bearing**: the virtual FS has
+no network/python/shell-out surface, and
 DiD's AsyncLocalStorage wrapping trips on unrelated concurrent Postgres activity
 in the same async context. Copy this setting; rely on just-bash's
 `maxOutputSize` for output truncation.
 
-Typical LLM tool surface (Vercel AI SDK `tool()` pattern from both projects):
+Typical LLM tool surface (Vercel AI SDK `tool()` pattern):
 
 - `bash` — `{ script }` → `createBash({ fs }).exec(script)` → `{ stdout, stderr, exitCode }`
 - `readFile` / `writeFile` / `editFile` — thin wrappers over `fs.*`; share a
@@ -286,7 +284,7 @@ const fs = new PgFileSystem({
 
 ## Step 5 — Versioning idiom (fork → edit → promote)
 
-The standard deploy flow used by both projects:
+The standard deploy flow:
 
 ```ts
 const draft = await liveFs.fork(`job-${jobId}`)   // O(1), copy-on-write
@@ -305,7 +303,7 @@ For per-entity version graphs inside one workspace, use versioned directories:
 ## Step 6 — Verify
 
 1. Migrations applied (Path A) or `setup()` ran without error (Path B).
-2. Smoke test (adapt datatalk's `packages/fs/src/scripts/smoke-test.ts`):
+2. Smoke test:
    ```ts
    const fs = new PgFileSystem({ db, workspaceId: "smoke-test" })
    await fs.init()
@@ -344,14 +342,7 @@ For per-entity version graphs inside one workspace, use versioned directories:
   snapshots to a numeric `versionId` from `listHistory()`, and use
   `historyRetention: "retain"` if displaced versions must stay addressable.
 
-## Reference implementations
+## Docs
 
-- **datatalk** — Drizzle over node-postgres; per-tenant workspaces
-  (`tenant:<id>`), versioned directories per database, fork/promote lifecycle.
-  See `packages/fs/`, `packages/database/src/schema.ts`,
-  `packages/database/scripts/generate-fs-bootstrap.ts`, `packages/ai/src/fs-tools/`.
-- **reco-ai** — Drizzle over postgres.js; single `"app"` workspace, read-only
-  mounted snapshots for chat/voice agents. See `packages/database/src/schema/fs.ts`,
-  `packages/database/drizzle/0002_bash_gres_rls.sql`,
-  `packages/ai/src/knowledge-snapshot.ts`, `packages/ai/src/tools/bash.ts`.
-- **Upstream docs** — the [bash-gres README](https://github.com/marcoripa96/bash-gres) and [bashgres.com/docs](https://bashgres.com/docs).
+Full documentation: the [bash-gres README](https://github.com/marcoripa96/bash-gres)
+and [bashgres.com/docs](https://bashgres.com/docs).
