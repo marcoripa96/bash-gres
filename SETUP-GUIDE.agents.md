@@ -15,6 +15,12 @@ Follow the steps in order. Do not skip Step 0.
 Before writing any code or running any command, ask the user these questions and
 wait for their answers. Do not guess from the codebase alone; confirm.
 
+Use your environment's dedicated question tool to ask them — e.g.
+`AskUserQuestion` in Claude Code, or whatever structured user-prompt mechanism
+your harness provides — presenting the choices below as selectable options
+rather than free-form chat text. Only fall back to a plain chat message if no
+such tool is available.
+
 1. **"Are you using Drizzle ORM or native bash-gres (a raw driver + `setup()`)?"**
    - **Drizzle** → follow **Path A**. bash-gres tables are folded into the
      project's Drizzle migrations and the runtime `setup()` is *never* called.
