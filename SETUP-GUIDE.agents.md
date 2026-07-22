@@ -31,8 +31,7 @@ such tool is available.
    search (pgvector)?"** — these change the schema options *and* the Postgres
    image (see Step 2). Default if unsure: both off.
 3. **"What is the workspace model?"** — one workspace per tenant
-   (e.g. `tenant:<tenantId>`, the datatalk pattern) or a single shared workspace
-   (e.g. `"app"`, the reco-ai pattern).
+   (e.g. `tenant:<tenantId>`) or a single shared workspace (e.g. `"app"`).
 
 Record the answers; several later steps branch on them.
 
