@@ -4,6 +4,7 @@ import type {
   ChunkSearchResult,
   SqlParam,
 } from "./types.js";
+import { SqlError } from "./types.js";
 import { pathToLtree, ltreeToPath, fileName } from "./path-encoding.js";
 import {
   emptyExcludes,
@@ -18,6 +19,36 @@ import {
 
 const MAX_SEARCH_LIMIT = 100;
 const VISIBILITY_OVERSAMPLE = 4;
+
+// BM25 scoring must name the index that supplies the corpus statistics:
+// the single-argument to_bm25query() form only resolves the index when the
+// query string is an inline literal the planner can const-fold — with a
+// bound parameter (how every adapter sends queries) it errors "operator
+// requires index" regardless of plan (pg_textsearch v1.0.0). The names are
+// fixed by our own DDL in setup.ts.
+const BLOB_BM25_INDEX = "idx_fs_blobs_content_bm25";
+const CHUNK_BM25_INDEX = "idx_fs_blob_chunks_content_bm25";
+
+/**
+ * Turn pg_textsearch's "index ... does not exist" (42704) for our bm25
+ * indexes into the setup story: the database was set up with
+ * `enableFullTextSearch: false` (or by a bash-gres too old to have the
+ * chunk index).
+ */
+function rethrowMissingBm25Index(e: unknown): never {
+  if (
+    e instanceof SqlError &&
+    e.code === "42704" &&
+    (e.message.includes(BLOB_BM25_INDEX) ||
+      e.message.includes(CHUNK_BM25_INDEX))
+  ) {
+    throw new Error(
+      "BM25 search requires the full-text-search setup — re-run setup() " +
+        "(idempotent) with enableFullTextSearch: true to create the bm25 indexes",
+    );
+  }
+  throw e;
+}
 
 function clampLimit(limit: number | undefined): number {
   const val = limit ?? 20;
@@ -94,17 +125,24 @@ export async function fullTextSearch(
     baseParams.length + 1 + exc.params.length,
   );
 
-  const result = await client.query<{
-    path: string;
-    rank: number;
-  }>(
-    `WITH candidates AS (
-       SELECT b.hash, -(b.content <@> to_bm25query($1)) AS rank
+  let result;
+  try {
+    result = await client.query<{
+      path: string;
+      rank: number;
+    }>(
+      `WITH scored AS (
+       SELECT b.hash,
+              -(b.content <@> to_bm25query($1, '${BLOB_BM25_INDEX}')) AS rank
        FROM fs_blobs b
        WHERE b.workspace_id = $2
          AND b.content IS NOT NULL
          AND b.binary_data IS NULL
-       ORDER BY b.content <@> to_bm25query($1)
+     ),
+     candidates AS (
+       SELECT * FROM scored
+       WHERE rank > 0
+       ORDER BY rank DESC
        LIMIT $5
      ),
      visible AS (
@@ -128,8 +166,11 @@ export async function fullTextSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $6`,
-    [...baseParams, ...exc.params, ...mnt.params],
-  );
+      [...baseParams, ...exc.params, ...mnt.params],
+    );
+  } catch (e) {
+    rethrowMissingBm25Index(e);
+  }
 
   return result.rows.map((r) => {
     const userPath = ltreeToPath(r.path);
@@ -146,13 +187,8 @@ export async function fullTextSearch(
  * `fullTextSearch`, but candidates are `fs_blob_chunks` rows, so lexical
  * hits rank sections instead of whole files. A blob visible at several
  * paths yields one hit per (path, chunk); a blob with several matching
- * chunks yields one hit per chunk.
- *
- * Scoring uses the two-argument `to_bm25query(query, index_name)` form:
- * the single-argument form errors whenever the planner does not pick a
- * bm25 index scan (e.g. seq scan over a small table), while naming the
- * index scores per-row on any plan. The index name is fixed by our own
- * DDL. Non-matching rows score 0 and are filtered out.
+ * chunks yields one hit per chunk. Non-matching rows score 0 and are
+ * filtered out.
  */
 export async function chunkTextSearch(
   client: SqlClient,
@@ -184,18 +220,20 @@ export async function chunkTextSearch(
     baseParams.length + 1 + exc.params.length,
   );
 
-  const result = await client.query<{
-    path: string;
-    start_line: number;
-    end_line: number;
-    heading_path: string | null;
-    content: string;
-    rank: number;
-  }>(
-    `WITH scored AS (
+  let result;
+  try {
+    result = await client.query<{
+      path: string;
+      start_line: number;
+      end_line: number;
+      heading_path: string | null;
+      content: string;
+      rank: number;
+    }>(
+      `WITH scored AS (
        SELECT c.blob_hash, c.start_line, c.end_line, c.heading_path,
               c.content,
-              -(c.content <@> to_bm25query($1, 'idx_fs_blob_chunks_content_bm25')) AS rank
+              -(c.content <@> to_bm25query($1, '${CHUNK_BM25_INDEX}')) AS rank
        FROM fs_blob_chunks c
        WHERE c.workspace_id = $2
      ),
@@ -226,8 +264,11 @@ export async function chunkTextSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC, v.path, c.start_line
      LIMIT $6`,
-    [...baseParams, ...exc.params, ...mnt.params],
-  );
+      [...baseParams, ...exc.params, ...mnt.params],
+    );
+  } catch (e) {
+    rethrowMissingBm25Index(e);
+  }
 
   return result.rows.map((r) => ({
     path: ltreeToPath(r.path),
@@ -364,13 +405,15 @@ export async function hybridSearch(
     baseParams.length + 1 + exc.params.length,
   );
 
-  const result = await client.query<{
-    path: string;
-    rank: number;
-  }>(
-    `WITH candidates AS (
+  let result;
+  try {
+    result = await client.query<{
+      path: string;
+      rank: number;
+    }>(
+      `WITH candidates AS (
        SELECT b.hash,
-              ($1::float * (-(b.content <@> to_bm25query($2))) +
+              ($1::float * (-(b.content <@> to_bm25query($2, '${BLOB_BM25_INDEX}'))) +
                $3::float * (1 - (b.embedding <=> $4::vector))) AS rank
        FROM fs_blobs b
        WHERE b.workspace_id = $5
@@ -400,8 +443,11 @@ export async function hybridSearch(
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC
      LIMIT $9`,
-    [...baseParams, ...exc.params, ...mnt.params],
-  );
+      [...baseParams, ...exc.params, ...mnt.params],
+    );
+  } catch (e) {
+    rethrowMissingBm25Index(e);
+  }
 
   return result.rows.map((r) => {
     const userPath = ltreeToPath(r.path);
