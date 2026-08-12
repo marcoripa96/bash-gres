@@ -40,7 +40,14 @@ export {
   type PromoteResult,
   type WorkspaceUsage,
   type WorkspaceUsageOptions,
+  type BlobChunk,
+  type BackfillChunksResult,
 } from "./types.js";
+export {
+  chunkMarkdown,
+  type MarkdownChunk,
+  type ChunkingOptions,
+} from "./chunking.js";
 export {
   pathToLtree,
   ltreeToPath,

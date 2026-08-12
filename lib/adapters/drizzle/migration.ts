@@ -10,6 +10,7 @@ const RLS_TABLES = [
   "version_ancestors",
   "fs_entries",
   "fs_blobs",
+  "fs_blob_chunks",
 ];
 
 /**
@@ -45,6 +46,18 @@ export function generateMigrationSQL(options: MigrationOptions = {}): string {
   if (enableVectorSearch) {
     parts.push("CREATE EXTENSION IF NOT EXISTS vector;");
   }
+
+  // createSchema() declares no foreign keys, so the chunk-cleanup cascade
+  // (fs_blob_chunks rows die with their blob) rides the custom migration.
+  parts.push(`
+DO $$ BEGIN
+  ALTER TABLE fs_blob_chunks
+    ADD CONSTRAINT fs_blob_chunks_blob_fkey
+    FOREIGN KEY (workspace_id, blob_hash)
+    REFERENCES fs_blobs(workspace_id, hash) ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_object THEN
+  NULL;
+END $$;`);
 
   if (enableRLS) {
     for (const table of RLS_TABLES) {

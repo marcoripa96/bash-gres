@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import type { ChunkingOptions } from "../../chunking.js";
 import type { PgFileSystemOptions, SqlClient, SqlParam } from "../../types.js";
 import { FsError, SqlError } from "../../types.js";
 import { readonlySqlClient } from "../../readonly.js";
@@ -57,6 +58,8 @@ export class FsStateBase {
   protected statementTimeoutMs: number;
   protected embed?: (text: string) => Promise<number[]>;
   protected embeddingDimensions?: number;
+  /** Chunk-level index options; null when the `chunking` option is off. */
+  protected chunking: ChunkingOptions | null;
   protected historyRetention: "retain" | "discard";
   protected rootDir: string;
   protected versionRootPath: string;
@@ -143,6 +146,11 @@ export class FsStateBase {
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
     this.embeddingDimensions = options.embeddingDimensions;
+    this.chunking = options.chunking
+      ? options.chunking === true
+        ? {}
+        : options.chunking
+      : null;
     this.historyRetention = options.historyRetention ?? "discard";
     this.rootDir = normalizePath(options.rootDir ?? "/");
     this.versionRootPath = normalizePath(options.versionRoot ?? "/");

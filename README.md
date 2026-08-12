@@ -289,6 +289,39 @@ const hybrid = await fs.hybridSearch("transformer architecture", {
 })
 ```
 
+### Chunk-level index
+
+Text files can additionally be indexed as markdown-aware **section chunks**
+(table `fs_blob_chunks`): heading-bounded slices with 1-indexed line ranges,
+a heading breadcrumb ("Title > Section"), and a token budget that fits
+embedding models. Chunks are keyed by the blob hash, so unchanged content is
+never re-chunked — across rewrites, copies, versions, and branches.
+
+**Enable** it per instance; it is off by default and existing databases are
+unaffected until you do:
+
+```ts
+const fs = new PgFileSystem({ db, workspaceId, chunking: true })
+// or tune: chunking: { maxTokens: 480, estimateTokens: (s) => ... }
+
+await fs.writeFile("/docs/page.md", markdown) // chunks stored with the write
+const chunks = await fs.readFileChunks("/docs/page.md")
+// [{ chunkIndex, startLine, endLine, headingPath, content }, ...]
+```
+
+**Migrate** an existing deployment in two idempotent steps:
+
+1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).
+   Drizzle users: re-run `drizzle-kit generate` (the table is in
+   `createSchema()`) plus `generateMigrationSQL()` for RLS and the blob FK.
+2. Index pre-existing content once per workspace:
+   `await fs.backfillChunks()` — content-addressed, safe to re-run.
+
+Enabling `chunking` against a database that skipped step 1 fails fast with an
+error explaining exactly this; older bash-gres versions keep working against
+a migrated database (they simply never touch the table, and chunk rows are
+cleaned up by the FK cascade when blobs are deleted).
+
 ## Requirements
 
 - PostgreSQL 15+ with the `ltree` extension

@@ -55,7 +55,7 @@ await bash.exec("echo hello > /file.txt");
 
 ## Database
 
-- **Tables**: `fs_version_roots`, `fs_versions`, `version_ancestors`, `fs_entries`, `fs_blobs`
+- **Tables**: `fs_version_roots`, `fs_versions`, `version_ancestors`, `fs_entries`, `fs_blobs`, `fs_blob_chunks` (opt-in chunk-level index; FK-cascades with its blob)
 - **Extensions**: `ltree`, `pg_textsearch` (v1.0.0), optionally `pgvector`
 - **Indexes**: GiST on ltree paths, version-root label uniqueness, ancestor closure depth/reverse indexes, blob hash, optional BM25/HNSW
 - **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set via `SET LOCAL` in every transaction
@@ -103,3 +103,17 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
   "./postgres":      "dist/adapters/postgres/index.js"
 }
 ```
+
+<!-- kanby:begin -->
+## Task board (kanby)
+
+This project tracks its work on a kanban board operated with the `kanby`
+CLI (this directory is linked to the project, so commands work from anywhere
+inside it). Before ANY operational task — work that changes code, docs,
+config, or behavior; pure exploration and Q&A are exempt — read the workflow
+skill at `.claude/skills/kanby/SKILL.md` and go through the board.
+
+The skill carries the lifecycle cheat-sheet; consult `kanby agents` only
+when you need commands beyond it. Use only documented commands and flags —
+never guess (unknown commands and flags are errors).
+<!-- kanby:end -->

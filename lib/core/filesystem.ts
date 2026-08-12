@@ -12,8 +12,11 @@ import type {
   ReadFileLinesResult,
   SearchResult,
   PgFileSystemOptions,
+  BlobChunk,
+  BackfillChunksResult,
 } from "./types.js";
 import { FsError } from "./types.js";
+import { chunkMarkdown } from "./chunking.js";
 import {
   pathToLtree,
   ltreeToPath,
@@ -526,6 +529,135 @@ export class PgFileSystem extends FsWriteOpsBase {
       );
     }
     return { content: row.chunk ?? "", total: row.total ?? 0 };
+  }
+
+  /**
+   * The stored chunk-level index rows for a file, in document order (empty
+   * when the file's blob has no chunks — e.g. chunking was off when it was
+   * written and `backfillChunks()` hasn't run). Line ranges address the
+   * file's current content 1-indexed, so a chunk hydrates via
+   * `readFileLines(path, { offset: startLine, limit: endLine - startLine + 1 })`.
+   */
+  async readFileChunks(path: string): Promise<BlobChunk[]> {
+    const internal = this.guardRead(path);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      return this.internalReadFileChunks(tx, internal, path);
+    });
+  }
+
+  private async internalReadFileChunks(
+    tx: SqlClient,
+    internal: string,
+    userPath: string,
+    maxDepth: number = this.maxSymlinkDepth,
+  ): Promise<BlobChunk[]> {
+    if (
+      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, internal))
+    ) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    const entry = await this.resolveEntry(tx, internal);
+    if (!entry) {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (entry.node_type === "symlink" && entry.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError(
+          "ELOOP",
+          "too many levels of symbolic links",
+          userPath,
+        );
+      }
+      return this.internalReadFileChunks(
+        tx,
+        this.resolveLinkTargetPath(internal, entry.symlink_target),
+        userPath,
+        maxDepth - 1,
+      );
+    }
+    if (entry.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+    if (!entry.blob_hash) return [];
+    let r;
+    try {
+      r = await tx.query<{
+        chunk_index: number;
+        start_line: number;
+        end_line: number;
+        heading_path: string | null;
+        content: string;
+      }>(
+        `SELECT chunk_index, start_line, end_line, heading_path, content
+         FROM fs_blob_chunks
+         WHERE workspace_id = $1 AND blob_hash = $2
+         ORDER BY chunk_index`,
+        [this.workspaceId, entry.blob_hash],
+      );
+    } catch (e) {
+      this.rethrowMissingChunkTable(e);
+    }
+    return r.rows.map((row) => ({
+      chunkIndex: Number(row.chunk_index),
+      startLine: Number(row.start_line),
+      endLine: Number(row.end_line),
+      headingPath: row.heading_path,
+      content: row.content,
+    }));
+  }
+
+  /**
+   * Chunk every text blob that predates the `chunking` option: blobs
+   * referenced by a file entry in any version of the workspace that have no
+   * chunk rows yet. Content-addressed, so it never re-chunks and is safe to
+   * re-run; runs in one transaction. Requires the `chunking` option, since
+   * the rows it writes must match what the write path would produce.
+   */
+  async backfillChunks(): Promise<BackfillChunksResult> {
+    if (!this.chunking) {
+      throw new Error(
+        "backfillChunks requires the `chunking` option to be enabled",
+      );
+    }
+    if (!this.permissions.write) {
+      throw new FsError("EPERM", "read-only file system", "/");
+    }
+    return this.withWorkspace(async (tx) => {
+      let r;
+      try {
+        r = await tx.query<{ hash: Uint8Array; content: string }>(
+          `SELECT b.hash, b.content
+           FROM fs_blobs b
+           WHERE b.workspace_id = $1
+             AND b.content IS NOT NULL AND b.content <> ''
+             AND b.binary_data IS NULL
+             AND EXISTS (
+               SELECT 1 FROM fs_entries e
+               WHERE e.workspace_id = $1 AND e.blob_hash = b.hash
+                 AND e.node_type = 'file'
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM fs_blob_chunks c
+               WHERE c.workspace_id = $1 AND c.blob_hash = b.hash
+             )`,
+          [this.workspaceId],
+        );
+      } catch (e) {
+        this.rethrowMissingChunkTable(e);
+      }
+      let chunks = 0;
+      for (const row of r.rows) {
+        const rows = chunkMarkdown(row.content, this.chunking ?? undefined);
+        await this.insertChunkRows(tx, row.hash, rows);
+        chunks += rows.length;
+      }
+      return { blobs: r.rows.length, chunks };
+    });
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
