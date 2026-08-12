@@ -150,6 +150,33 @@ CREATE TABLE fs_entries (
     mtime           timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, version_id, path)
+);
+
+-- Section chunks for search (created when chunking/search is enabled)
+CREATE TABLE fs_blob_chunks (
+    workspace_id  text NOT NULL,
+    blob_hash     bytea NOT NULL,
+    chunk_index   int NOT NULL,
+    start_line    int NOT NULL,
+    end_line      int NOT NULL,
+    heading_path  text,
+    content       text NOT NULL,
+    content_hash  bytea NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, blob_hash, chunk_index),
+    FOREIGN KEY (workspace_id, blob_hash)
+      REFERENCES fs_blobs(workspace_id, hash) ON DELETE CASCADE
+);
+
+-- Per-content embedding cache (created when enableVectorSearch is true).
+-- Deliberately no FK to fs_blob_chunks: the cache outlives its chunk rows,
+-- so re-crawled or reverted content still cache-hits.
+CREATE TABLE fs_chunk_embeddings (
+    workspace_id  text NOT NULL,
+    content_hash  bytea NOT NULL,
+    embedding     vector(N) NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, content_hash)
 );`}
         />
         <p className="text-sm text-muted-foreground leading-relaxed">
@@ -201,14 +228,14 @@ CREATE TABLE fs_entries (
                 <td className="py-2">Nearest-ancestor scans for copy-on-write visibility</td>
               </tr>
               <tr className="border-b border-border/30">
-                <td className="py-2 pr-4 font-mono">idx_fs_blobs_content_bm25</td>
+                <td className="py-2 pr-4 font-mono">idx_fs_blob_chunks_content_bm25</td>
                 <td className="py-2 pr-4">BM25</td>
-                <td className="py-2">Full-text search on content (optional)</td>
+                <td className="py-2">Full-text search on chunk content (optional)</td>
               </tr>
               <tr>
-                <td className="py-2 pr-4 font-mono">idx_fs_blobs_embedding</td>
+                <td className="py-2 pr-4 font-mono">idx_fs_chunk_embeddings_hnsw</td>
                 <td className="py-2 pr-4">HNSW</td>
-                <td className="py-2">Vector similarity search (optional)</td>
+                <td className="py-2">Vector similarity over the chunk embedding cache (optional)</td>
               </tr>
             </tbody>
           </table>

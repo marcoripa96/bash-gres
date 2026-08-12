@@ -2,6 +2,8 @@
 
 PostgreSQL-backed virtual filesystem for AI agents. `PgFileSystem` implements the `just-bash` `IFileSystem` interface, so it can be passed directly to `new Bash({ fs })`.
 
+Agent-facing guides for host projects: `SETUP-GUIDE.agents.md` (fresh install), `UPGRADE-GUIDE.agents.md` (2.x → 3.0 migration). The docs site lives in `app/` (Next.js, deployed to bashgres.com/docs) — keep its pages in sync when the public API changes.
+
 ## Architecture
 
 ```
@@ -89,7 +91,6 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
 - ESM-only, TypeScript strict mode
 - No `any`; use structural interfaces and type guards at adapter boundaries
 - `as` casts only at driver boundaries (e.g., `result as T[]` when bridging between type systems)
-- Peer deps: `drizzle-orm`, `postgres`, and `just-bash` are all optional
 - Peer deps: `drizzle-orm`, `postgres`, `pg`, and `just-bash` are all optional
 - Path encoding: special chars become `_xHEX_` (delimited to prevent greedy regex issues)
 - All filesystem operations run inside explicit transactions with `SET LOCAL app.workspace_id` and `SET LOCAL statement_timeout`

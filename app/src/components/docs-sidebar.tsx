@@ -33,6 +33,7 @@ const NAV = [
     items: [
       { href: "/docs/configuration", label: "Configuration" },
       { href: "/docs/errors", label: "Errors" },
+      { href: "/docs/migration", label: "Migrating to 3.0" },
     ],
   },
 ];

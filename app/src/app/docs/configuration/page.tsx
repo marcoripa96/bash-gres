@@ -40,8 +40,9 @@ export default function ConfigurationPage() {
     write: true,                       // allow write operations (default: true)
   },
 
-  // Vector search
-  embed: undefined,                    // embedding function (default: undefined)
+  // Search
+  chunking: true,                      // index text files as section chunks (default: off)
+  embed: undefined,                    // batch embedding function (default: undefined)
   embeddingDimensions: undefined,      // expected dimensions (default: undefined)
 })`}
         />
@@ -135,16 +136,22 @@ export default function ConfigurationPage() {
                 <td className="py-2">Enable or disable read/write operations</td>
               </tr>
               <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">chunking</td>
+                <td className="py-2 pr-4 font-mono">boolean | ChunkingOptions</td>
+                <td className="py-2 pr-4 font-mono">off</td>
+                <td className="py-2">Index text files as markdown-aware section chunks on write. See <a href="/docs/search" className="underline underline-offset-2 hover:text-foreground transition-colors">Search</a>.</td>
+              </tr>
+              <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">embed</td>
-                <td className="py-2 pr-4 font-mono">(text: string) =&gt; Promise&lt;number[]&gt;</td>
+                <td className="py-2 pr-4 font-mono">(texts: string[]) =&gt; Promise&lt;number[][]&gt;</td>
                 <td className="py-2 pr-4 font-mono">-</td>
-                <td className="py-2">Embedding function for semantic search</td>
+                <td className="py-2">Batch embedder — serves the <code className="font-mono">indexChunkEmbeddings()</code> pass and query embedding</td>
               </tr>
               <tr>
                 <td className="py-2 pr-4 font-mono">embeddingDimensions</td>
                 <td className="py-2 pr-4 font-mono">number</td>
                 <td className="py-2 pr-4 font-mono">-</td>
-                <td className="py-2">Expected vector dimensions (validated on write)</td>
+                <td className="py-2">Expected vector dimensions (validated when embedding)</td>
               </tr>
             </tbody>
           </table>
@@ -209,26 +216,38 @@ await fs.readFile("/etc/secrets")           // throws EACCES (outside rootDir)`}
           Vector Search
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          To enable semantic and hybrid search, provide an{" "}
-          <code className="font-mono text-foreground/80">embed</code> function.
-          Embeddings are automatically computed on{" "}
-          <code className="font-mono text-foreground/80">writeFile</code> and{" "}
-          <code className="font-mono text-foreground/80">appendFile</code> for
-          text content.
+          For semantic and hybrid search, provide the batch{" "}
+          <code className="font-mono text-foreground/80">embed</code> function
+          — one vector per input text, same order. The write path never
+          embeds; vectors are computed by an explicit{" "}
+          <code className="font-mono text-foreground/80">
+            indexChunkEmbeddings()
+          </code>{" "}
+          pass and queries are embedded as single-item batches. See{" "}
+          <a
+            href="/docs/search"
+            className="text-foreground/70 underline underline-offset-2 hover:text-foreground transition-colors"
+          >
+            Search
+          </a>
+          .
         </p>
         <CodeBlock
           code={`const fs = new PgFileSystem({
   db: sql,
   workspaceId: "workspace-1",
-  embed: async (text) => {
+  chunking: true,
+  embed: async (texts) => {
     const res = await openai.embeddings.create({
       model: "text-embedding-3-small",
-      input: text,
+      input: texts,
     })
-    return res.data[0].embedding
+    return res.data.map((d) => d.embedding)
   },
   embeddingDimensions: 1536,
-})`}
+})
+
+await fs.indexChunkEmbeddings() // fill the vector cache for the current version`}
         />
       </section>
     </div>

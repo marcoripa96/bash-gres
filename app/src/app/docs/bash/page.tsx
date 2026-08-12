@@ -50,6 +50,47 @@ const result = await bash.exec("cat /project/src/index.ts")
         />
       </section>
 
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          semgrep: Semantic Grep
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          The <code className="font-mono text-foreground/80">semgrep</code>{" "}
+          custom command puts{" "}
+          <a
+            href="/docs/search"
+            className="text-foreground/70 underline underline-offset-2 hover:text-foreground transition-colors"
+          >
+            chunk search
+          </a>{" "}
+          inside the session. It dispatches on the handle: hybrid search when
+          the filesystem has an{" "}
+          <code className="font-mono text-foreground/80">embed</code> option,
+          BM25-only otherwise. Output is grep-style — one hit per line, exit
+          1 when nothing matches — and the line ranges hydrate with the
+          session&apos;s own tools.
+        </p>
+        <CodeBlock
+          code={`import { createSemgrepCommand } from "bash-gres/just-bash"
+
+const bash = new Bash({ fs, customCommands: [createSemgrepCommand({ fs })] })
+
+await bash.exec('semgrep -k 3 "delivery options" /docs')
+// /docs/shipping.md:12-34  [0.0323]  Shipping > Costs — Shipping is free over…
+
+await bash.exec("sed -n 12,34p /docs/shipping.md") // hydrate the hit`}
+        />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Usage:{" "}
+          <code className="font-mono text-foreground/80">
+            semgrep [-k N] &quot;query&quot; [path]
+          </code>{" "}
+          — <code className="font-mono text-foreground/80">-k</code> caps the
+          hits (default 5), the optional path scopes the search and resolves
+          against the session&apos;s working directory.
+        </p>
+      </section>
+
       <p className="text-sm text-muted-foreground leading-relaxed">
         For the full list of commands, pipes, redirects, variables, and more,
         see the{" "}
