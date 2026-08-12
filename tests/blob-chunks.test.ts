@@ -194,6 +194,51 @@ describe.each(TEST_ADAPTERS)("fs_blob_chunks [%s]", (_name, factory) => {
       expect(chunks[2]!.headingPath).toBe("Widget Co > Shipping");
     });
 
+    it("backfills only blobs visible at the handle's version", async () => {
+      const plain = new PgFileSystem({ db: client, workspaceId: WS });
+      await plain.init();
+      await plain.writeFile("/a.md", PAGE);
+      await plain.writeFile("/b.md", "# B\n\nold body");
+      const branch = await plain.fork("crawl");
+      await branch.writeFile("/b.md", "# B\n\nnew body");
+
+      // On the branch: /a.md's blob plus the branch's /b.md — never the
+      // shadowed main-only blob.
+      const crawlChunked = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        chunking: true,
+        version: "crawl",
+      });
+      expect((await crawlChunked.backfillChunks()).blobs).toBe(2);
+
+      // The main handle picks up exactly the blob the branch pass skipped
+      // (/a.md's shared blob is already chunked — content-addressed).
+      const mainChunked = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        chunking: true,
+      });
+      expect((await mainChunked.backfillChunks()).blobs).toBe(1);
+    });
+
+    it("skips excluded paths", async () => {
+      const plain = new PgFileSystem({ db: client, workspaceId: WS });
+      await plain.init();
+      await plain.writeFile("/keep.md", "# K\n\nkeep this");
+      await plain.writeFile("/secret.md", "# S\n\nsecret notes");
+
+      const excluded = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        chunking: true,
+        exclude: ["secret.md"],
+      });
+      expect((await excluded.backfillChunks()).blobs).toBe(1);
+      const chunks = await excluded.readFileChunks("/keep.md");
+      expect(chunks.length).toBeGreaterThan(0);
+    });
+
     it("requires the chunking option and write permission", async () => {
       const plain = new PgFileSystem({ db: client, workspaceId: WS });
       await expect(plain.backfillChunks()).rejects.toThrow(/chunking/);

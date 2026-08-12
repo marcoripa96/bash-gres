@@ -89,6 +89,49 @@ export interface ChunkSearchOpts {
 }
 
 /**
+ * The version-visibility projection every version-scoped chunk operation
+ * shares — searches and the maintenance passes alike: the nearest entry per
+ * path along version $2's ancestor chain (so shadowed blobs and tombstoned
+ * paths never count), scoped to the $3 subtree and filtered by the
+ * instance's excludes/mounts. Yields (path, blob_hash, node_type); callers
+ * must still keep only `node_type = 'file'` rows. References $1
+ * (workspace), $2 (version) and $3 (scope ltree); the exclude/mount params
+ * returned here are numbered from `paramStart`.
+ */
+export function visibleEntriesSql(
+  excludes: CompiledExcludes | undefined,
+  mounts: CompiledMounts | undefined,
+  paramStart: number,
+): { sql: string; params: SqlParam[] } {
+  const exc = excludeWhereSql(
+    excludes ?? emptyExcludes(),
+    "e.path",
+    paramStart,
+  );
+  const mnt = mountWhereSql(
+    mounts ?? emptyMounts(),
+    "e.path",
+    paramStart + exc.params.length,
+  );
+  return {
+    sql: `SELECT DISTINCT ON (e.path)
+         e.path::text AS path,
+         e.blob_hash,
+         e.node_type
+       FROM fs_entries e
+       JOIN version_ancestors a
+         ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+       WHERE e.workspace_id = $1
+         AND a.descendant_id = $2
+         AND e.path <@ $3::ltree
+         AND ${exc.sql}
+         AND ${mnt.sql}
+       ORDER BY e.path, a.depth ASC`,
+    params: [...exc.params, ...mnt.params],
+  };
+}
+
+/**
  * Every search shares one two-stage shape: a signal-specific `candidates`
  * CTE ranks chunks workspace-wide to the oversample depth, then the shared
  * tail projects them onto paths visible at version V (fs_entries +
@@ -125,15 +168,10 @@ async function runChunkSearch(
     perFileCap,
     ...signalParams,
   ];
-  const exc = excludeWhereSql(
-    opts?.excludes ?? emptyExcludes(),
-    "e.path",
+  const vis = visibleEntriesSql(
+    opts?.excludes,
+    opts?.mounts,
     baseParams.length + 1,
-  );
-  const mnt = mountWhereSql(
-    opts?.mounts ?? emptyMounts(),
-    "e.path",
-    baseParams.length + 1 + exc.params.length,
   );
 
   let result;
@@ -148,19 +186,7 @@ async function runChunkSearch(
     }>(
       `WITH ${candidatesSql},
      visible AS (
-       SELECT DISTINCT ON (e.path)
-         e.path::text AS path,
-         e.blob_hash,
-         e.node_type
-       FROM fs_entries e
-       JOIN version_ancestors a
-         ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-       WHERE e.workspace_id = $1
-         AND a.descendant_id = $2
-         AND e.path <@ $3::ltree
-         AND ${exc.sql}
-         AND ${mnt.sql}
-       ORDER BY e.path, a.depth ASC
+       ${vis.sql}
      ),
      hits AS (
        SELECT v.path, c.start_line, c.end_line, c.heading_path, c.content,
@@ -178,7 +204,7 @@ async function runChunkSearch(
      WHERE file_rank <= $6
      ORDER BY rank DESC, path, start_line
      LIMIT $5`,
-      [...baseParams, ...exc.params, ...mnt.params],
+      [...baseParams, ...vis.params],
     );
   } catch (e) {
     rethrowMissingBm25Index(e);

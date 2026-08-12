@@ -421,18 +421,19 @@ export interface ChunkSearchResult {
   rank: number;
 }
 
-/** What `backfillChunks()` did. */
+/** What `backfillChunks()` did, at the handle's current version. */
 export interface BackfillChunksResult {
-  /** Text blobs that were missing chunks and got chunked. */
+  /** Visible text blobs that were missing chunks and got chunked. */
   blobs: number;
   /** Chunk rows written for them. */
   chunks: number;
 }
 
-/** What `indexChunkEmbeddings()` did. Counts are distinct chunk contents
- *  (by content hash), not chunk rows — duplicate sections share a vector. */
+/** What `indexChunkEmbeddings()` did, at the handle's current version.
+ *  Counts are distinct chunk contents (by content hash), not chunk rows —
+ *  duplicate sections share a vector. */
 export interface IndexChunkEmbeddingsResult {
-  /** Distinct chunk contents referenced in this workspace. */
+  /** Distinct chunk contents visible at the version. */
   chunks: number;
   /** Contents that already had a cached embedding — not re-embedded. */
   cacheHits: number;

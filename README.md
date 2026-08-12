@@ -305,8 +305,11 @@ const { content } = await fs.readFileLines(hits[0].path, {
 serves the indexing pass and (as single-item batches) query embedding.
 Vectors live in a per-content cache (`fs_chunk_embeddings`, keyed by the
 chunk's content hash) that only an explicit pass fills — never the write
-path — so you run it when it suits you (webble: post-crawl, before branch
-promotion):
+path. The pass is **version-scoped** like every other operation on the
+handle: it embeds what the instance's current version serves (honoring its
+excludes/mounts), so branch → index → promote makes the new main fully
+indexed the moment it becomes visible, and stale or abandoned versions
+never cost an embedding call:
 
 ```ts
 const fs = new PgFileSystem({
@@ -315,8 +318,12 @@ const fs = new PgFileSystem({
   embed: (texts) => myEmbeddingApi.batch(texts),        // one vector per text
   embeddingDimensions: 1024,
 })
-await fs.indexChunkEmbeddings()
+
+const branch = await fs.fork("crawl")
+// ... writes (chunks ride along) ...
+await branch.indexChunkEmbeddings()
 // { chunks: 120, cacheHits: 118, embedded: 2 } — only changed sections embed
+await branch.promoteTo("main")
 ```
 
 Requires `setup()` with `enableVectorSearch: true` + `embeddingDimensions`.
@@ -352,8 +359,8 @@ const hits = await fs.hybridSearch("delivery options", { perFileCap: 2 })
 1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).
    Drizzle users: re-run `drizzle-kit generate` (the table is in
    `createSchema()`) plus `generateMigrationSQL()` for RLS and the blob FK.
-2. Index pre-existing content once per workspace:
-   `await fs.backfillChunks()` — content-addressed, safe to re-run.
+2. Index pre-existing content: `await fs.backfillChunks()` — chunks the
+   blobs visible at the handle's version; content-addressed, safe to re-run.
 
 Enabling `chunking` against a database that skipped step 1 fails fast with an
 error explaining exactly this; older bash-gres versions keep working against
