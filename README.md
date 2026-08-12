@@ -354,6 +354,21 @@ const hits = await fs.hybridSearch("delivery options", { perFileCap: 2 })
 // same result shape as textSearch()/semanticSearch()
 ```
 
+**`semgrep`** puts all of this inside a [just-bash](https://www.npmjs.com/package/just-bash)
+session, so an agent's shell searches without leaving bash. The command
+dispatches on the handle: with an `embed` option it searches hybrid, without
+one it is BM25-only — same usage either way, and the line ranges hydrate
+with the session's own tools (`sed -n 12,34p file`):
+
+```ts
+import { createSemgrepCommand } from "bash-gres/just-bash"
+
+const bash = new Bash({ fs, customCommands: [createSemgrepCommand({ fs })] })
+await bash.exec('semgrep -k 3 "delivery options" /docs')
+// /docs/shipping.md:12-34  [0.0323]  Shipping > Costs — Shipping is free over…
+// one hit per line; exit 1 when nothing matches, like grep
+```
+
 **Migrate** an existing deployment in two idempotent steps:
 
 1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).
@@ -381,6 +396,7 @@ bash-gres                PgFileSystem, setup(), search, types
 bash-gres/postgres       postgres.js adapter (setup, PgFileSystem, createPostgresClient)
 bash-gres/node-postgres  node-postgres (pg) adapter (setup, PgFileSystem, createNodePgClient)
 bash-gres/drizzle        Drizzle adapter (setup, PgFileSystem, createDrizzleClient, createSchema)
+bash-gres/just-bash      createSemgrepCommand (semantic grep for just-bash sessions)
 ```
 
 ## Development

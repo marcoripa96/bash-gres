@@ -33,6 +33,8 @@ const bash = new Bash({ fs: pgFs });
 await bash.exec("echo hello > /file.txt");
 ```
 
+`bash-gres/just-bash` adds `createSemgrepCommand({ fs })` — the `semgrep` custom command (`semgrep [-k N] "query" [path]`): hybrid search when the handle has an `embed` option, BM25-only otherwise; grep-style `path:start-end` output, exit 1 on no match. Type-only imports keep the peer dep optional.
+
 ### Key modules
 
 - `lib/core/types.ts`: `SqlClient`, `FsError`, `SqlError`, all option/result interfaces
@@ -44,6 +46,7 @@ await bash.exec("echo hello > /file.txt");
 - `lib/adapters/drizzle/adapter.ts`: converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `lib/adapters/drizzle/schema.ts`: Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/postgres/index.ts`: wraps `postgres.Sql` into `SqlClient`
+- `lib/adapters/just-bash/index.ts`: `createSemgrepCommand` — the `semgrep` custom command for just-bash sessions
 
 ### Git-like history APIs
 
@@ -100,7 +103,8 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
   ".":          "dist/core/index.js",
   "./drizzle":       "dist/adapters/drizzle/index.js",
   "./node-postgres": "dist/adapters/node-postgres/index.js",
-  "./postgres":      "dist/adapters/postgres/index.js"
+  "./postgres":      "dist/adapters/postgres/index.js",
+  "./just-bash":     "dist/adapters/just-bash/index.js"
 }
 ```
 
