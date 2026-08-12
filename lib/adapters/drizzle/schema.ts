@@ -37,6 +37,7 @@ export interface BashGresSchema {
   versionAncestors: ReturnType<typeof buildAncestors>;
   fsBlobs: ReturnType<typeof buildBlobs>;
   fsEntries: ReturnType<typeof buildEntries>;
+  fsBlobChunks: ReturnType<typeof buildBlobChunks>;
 }
 
 /** The schema when vector search is on: `fs_blobs` carries the `embedding`
@@ -202,6 +203,34 @@ function buildBlobsWithEmbedding(
   );
 }
 
+// Section-level slices of text blobs for chunk-granular search; content-
+// addressed like fs_blobs (see lib/core/setup.ts for the column semantics).
+// The FK to fs_blobs is declared in the core DDL only — this schema mirrors
+// tables for query typing, and no table here declares FKs.
+function buildBlobChunks() {
+  return pgTable(
+    "fs_blob_chunks",
+    {
+      workspaceId: text("workspace_id").notNull(),
+      blobHash: byteaType("blob_hash").notNull(),
+      chunkIndex: integer("chunk_index").notNull(),
+      startLine: integer("start_line").notNull(),
+      endLine: integer("end_line").notNull(),
+      headingPath: text("heading_path"),
+      content: text().notNull(),
+      contentHash: byteaType("content_hash").notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      primaryKey({
+        columns: [table.workspaceId, table.blobHash, table.chunkIndex],
+      }),
+    ],
+  );
+}
+
 function buildEntries() {
   return pgTable(
     "fs_entries",
@@ -263,5 +292,6 @@ export function createSchema(
         ? buildBlobsWithEmbedding(options, embeddingDimensions)
         : buildBlobs(options),
     fsEntries: buildEntries(),
+    fsBlobChunks: buildBlobChunks(),
   };
 }

@@ -1,3 +1,5 @@
+import type { ChunkingOptions } from "./chunking.js";
+
 export type SqlParam =
   | string
   | number
@@ -372,4 +374,33 @@ export interface PgFileSystemOptions {
   statementTimeoutMs?: number;
   embed?: (text: string) => Promise<number[]>;
   embeddingDimensions?: number;
+  /**
+   * Maintain the chunk-level search index (`fs_blob_chunks`): every text file
+   * write also stores its markdown-aware section chunks, keyed by the blob
+   * hash — rewriting unchanged content costs one existence probe, never a
+   * re-chunk. Pass `true` for the defaults or a `ChunkingOptions` to tune the
+   * token budget/estimator. Off by default. For content written before this
+   * was enabled, run `backfillChunks()`.
+   */
+  chunking?: boolean | ChunkingOptions;
+}
+
+/** One stored row of the chunk-level search index, in document order. */
+export interface BlobChunk {
+  chunkIndex: number;
+  /** 1-indexed inclusive line range against the file's content. */
+  startLine: number;
+  endLine: number;
+  /** Breadcrumb of the enclosing headings ("Title > H2 > H3"), if any. */
+  headingPath: string | null;
+  /** The indexed text: breadcrumb prefix + the section body. */
+  content: string;
+}
+
+/** What `backfillChunks()` did. */
+export interface BackfillChunksResult {
+  /** Text blobs that were missing chunks and got chunked. */
+  blobs: number;
+  /** Chunk rows written for them. */
+  chunks: number;
 }

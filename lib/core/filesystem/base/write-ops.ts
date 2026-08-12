@@ -7,6 +7,7 @@ import {
   pathToLtree,
 } from "../../path-encoding.js";
 import { validateEmbedding } from "../../search.js";
+import { chunkMarkdown, type MarkdownChunk } from "../../chunking.js";
 import { TOMBSTONE } from "../internals/constants.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
 import { sha256 } from "../internals/hashes.js";
@@ -638,6 +639,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
         embedding,
         0o644,
       );
+      await this.maybeChunk(tx, hash, content);
       return;
     }
 
@@ -698,6 +700,95 @@ export class FsWriteOpsBase extends FsVisibilityBase {
         );
       throw new Error(`internalWriteFile: unexpected status '${outcome.status}'`);
     }
+
+    await this.maybeChunk(tx, hash, content);
+  }
+
+  /**
+   * Maintain the chunk-level index for a just-written blob. Chunks key off
+   * the blob hash, so an unchanged rewrite (or the same content at another
+   * path) costs a single existence probe. Runs in the write's transaction:
+   * a failed write never leaves chunks behind, and the fs_blobs row the FK
+   * needs is already in place.
+   */
+  protected async maybeChunk(
+    tx: SqlClient,
+    hash: Uint8Array,
+    content: string | Uint8Array,
+  ): Promise<void> {
+    if (!this.chunking || typeof content !== "string" || content.length === 0)
+      return;
+    let existing;
+    try {
+      existing = await tx.query(
+        `SELECT 1 FROM fs_blob_chunks
+         WHERE workspace_id = $1 AND blob_hash = $2
+         LIMIT 1`,
+        [this.workspaceId, hash],
+      );
+    } catch (e) {
+      this.rethrowMissingChunkTable(e);
+    }
+    if (existing.rows.length > 0) return;
+    await this.insertChunkRows(tx, hash, chunkMarkdown(content, this.chunking));
+  }
+
+  /**
+   * Turn Postgres's "relation does not exist" for `fs_blob_chunks` into the
+   * migration story. The table ships with newer `setup()` runs; a database
+   * migrated by an older bash-gres doesn't have it, and the chunking feature
+   * fails fast with instructions rather than a bare SQL error. Databases
+   * that never enable `chunking` are untouched — the table is only queried
+   * when the feature (or one of its explicit APIs) is used.
+   */
+  protected rethrowMissingChunkTable(e: unknown): never {
+    if (
+      e instanceof SqlError &&
+      e.code === "42P01" &&
+      /fs_blob_chunks/.test(e.message)
+    ) {
+      throw new Error(
+        "the fs_blob_chunks table does not exist in this database — " +
+          "re-run setup() (idempotent) to migrate it in, then " +
+          "backfillChunks() once per workspace to index pre-existing content",
+      );
+    }
+    throw e;
+  }
+
+  /** Batched insert of one blob's chunk rows (no-op on an empty set). */
+  protected async insertChunkRows(
+    tx: SqlClient,
+    hash: Uint8Array,
+    chunks: MarkdownChunk[],
+  ): Promise<void> {
+    if (chunks.length === 0) return;
+    const params: SqlParam[] = [this.workspaceId, hash];
+    const values: string[] = [];
+    for (const chunk of chunks) {
+      const idx = params.length + 1;
+      values.push(
+        `($1, $2, $${idx}::int, $${idx + 1}::int, $${idx + 2}::int, $${idx + 3}::text, $${idx + 4}::text, $${idx + 5}::bytea)`,
+      );
+      params.push(
+        chunk.index,
+        chunk.startLine,
+        chunk.endLine,
+        chunk.headingPath,
+        chunk.content,
+        sha256(new TextEncoder().encode(chunk.content)),
+      );
+    }
+    // ON CONFLICT DO NOTHING: a concurrent writer of the same blob may have
+    // raced past the existence probe; both compute identical rows.
+    await tx.query(
+      `INSERT INTO fs_blob_chunks
+         (workspace_id, blob_hash, chunk_index, start_line, end_line,
+          heading_path, content, content_hash)
+       VALUES ${values.join(", ")}
+       ON CONFLICT (workspace_id, blob_hash, chunk_index) DO NOTHING`,
+      params,
+    );
   }
 
   protected async tryFastWriteFile(
@@ -709,7 +800,9 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       !this.permissions.write ||
       this.cachedVersionId === null ||
       this.maxWorkspaceBytes !== undefined ||
-      this.embed
+      this.embed ||
+      // Chunk maintenance needs the transactional path (probe + insert).
+      this.chunking
     ) {
       return null;
     }

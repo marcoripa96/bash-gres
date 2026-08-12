@@ -51,6 +51,29 @@ CREATE TABLE IF NOT EXISTS fs_entries (
     created_at      timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, version_id, path)
 ) WITH (fillfactor = 100);
+
+-- Section-level slices of text blobs for chunk-granular search. Keyed by the
+-- blob hash (content-addressed like fs_blobs), so an unchanged file across
+-- versions/branches is never re-chunked, and search results project onto
+-- visible paths the same way blob-level search does. Line ranges are
+-- 1-indexed inclusive against the blob's content, so a hit is addressable as
+-- path:start-end and hydratable via readFileLines(). content is the indexed
+-- text (breadcrumb prefix + section body); content_hash keys future
+-- embedding caching per chunk.
+CREATE TABLE IF NOT EXISTS fs_blob_chunks (
+    workspace_id  text NOT NULL CHECK (length(workspace_id) > 0),
+    blob_hash     bytea NOT NULL,
+    chunk_index   int NOT NULL CHECK (chunk_index >= 0),
+    start_line    int NOT NULL CHECK (start_line >= 1),
+    end_line      int NOT NULL CHECK (end_line >= start_line),
+    heading_path  text,
+    content       text NOT NULL,
+    content_hash  bytea NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, blob_hash, chunk_index),
+    CONSTRAINT fs_blob_chunks_blob_fkey FOREIGN KEY (workspace_id, blob_hash)
+      REFERENCES fs_blobs(workspace_id, hash) ON DELETE CASCADE
+);
 `;
 
 const MIGRATIONS_DDL = `
@@ -232,7 +255,7 @@ export async function setup(
   }
 
   if (enableRLS) {
-    for (const table of ["fs_version_roots", "fs_versions", "version_ancestors", "fs_entries", "fs_blobs"]) {
+    for (const table of ["fs_version_roots", "fs_versions", "version_ancestors", "fs_entries", "fs_blobs", "fs_blob_chunks"]) {
       await client.query(rlsDdl(table));
     }
   }
