@@ -1,7 +1,8 @@
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
 
-const AGENT_PROMPT = `You are upgrading a host project from bash-gres 2.x to bash-gres 3.0.
+function agentUpgradePrompt(): string {
+  return `You are upgrading a host project from bash-gres 2.x to bash-gres 3.0.
 The upgrade has two breaking API changes, one additive database migration,
 and two one-time indexing passes. Work through the steps in order and verify
 at the end. Read node_modules/bash-gres/README.md ("Search" section) whenever
@@ -64,6 +65,7 @@ cache). No existing table changes; older rows keep working.
 
 Do not guess API shapes from memory: check node_modules/bash-gres/README.md
 and the .d.ts files if anything here doesn't match the installed version.`;
+}
 
 export default function MigrationPage() {
   return (
@@ -86,6 +88,22 @@ export default function MigrationPage() {
           idempotent — existing data keeps working.
         </p>
       </header>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="text-xl font-semibold tracking-tight">
+            Agent Upgrade Prompt
+          </h2>
+          <CopyButton text={agentUpgradePrompt()} label="Copy prompt" />
+        </div>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Upgrading with a coding agent? Copy this prompt — it is
+          self-contained and walks the agent through the whole migration,
+          including verification. Prefer the details yourself? They follow
+          below.
+        </p>
+        <CodeBlock lang="markdown" code={agentUpgradePrompt()} />
+      </section>
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
@@ -234,20 +252,6 @@ await fs.indexChunkEmbeddings()  // fill the vector cache (skip if BM25-only)`}
         />
       </section>
 
-      <section className="space-y-4">
-        <div className="flex items-center justify-between gap-4">
-          <h2 className="text-xl font-semibold tracking-tight">
-            Agent Upgrade Prompt
-          </h2>
-          <CopyButton text={AGENT_PROMPT} label="Copy prompt" />
-        </div>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          Upgrading with a coding agent? Copy this prompt — it is
-          self-contained and walks the agent through the whole migration,
-          including verification:
-        </p>
-        <CodeBlock lang="markdown" code={AGENT_PROMPT} />
-      </section>
     </div>
   );
 }
