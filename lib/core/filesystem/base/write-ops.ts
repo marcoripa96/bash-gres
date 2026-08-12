@@ -75,39 +75,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
 
   // -- Internal write paths --------------------------------------------------
 
-  protected async upsertBlob(
-    tx: SqlClient,
-    hash: Uint8Array,
-    content: string | Uint8Array,
-    sizeBytes: number,
-    embedding: number[] | null,
-    userPath: string,
-  ): Promise<void> {
-    await this.validateWorkspaceBytes(tx, hash, sizeBytes, userPath);
-
-    const isText = typeof content === "string";
-    const textContent = isText ? content : null;
-    const binaryData = isText ? null : content;
-
-    if (embedding !== null) {
-      const embeddingStr = `[${embedding.join(",")}]`;
-      await tx.query(
-        `INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6::vector)
-         ON CONFLICT (workspace_id, hash) DO UPDATE SET
-           embedding = COALESCE(fs_blobs.embedding, EXCLUDED.embedding)`,
-        [this.workspaceId, hash, textContent, binaryData, sizeBytes, embeddingStr],
-      );
-    } else {
-      await tx.query(
-        `INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (workspace_id, hash) DO NOTHING`,
-        [this.workspaceId, hash, textContent, binaryData, sizeBytes],
-      );
-    }
-  }
-
   protected async validateWorkspaceBytes(
     tx: SqlClient,
     hash: Uint8Array,
@@ -142,108 +109,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
         this.maxWorkspaceBytes,
         current,
         sizeBytes,
-      );
-    }
-  }
-
-  /**
-   * Fused blob+entry upsert for the file write hot path. Runs both INSERTs
-   * in a single CTE so the round-trip count drops from 2 → 1; data-modifying
-   * statements in `WITH` clauses are always evaluated by Postgres regardless
-   * of whether the outer query references them. Used only for `node_type =
-   * 'file'` writes; symlinks, directories, and bulk copy paths still go
-   * through `upsertBlob` / `upsertEntry` separately because they have
-   * different shapes (no blob, embedding-only refresh, etc.).
-   */
-  protected async upsertFileBlobAndEntry(
-    tx: SqlClient,
-    versionId: number,
-    posixPath: string,
-    hash: Uint8Array,
-    content: string | Uint8Array,
-    sizeBytes: number,
-    embedding: number[] | null,
-    mode: number,
-  ): Promise<void> {
-    await this.validateWorkspaceBytes(tx, hash, sizeBytes, posixPath);
-
-    const isText = typeof content === "string";
-    const textContent = isText ? content : null;
-    const binaryData = isText ? null : content;
-    const lt = pathToLtree(posixPath, this.workspaceId);
-
-    if (embedding !== null) {
-      const embeddingStr = `[${embedding.join(",")}]`;
-      await tx.query(
-        `WITH b AS (
-           INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes, embedding)
-           VALUES ($1, $2, $3, $4, $5, $6::vector)
-           ON CONFLICT (workspace_id, hash) DO UPDATE SET
-             embedding = COALESCE(fs_blobs.embedding, EXCLUDED.embedding)
-           RETURNING 1
-         ),
-         version_bump AS (
-           UPDATE fs_versions SET last_write_at = now()
-           WHERE workspace_id = $1 AND id = $7
-           RETURNING 1
-         )
-         INSERT INTO fs_entries
-           (workspace_id, version_id, path, blob_hash, node_type,
-            symlink_target, mode, size_bytes, mtime)
-         VALUES ($1, $7, $8::ltree, $2, 'file', NULL, $9, $5, now())
-         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-           blob_hash = EXCLUDED.blob_hash,
-           node_type = EXCLUDED.node_type,
-           symlink_target = EXCLUDED.symlink_target,
-           mode = EXCLUDED.mode,
-           size_bytes = EXCLUDED.size_bytes,
-           mtime = now()`,
-        [
-          this.workspaceId,
-          hash,
-          textContent,
-          binaryData,
-          sizeBytes,
-          embeddingStr,
-          versionId,
-          lt,
-          mode,
-        ],
-      );
-    } else {
-      await tx.query(
-        `WITH b AS (
-           INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (workspace_id, hash) DO NOTHING
-           RETURNING 1
-         ),
-         version_bump AS (
-           UPDATE fs_versions SET last_write_at = now()
-           WHERE workspace_id = $1 AND id = $6
-           RETURNING 1
-         )
-         INSERT INTO fs_entries
-           (workspace_id, version_id, path, blob_hash, node_type,
-            symlink_target, mode, size_bytes, mtime)
-         VALUES ($1, $6, $7::ltree, $2, 'file', NULL, $8, $5, now())
-         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-           blob_hash = EXCLUDED.blob_hash,
-           node_type = EXCLUDED.node_type,
-           symlink_target = EXCLUDED.symlink_target,
-           mode = EXCLUDED.mode,
-           size_bytes = EXCLUDED.size_bytes,
-           mtime = now()`,
-        [
-          this.workspaceId,
-          hash,
-          textContent,
-          binaryData,
-          sizeBytes,
-          versionId,
-          lt,
-          mode,
-        ],
       );
     }
   }
@@ -582,7 +447,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     versionId: number,
     path: string,
     content: string | Uint8Array,
-    precomputedEmbedding?: number[] | null,
     parentKnownMissing: boolean = false,
   ): Promise<void> {
     this.validateFileSize(content);
@@ -594,54 +458,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       : (content as Uint8Array);
     const sizeBytes = bytes.byteLength;
     const hash = sha256(bytes);
-
-    let embedding: number[] | null = null;
-    if (precomputedEmbedding !== undefined) {
-      embedding = precomputedEmbedding;
-    } else if (
-      isText &&
-      this.embed &&
-      content.length > 0 &&
-      (await this.blobsHasEmbedding(tx))
-    ) {
-      embedding = await this.maybeEmbed(tx, hash, content);
-    }
-
-    // Embedding writes still take the older two-step path because the blob
-    // INSERT shape differs (extra column, different ON CONFLICT projection)
-    // and re-using the fused statement would force everything through a
-    // CASE-laden query.
-    if (embedding !== null) {
-      const parentPosix = parentPath(path);
-      const resolved = await this.resolveEntries(tx, [parentPosix, path]);
-      const parent = resolved.get(parentPosix) ?? null;
-      if (!parent)
-        throw new FsError("ENOENT", "no such file or directory, open", path);
-      if (parent.node_type !== "directory")
-        throw new FsError("ENOTDIR", "not a directory, open", path);
-      const existing = resolved.get(path) ?? null;
-      if (existing?.node_type === "directory")
-        throw new FsError(
-          "EISDIR",
-          "illegal operation on a directory, open",
-          path,
-        );
-      if (!existing) {
-        await this.validateNodeCount(tx);
-      }
-      await this.upsertFileBlobAndEntry(
-        tx,
-        versionId,
-        path,
-        hash,
-        content,
-        sizeBytes,
-        embedding,
-        0o644,
-      );
-      await this.maybeChunk(tx, hash, content);
-      return;
-    }
 
     // Workspace-byte quota check (no-op when maxWorkspaceBytes is unset).
     // Runs before the fused query so a quota refusal never persists either
@@ -800,7 +616,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       !this.permissions.write ||
       this.cachedVersionId === null ||
       this.maxWorkspaceBytes !== undefined ||
-      this.embed ||
       // Chunk maintenance needs the transactional path (probe + insert).
       this.chunking
     ) {
@@ -1158,36 +973,19 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     return false;
   }
 
-  protected async blobsHasEmbedding(tx: SqlClient): Promise<boolean> {
-    if (this.blobsHasEmbeddingCache !== null)
-      return this.blobsHasEmbeddingCache;
-    const r = await tx.query<{ has_col: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM information_schema.columns
-         WHERE table_name = 'fs_blobs' AND column_name = 'embedding'
-       ) AS has_col`,
-    );
-    this.blobsHasEmbeddingCache = r.rows[0]?.has_col ?? false;
-    return this.blobsHasEmbeddingCache;
-  }
-
-  protected async maybeEmbed(
-    tx: SqlClient,
-    hash: Uint8Array,
-    content: string,
-  ): Promise<number[] | null> {
-    if (!this.embed) return null;
-    const existing = await tx.query<{ has_embedding: boolean }>(
-      `SELECT (embedding IS NOT NULL) AS has_embedding
-       FROM fs_blobs
-       WHERE workspace_id = $1 AND hash = $2
-       LIMIT 1`,
-      [this.workspaceId, hash],
-    );
-    if (existing.rows[0]?.has_embedding) return null;
-    const embedding = await this.embed(content);
-    validateEmbedding(embedding, this.embeddingDimensions);
-    return embedding;
+  /** Embed a single text through the batch `embed` option and validate it. */
+  protected async embedOne(text: string): Promise<number[]> {
+    if (!this.embed) {
+      throw new Error("No embedding provider configured (set the `embed` option)");
+    }
+    const vectors = await this.embed([text]);
+    if (!Array.isArray(vectors) || vectors.length !== 1) {
+      throw new Error(
+        `embed returned ${Array.isArray(vectors) ? vectors.length : "no"} vectors for 1 text`,
+      );
+    }
+    validateEmbedding(vectors[0]!, this.embeddingDimensions);
+    return vectors[0]!;
   }
 
   // -- Internal mkdir ---------------------------------------------------------
@@ -1394,7 +1192,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       );
     } else {
       // Empty file (no blob_hash). Create empty entry.
-      await this.internalWriteFile(tx, versionId, dest, "", null);
+      await this.internalWriteFile(tx, versionId, dest, "");
     }
   }
 }

@@ -38,13 +38,14 @@ describe("createSchema drizzle typing", () => {
     await db.delete(schema.fsBlobs).where(eq(schema.fsBlobs.workspaceId, WS));
   });
 
-  it("types the embedding column concretely when vector search is on", () => {
+  it("adds the fs_chunk_embeddings table only when vector search is on", () => {
     const schema = createSchema({
       enableVectorSearch: true,
       embeddingDimensions: 3,
     });
-    // Statically a real column (no optionality), and present at runtime.
-    expect(schema.fsBlobs.embedding.name).toBe("embedding");
+    // Statically a real table, and present at runtime.
+    expect(schema.fsChunkEmbeddings.embedding.name).toBe("embedding");
+    expect("fsChunkEmbeddings" in createSchema()).toBe(false);
     expect(() => createSchema({ enableVectorSearch: true })).toThrow(
       "embeddingDimensions is required",
     );

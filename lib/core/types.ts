@@ -89,11 +89,12 @@ export interface WalkEntry extends DirentStatEntry {
   depth: number;
 }
 
-export interface SearchResult {
-  path: string;
-  name: string;
-  rank: number;
-  snippet?: string;
+/** Options accepted by textSearch / semanticSearch / hybridSearch. */
+export interface SearchOptions {
+  path?: string;
+  limit?: number;
+  /** Max hits per file path (default 3) so one long page can't monopolize the top-k. */
+  perFileCap?: number;
 }
 
 export interface MkdirOptions {
@@ -372,16 +373,15 @@ export interface PgFileSystemOptions {
   /** Maximum number of nodes a single `cp -r` may traverse. Default: 10000. */
   maxCpNodes?: number;
   statementTimeoutMs?: number;
-  embed?: (text: string) => Promise<number[]>;
-  embeddingDimensions?: number;
   /**
-   * Batch embedder for the chunk-level index, used only by the explicit
-   * `indexChunkEmbeddings()` pass (never by the write path). Receives the
-   * indexed `content` of chunks that miss the per-content embedding cache
-   * and must return one vector per input, in order. Distinct from `embed`,
-   * the blob-level single-text embedder.
+   * The embedder: receives a batch of texts, returns one vector per text,
+   * in order. Every embedding flows through it — the chunk-index pass
+   * (`indexChunkEmbeddings()`, batches of 64) and query embeddings for
+   * `semanticSearch`/`hybridSearch` (single-item batches). Never called by
+   * the write path.
    */
-  embedChunks?: (texts: string[]) => Promise<number[][]>;
+  embed?: (texts: string[]) => Promise<number[][]>;
+  embeddingDimensions?: number;
   /**
    * Maintain the chunk-level search index (`fs_blob_chunks`): every text file
    * write also stores its markdown-aware section chunks, keyed by the blob

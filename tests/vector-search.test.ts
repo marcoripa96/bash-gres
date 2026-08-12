@@ -6,7 +6,7 @@ import { PgFileSystem } from "../lib/core/filesystem.js";
 import { SqlError } from "../lib/core/types.js";
 import type { SqlClient } from "./helpers.js";
 
-const WS = "chunk-hybrid-workspace";
+const WS = "vector-search-workspace";
 
 /**
  * Deterministic "semantic" space: three concept dimensions keyed on
@@ -59,20 +59,19 @@ function missingBm25IndexClient(real: SqlClient): SqlClient {
   };
 }
 
-describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
+describe.each(TEST_ADAPTERS)("semanticSearch & hybridSearch [%s]", (_name, factory) => {
   let client: SqlClient;
   let teardown: () => Promise<void>;
   let fs: PgFileSystem;
 
-  // The fixture fs wires ONLY the batch embedder — the query embedding must
-  // come through the embedChunks fallback (a caller who configured indexing
-  // shouldn't have to wire the same model twice).
+  // One embedder for everything: the same batch `embed` option serves the
+  // indexing pass and (as single-item batches) the query side.
   const makeFs = () =>
     new PgFileSystem({
       db: client,
       workspaceId: WS,
       chunking: true,
-      embedChunks: async (texts) => texts.map(vocabEmbed),
+      embed: async (texts) => texts.map(vocabEmbed),
       embeddingDimensions: 3,
     });
 
@@ -109,9 +108,9 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     await fs.indexChunkEmbeddings();
 
     // No document contains a "delivery" token — pure BM25 comes up empty.
-    expect(await fs.searchChunks("delivery")).toEqual([]);
+    expect(await fs.textSearch("delivery")).toEqual([]);
 
-    const hits = await fs.searchChunksHybrid("delivery");
+    const hits = await fs.hybridSearch("delivery");
     expect(hits[0]).toMatchObject({ path: "/shipping.md" });
   });
 
@@ -124,7 +123,7 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     await fs.writeFile("/about.md", "## About\n\nA small company from Milan.");
     await fs.indexChunkEmbeddings();
 
-    const hits = await fs.searchChunksHybrid("WBL-1234");
+    const hits = await fs.hybridSearch("WBL-1234");
     expect(hits[0]).toMatchObject({ path: "/codes.md" });
     expect(hits[0]!.content).toContain("WBL-1234");
   });
@@ -137,7 +136,7 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     await fs.writeFile("/codes.md", "## Codes\n\nQuote code WBL-1234 to support.");
     await fs.indexChunkEmbeddings();
 
-    const hits = await fs.searchChunksHybrid("WBL-1234 delivery");
+    const hits = await fs.hybridSearch("WBL-1234 delivery");
     expect(hits[0]!.path).toBe("/a.md");
     const paths = hits.map((h) => h.path);
     expect(paths).toContain("/b.md"); // vector-only hit survives
@@ -156,11 +155,11 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     await fs.writeFile("/other.md", "## Plans\n\npricing overview");
     await fs.indexChunkEmbeddings();
 
-    const capped = await fs.searchChunksHybrid("pricing");
+    const capped = await fs.hybridSearch("pricing");
     expect(capped.filter((h) => h.path === "/faq.md").length).toBeLessThanOrEqual(3);
     expect(capped.some((h) => h.path === "/other.md")).toBe(true);
 
-    const one = await fs.searchChunksHybrid("pricing", { perFileCap: 1 });
+    const one = await fs.hybridSearch("pricing", { perFileCap: 1 });
     expect(one.filter((h) => h.path === "/faq.md")).toHaveLength(1);
     expect(one.some((h) => h.path === "/other.md")).toBe(true);
   });
@@ -169,7 +168,7 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     // The crawl has run but the embedding pass hasn't — text hits must not
     // vanish just because the vector side knows nothing yet.
     await fs.writeFile("/a.md", "## Pricing\n\npremium plan costs nine euros");
-    const hits = await fs.searchChunksHybrid("premium");
+    const hits = await fs.hybridSearch("premium");
     expect(hits[0]).toMatchObject({ path: "/a.md" });
   });
 
@@ -182,17 +181,17 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     // The vector side is nearest-neighbor — it always ranks something — so
     // visibility shows in WHICH blob's chunks surface at /a.md, never in an
     // empty result: each side must only ever see its own version's content.
-    expect((await fs.searchChunksHybrid("shipping"))[0]!.path).toBe("/a.md");
-    for (const hit of await fs.searchChunksHybrid("thirty day returns")) {
+    expect((await fs.hybridSearch("shipping"))[0]!.path).toBe("/a.md");
+    for (const hit of await fs.hybridSearch("thirty day returns")) {
       expect(hit.content).not.toContain("thirty");
     }
-    expect((await forked.searchChunksHybrid("thirty"))[0]!.content).toContain(
+    expect((await forked.hybridSearch("thirty"))[0]!.content).toContain(
       "thirty day returns",
     );
 
     await forked.promoteTo("main");
     const promoted = makeFs();
-    const after = await promoted.searchChunksHybrid("returns");
+    const after = await promoted.hybridSearch("returns");
     expect(after[0]!.content).toContain("thirty day returns");
     for (const hit of after) {
       expect(hit.content).not.toContain("free shipping");
@@ -204,45 +203,87 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     await fs.writeFile("/secret.md", "## S\n\npricing info");
     await fs.indexChunkEmbeddings();
 
-    const scoped = await fs.searchChunksHybrid("pricing", { path: "/content" });
+    const scoped = await fs.hybridSearch("pricing", { path: "/content" });
     expect(scoped.map((h) => h.path)).toEqual(["/content/a.md"]);
 
-    expect(await fs.searchChunksHybrid("pricing", { limit: 1 })).toHaveLength(1);
+    expect(await fs.hybridSearch("pricing", { limit: 1 })).toHaveLength(1);
 
     const excluded = new PgFileSystem({
       db: client,
       workspaceId: WS,
       exclude: ["secret.md"],
-      embed: async (t) => vocabEmbed(t), // also covers the `embed` DI path
+      embed: async (texts) => texts.map(vocabEmbed),
     });
     expect(
-      (await excluded.searchChunksHybrid("pricing")).map((h) => h.path),
+      (await excluded.hybridSearch("pricing")).map((h) => h.path),
     ).toEqual(["/content/a.md"]);
 
     const mounted = new PgFileSystem({
       db: client,
       workspaceId: WS,
       mount: [{ path: "/content" }],
-      embed: async (t) => vocabEmbed(t),
+      embed: async (texts) => texts.map(vocabEmbed),
     });
     expect(
-      (await mounted.searchChunksHybrid("pricing")).map((h) => h.path),
+      (await mounted.hybridSearch("pricing")).map((h) => h.path),
     ).toEqual(["/content/a.md"]);
+  });
+
+  it("semanticSearch: ranks by vector similarity alone, synonyms included", async () => {
+    await fs.writeFile("/shipping.md", "## Shipping\n\nOrders ship free over fifty euros.");
+    await fs.writeFile("/returns.md", "## Returns\n\nRefunds within thirty days.");
+    await fs.indexChunkEmbeddings();
+
+    // Synonym: no shared token, same concept dimension.
+    const hits = await fs.semanticSearch("delivery");
+    expect(hits[0]).toMatchObject({ path: "/shipping.md" });
+    expect(hits[0]!.rank).toBeGreaterThan(hits.at(-1)!.rank);
+
+    // Unembedded content is invisible to the pure vector signal.
+    await fs.writeFile("/new.md", "## New\n\nOrders ship overnight too.");
+    const paths = (await fs.semanticSearch("delivery")).map((h) => h.path);
+    expect(paths).not.toContain("/new.md");
+  });
+
+  it("semanticSearch: honors scope and the per-file cap", async () => {
+    const faq = [
+      "# FAQ",
+      "",
+      ...Array.from(
+        { length: 5 },
+        (_, i) => `## Shipping ${i}\n\nOrders ship, question ${i}\n`,
+      ),
+    ].join("\n");
+    await fs.writeFile("/faq.md", faq);
+    await fs.writeFile("/content/a.md", "## Delivery\n\nOrders ship fast.");
+    await fs.indexChunkEmbeddings();
+
+    const capped = await fs.semanticSearch("delivery");
+    expect(
+      capped.filter((h) => h.path === "/faq.md").length,
+    ).toBeLessThanOrEqual(3);
+    expect(capped.some((h) => h.path === "/content/a.md")).toBe(true);
+
+    const scoped = await fs.semanticSearch("delivery", { path: "/content" });
+    expect(scoped.map((h) => h.path)).toEqual(["/content/a.md"]);
   });
 
   it("guards: embedder required, dimensions validated, setup stories on missing schema", async () => {
     const none = new PgFileSystem({ db: client, workspaceId: WS });
-    await expect(none.searchChunksHybrid("x")).rejects.toThrow(
+    await expect(none.hybridSearch("x")).rejects.toThrow(
+      /embedding provider/,
+    );
+    await expect(none.semanticSearch("x")).rejects.toThrow(
       /embedding provider/,
     );
 
     const wrongDims = new PgFileSystem({
       db: client,
       workspaceId: WS,
-      embed: async () => [1, 2],
+      embed: async (texts) => texts.map(() => [1, 2]),
       embeddingDimensions: 3,
     });
-    await expect(wrongDims.searchChunksHybrid("x")).rejects.toThrow(
+    await expect(wrongDims.hybridSearch("x")).rejects.toThrow(
       /dimension mismatch/i,
     );
 
@@ -250,18 +291,21 @@ describe.each(TEST_ADAPTERS)("searchChunksHybrid [%s]", (_name, factory) => {
     const noVector = new PgFileSystem({
       db: missingEmbeddingTableClient(client),
       workspaceId: WS,
-      embed: async (t) => vocabEmbed(t),
+      embed: async (texts) => texts.map(vocabEmbed),
     });
-    await expect(noVector.searchChunksHybrid("pricing")).rejects.toThrow(
+    await expect(noVector.hybridSearch("pricing")).rejects.toThrow(
+      /enableVectorSearch/,
+    );
+    await expect(noVector.semanticSearch("pricing")).rejects.toThrow(
       /enableVectorSearch/,
     );
 
     const noFts = new PgFileSystem({
       db: missingBm25IndexClient(client),
       workspaceId: WS,
-      embed: async (t) => vocabEmbed(t),
+      embed: async (texts) => texts.map(vocabEmbed),
     });
-    await expect(noFts.searchChunksHybrid("pricing")).rejects.toThrow(
+    await expect(noFts.hybridSearch("pricing")).rejects.toThrow(
       /enableFullTextSearch/,
     );
   });

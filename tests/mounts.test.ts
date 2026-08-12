@@ -4,7 +4,7 @@ import { ensureSetup } from "./global-setup.js";
 import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import type { SqlClient } from "./helpers.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
-import { hybridSearch } from "../lib/core/search.js";
+import { chunkHybridSearch } from "../lib/core/search.js";
 import { compileMounts } from "../lib/core/mounts.js";
 import type { SqlParam } from "../lib/core/types.js";
 
@@ -316,9 +316,9 @@ describe.each(TEST_ADAPTERS)("native mounts [%s]", (_name, factory) => {
     expect(await work.exists("/clienti/acme/revert-visible.md")).toBe(false);
   });
 
-  // Note: textSearch/semanticSearch mount scoping is covered in
-  // text-search.test.ts and chunk-search.test.ts, which layer the FTS setup
-  // on top of the FTS-off global setup.
+  // Note: search mount scoping is covered in text-search.test.ts and
+  // vector-search.test.ts, which layer the FTS/vector setup on top of the
+  // FTS-off global setup.
 
   it("respects an expanded set of allowed clients", async () => {
     const wide = viewForU1(client, ["acme", "globex"]);
@@ -371,7 +371,7 @@ describe.each(TEST_ADAPTERS)("native mounts [%s]", (_name, factory) => {
 });
 
 describe("mount SQL helpers", () => {
-  it("includes the mount predicate in hybridSearch", async () => {
+  it("includes the mount predicate in chunkHybridSearch", async () => {
     let capturedText = "";
     let capturedParams: SqlParam[] = [];
     const fake: SqlClient = {
@@ -383,7 +383,7 @@ describe("mount SQL helpers", () => {
       transaction: async <T>(fn: (client: SqlClient) => Promise<T>) => fn(fake),
     };
 
-    await hybridSearch(fake, WS, 1, "policy", [0.1], {
+    await chunkHybridSearch(fake, WS, 1, "policy", [0.1], {
       mounts: compileMounts([{ path: "/clienti/acme" }], "/", WS),
     });
 

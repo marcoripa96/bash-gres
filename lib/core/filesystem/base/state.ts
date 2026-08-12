@@ -56,8 +56,7 @@ export class FsStateBase {
   protected maxSymlinkDepth: number;
   protected maxCpNodes: number;
   protected statementTimeoutMs: number;
-  protected embed?: (text: string) => Promise<number[]>;
-  protected embedChunks?: (texts: string[]) => Promise<number[][]>;
+  protected embed?: (texts: string[]) => Promise<number[][]>;
   protected embeddingDimensions?: number;
   /** Chunk-level index options; null when the `chunking` option is off. */
   protected chunking: ChunkingOptions | null;
@@ -70,7 +69,6 @@ export class FsStateBase {
   protected requestedVersionId: number | null = null;
   protected cachedVersionId: number | null = null;
   protected cachedVersionRootId: number | null = null;
-  protected blobsHasEmbeddingCache: boolean | null = null;
   /**
    * Optimistic visible-node count for `validateNodeCount`. Avoids running a
    * `COUNT(*)` over the COW-resolved view of the whole workspace on every
@@ -146,7 +144,6 @@ export class FsStateBase {
     this.statementTimeoutMs =
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
-    this.embedChunks = options.embedChunks;
     this.embeddingDimensions = options.embeddingDimensions;
     this.chunking = options.chunking
       ? options.chunking === true

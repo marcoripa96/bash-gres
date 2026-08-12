@@ -10,7 +10,7 @@ import type {
   ReadFileRangeOptions,
   ReadFileLinesOptions,
   ReadFileLinesResult,
-  SearchResult,
+  SearchOptions,
   ChunkSearchResult,
   PgFileSystemOptions,
   BlobChunk,
@@ -27,12 +27,11 @@ import {
   fileName,
 } from "./path-encoding.js";
 import {
-  fullTextSearch,
   chunkTextSearch,
+  chunkSemanticSearch,
   chunkHybridSearch,
-  semanticSearch,
-  hybridSearch,
   validateEmbedding,
+  type ChunkSearchOpts,
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
 import { filesystemOpsContext } from "./filesystem/ops/context.js";
@@ -667,16 +666,16 @@ export class PgFileSystem extends FsWriteOpsBase {
   /**
    * Embed every distinct chunk content in this workspace that misses the
    * per-content embedding cache (`fs_chunk_embeddings`), in batches through
-   * the injected `embedChunks`. Content-addressed: an edit to one section of
+   * the injected `embed`. Content-addressed: an edit to one section of
    * a ten-section page costs one embedding call — the other nine cache-hit,
    * as does identical content anywhere else in the workspace. Safe to
    * re-run; webble runs it post-crawl, before branch promotion.
    */
   async indexChunkEmbeddings(): Promise<IndexChunkEmbeddingsResult> {
-    const embedBatch = this.embedChunks;
+    const embedBatch = this.embed;
     if (!embedBatch) {
       throw new Error(
-        "indexChunkEmbeddings requires the `embedChunks` option (batch embedder)",
+        "indexChunkEmbeddings requires the `embed` option (batch embedder)",
       );
     }
     if (!this.permissions.write) {
@@ -723,7 +722,7 @@ export class PgFileSystem extends FsWriteOpsBase {
       const vectors = await embedBatch(batch.map((m) => m.content));
       if (!Array.isArray(vectors) || vectors.length !== batch.length) {
         throw new Error(
-          `embedChunks returned ${Array.isArray(vectors) ? vectors.length : "no"} vectors for ${batch.length} texts`,
+          `embed returned ${Array.isArray(vectors) ? vectors.length : "no"} vectors for ${batch.length} texts`,
         );
       }
       for (const vector of vectors) {
@@ -902,7 +901,6 @@ export class PgFileSystem extends FsWriteOpsBase {
         versionId,
         internal,
         content,
-        undefined,
         parentKnownMissing,
       );
     });
@@ -1475,37 +1473,67 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   // -- Public API: Search -----------------------------------------------------
+  //
+  // All search is chunk-granular: hits are sections, each addressable as
+  // `path:startLine-endLine` and hydratable via `readFileLines()`. Only
+  // content indexed under the `chunking` option (or by `backfillChunks()`)
+  // is searchable. At most `perFileCap` hits per file (default 3) keep one
+  // long page from monopolizing the top-k.
 
+  /**
+   * BM25 lexical search. Requires the full-text-search setup
+   * (`enableFullTextSearch`).
+   */
   async textSearch(
     query: string,
-    opts?: { path?: string; limit?: number },
-  ): Promise<SearchResult[]> {
-    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
-    this.guardRead(scopePath);
-    const internalScope = this.toInternalPath(scopePath);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const versionId = await this.getCurrentVersionId(tx);
-      const results = await fullTextSearch(
-        tx,
-        this.workspaceId,
-        versionId,
-        query,
-        { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
-      );
-      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
-    });
+    opts?: SearchOptions,
+  ): Promise<ChunkSearchResult[]> {
+    return this.runChunkSearch(opts, (tx, versionId, searchOpts) =>
+      chunkTextSearch(tx, this.workspaceId, versionId, query, searchOpts),
+    );
   }
 
   /**
-   * BM25 search over the chunk-level index (`fs_blob_chunks`): hits are
-   * sections, not files, each addressable as `path:startLine-endLine` and
-   * hydratable via `readFileLines()`. Only content indexed under the
-   * `chunking` option (or by `backfillChunks()`) is searchable. Requires
-   * the full-text-search setup (`enableFullTextSearch`).
+   * Vector search over the per-content embedding cache (filled by
+   * `indexChunkEmbeddings()`). Nearest-neighbor: always ranks something, so
+   * irrelevant queries return low-rank hits, not nothing. The query is
+   * embedded through the `embed` option (a single-item batch). Requires the
+   * vector setup (`enableVectorSearch`).
    */
-  async searchChunks(
+  async semanticSearch(
     query: string,
-    opts?: { path?: string; limit?: number },
+    opts?: SearchOptions,
+  ): Promise<ChunkSearchResult[]> {
+    const embedding = await this.embedOne(query);
+    return this.runChunkSearch(opts, (tx, versionId, searchOpts) =>
+      chunkSemanticSearch(tx, this.workspaceId, versionId, embedding, searchOpts),
+    );
+  }
+
+  /**
+   * The BM25 and vector rankings fused with reciprocal-rank fusion — an
+   * exact rare token and a synonym-only paraphrase each still surface, and
+   * chunks not yet embedded stay reachable through the lexical side.
+   * Requires both the full-text-search and vector setups.
+   */
+  async hybridSearch(
+    query: string,
+    opts?: SearchOptions,
+  ): Promise<ChunkSearchResult[]> {
+    const embedding = await this.embedOne(query);
+    return this.runChunkSearch(opts, (tx, versionId, searchOpts) =>
+      chunkHybridSearch(tx, this.workspaceId, versionId, query, embedding, searchOpts),
+    );
+  }
+
+  /** The shared wrapper: read guard, scope mapping, missing-schema stories. */
+  private async runChunkSearch(
+    opts: SearchOptions | undefined,
+    run: (
+      tx: SqlClient,
+      versionId: number,
+      searchOpts: ChunkSearchOpts,
+    ) => Promise<ChunkSearchResult[]>,
   ): Promise<ChunkSearchResult[]> {
     const scopePath = opts?.path ? normalizePath(opts.path) : "/";
     this.guardRead(scopePath);
@@ -1514,56 +1542,12 @@ export class PgFileSystem extends FsWriteOpsBase {
       const versionId = await this.getCurrentVersionId(tx);
       let results;
       try {
-        results = await chunkTextSearch(tx, this.workspaceId, versionId, query, {
+        results = await run(tx, versionId, {
           ...opts,
           path: internalScope,
           excludes: this.excludes,
           mounts: this.mounts,
         });
-      } catch (e) {
-        this.rethrowMissingChunkTable(e);
-      }
-      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
-    });
-  }
-
-  /**
-   * Hybrid chunk search: the BM25 and embedding rankings over
-   * `fs_blob_chunks`, fused with reciprocal-rank fusion, capped at
-   * `perFileCap` hits per file (default 3). The query embedding comes from
-   * the `embed` option, or — so a caller that only wired the indexing-side
-   * batch embedder isn't forced to configure the same model twice — from
-   * `embedChunks` with a single-item batch. Requires both the
-   * full-text-search setup and the vector setup (`fs_chunk_embeddings`,
-   * populated by `indexChunkEmbeddings()`); chunks not yet embedded are
-   * still reachable through the lexical side.
-   */
-  async searchChunksHybrid(
-    query: string,
-    opts?: { path?: string; limit?: number; perFileCap?: number },
-  ): Promise<ChunkSearchResult[]> {
-    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
-    this.guardRead(scopePath);
-    const internalScope = this.toInternalPath(scopePath);
-    const embedding = await this.embedQuery(query);
-    validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const versionId = await this.getCurrentVersionId(tx);
-      let results;
-      try {
-        results = await chunkHybridSearch(
-          tx,
-          this.workspaceId,
-          versionId,
-          query,
-          embedding,
-          {
-            ...opts,
-            path: internalScope,
-            excludes: this.excludes,
-            mounts: this.mounts,
-          },
-        );
       } catch (e) {
         if (
           e instanceof SqlError &&
@@ -1574,75 +1558,6 @@ export class PgFileSystem extends FsWriteOpsBase {
         }
         this.rethrowMissingChunkTable(e);
       }
-      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
-    });
-  }
-
-  /** Query-time embedding: prefer `embed`, fall back to the `embedChunks` batch DI. */
-  private async embedQuery(query: string): Promise<number[]> {
-    if (this.embed) return this.embed(query);
-    if (this.embedChunks) {
-      const vectors = await this.embedChunks([query]);
-      if (!Array.isArray(vectors) || vectors.length !== 1) {
-        throw new Error(
-          `embedChunks returned ${Array.isArray(vectors) ? vectors.length : "no"} vectors for 1 text`,
-        );
-      }
-      return vectors[0]!;
-    }
-    throw new Error(
-      "No embedding provider configured (set the `embed` or `embedChunks` option)",
-    );
-  }
-
-  async semanticSearch(
-    query: string,
-    opts?: { path?: string; limit?: number },
-  ): Promise<SearchResult[]> {
-    if (!this.embed) throw new Error("No embedding provider configured");
-    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
-    this.guardRead(scopePath);
-    const internalScope = this.toInternalPath(scopePath);
-    const embedding = await this.embed(query);
-    validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const versionId = await this.getCurrentVersionId(tx);
-      const results = await semanticSearch(
-        tx,
-        this.workspaceId,
-        versionId,
-        embedding,
-        { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
-      );
-      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
-    });
-  }
-
-  async hybridSearch(
-    query: string,
-    opts?: {
-      path?: string;
-      textWeight?: number;
-      vectorWeight?: number;
-      limit?: number;
-    },
-  ): Promise<SearchResult[]> {
-    if (!this.embed) throw new Error("No embedding provider configured");
-    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
-    this.guardRead(scopePath);
-    const internalScope = this.toInternalPath(scopePath);
-    const embedding = await this.embed(query);
-    validateEmbedding(embedding, this.embeddingDimensions);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const versionId = await this.getCurrentVersionId(tx);
-      const results = await hybridSearch(
-        tx,
-        this.workspaceId,
-        versionId,
-        query,
-        embedding,
-        { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
-      );
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }

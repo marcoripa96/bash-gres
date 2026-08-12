@@ -11,7 +11,7 @@ export {
   type DirentEntry,
   type DirentStatEntry,
   type WalkEntry,
-  type SearchResult,
+  type SearchOptions,
   type MkdirOptions,
   type VersionedDirectoryOptions,
   type RmOptions,

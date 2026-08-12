@@ -179,11 +179,6 @@ CREATE INDEX IF NOT EXISTS idx_fs_versions_parent
 `;
 
 const FTS_INDEX_DDL = `
-CREATE INDEX IF NOT EXISTS idx_fs_blobs_content_bm25
-  ON fs_blobs USING bm25 (content)
-  WITH (text_config = 'english')
-  WHERE content IS NOT NULL AND binary_data IS NULL;
-
 CREATE INDEX IF NOT EXISTS idx_fs_blob_chunks_content_bm25
   ON fs_blob_chunks USING bm25 (content)
   WITH (text_config = 'english');
@@ -209,16 +204,6 @@ END $$;
 
 function vectorDDL(dimensions: number): string {
   return `
-DO $$ BEGIN
-  ALTER TABLE fs_blobs ADD COLUMN embedding vector(${dimensions});
-EXCEPTION WHEN duplicate_column THEN
-  NULL;
-END $$;
-
-CREATE INDEX IF NOT EXISTS idx_fs_blobs_embedding ON fs_blobs
-  USING hnsw (embedding vector_cosine_ops)
-  WITH (m = 16, ef_construction = 64);
-
 -- Per-content embedding cache for chunk-level semantic search. Keyed by the
 -- chunk content hash and deliberately WITHOUT an FK to fs_blob_chunks: the
 -- cache outlives its chunk rows, so re-crawled or reverted content still
