@@ -55,7 +55,7 @@ await bash.exec("echo hello > /file.txt");
 
 ## Database
 
-- **Tables**: `fs_version_roots`, `fs_versions`, `version_ancestors`, `fs_entries`, `fs_blobs`, `fs_blob_chunks` (opt-in chunk-level index; FK-cascades with its blob; searched via `searchChunks()` when FTS is on)
+- **Tables**: `fs_version_roots`, `fs_versions`, `version_ancestors`, `fs_entries`, `fs_blobs`, `fs_blob_chunks` (opt-in chunk-level index; FK-cascades with its blob; searched via `searchChunks()` when FTS is on), `fs_chunk_embeddings` (vector-search only: per-content_hash embedding cache filled by `indexChunkEmbeddings()`; no FK — outlives its chunk rows by design)
 - **Extensions**: `ltree`, `pg_textsearch` (v1.0.0), optionally `pgvector`
 - **Indexes**: GiST on ltree paths, version-root label uniqueness, ancestor closure depth/reverse indexes, blob hash, optional BM25/HNSW
 - **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set via `SET LOCAL` in every transaction

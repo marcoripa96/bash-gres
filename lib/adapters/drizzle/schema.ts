@@ -41,10 +41,12 @@ export interface BashGresSchema {
 }
 
 /** The schema when vector search is on: `fs_blobs` carries the `embedding`
- *  column, concretely typed. */
+ *  column, and the `fs_chunk_embeddings` cache table exists, both concretely
+ *  typed. */
 export interface BashGresSchemaWithVector
   extends Omit<BashGresSchema, "fsBlobs"> {
   fsBlobs: ReturnType<typeof buildBlobsWithEmbedding>;
+  fsChunkEmbeddings: ReturnType<typeof buildChunkEmbeddings>;
 }
 
 function buildVersionRoots() {
@@ -242,6 +244,32 @@ function buildBlobChunks(options: SchemaOptions) {
   );
 }
 
+// Per-content embedding cache for chunk-level semantic search. Deliberately
+// no FK to fs_blob_chunks — the cache outlives its chunk rows (see
+// lib/core/setup.ts for the semantics).
+function buildChunkEmbeddings(embeddingDimensions: number) {
+  return pgTable(
+    "fs_chunk_embeddings",
+    {
+      workspaceId: text("workspace_id").notNull(),
+      contentHash: byteaType("content_hash").notNull(),
+      embedding: vector("embedding", {
+        dimensions: embeddingDimensions,
+      }).notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      primaryKey({ columns: [table.workspaceId, table.contentHash] }),
+      index("idx_fs_chunk_embeddings_hnsw").using(
+        "hnsw",
+        table.embedding.op("vector_cosine_ops"),
+      ),
+    ],
+  );
+}
+
 function buildEntries() {
   return pgTable(
     "fs_entries",
@@ -294,15 +322,19 @@ export function createSchema(
     );
   }
 
-  return {
+  const base = {
     fsVersionRoots: buildVersionRoots(),
     fsVersions: buildVersions(),
     versionAncestors: buildAncestors(),
-    fsBlobs:
-      enableVectorSearch && embeddingDimensions
-        ? buildBlobsWithEmbedding(options, embeddingDimensions)
-        : buildBlobs(options),
     fsEntries: buildEntries(),
     fsBlobChunks: buildBlobChunks(options),
   };
+  if (enableVectorSearch && embeddingDimensions) {
+    return {
+      ...base,
+      fsBlobs: buildBlobsWithEmbedding(options, embeddingDimensions),
+      fsChunkEmbeddings: buildChunkEmbeddings(embeddingDimensions),
+    };
+  }
+  return { ...base, fsBlobs: buildBlobs(options) };
 }

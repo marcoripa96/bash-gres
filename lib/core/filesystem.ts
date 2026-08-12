@@ -15,8 +15,9 @@ import type {
   PgFileSystemOptions,
   BlobChunk,
   BackfillChunksResult,
+  IndexChunkEmbeddingsResult,
 } from "./types.js";
-import { FsError } from "./types.js";
+import { FsError, SqlError } from "./types.js";
 import { chunkMarkdown } from "./chunking.js";
 import {
   pathToLtree,
@@ -660,6 +661,113 @@ export class PgFileSystem extends FsWriteOpsBase {
       }
       return { blobs: r.rows.length, chunks };
     });
+  }
+
+  /**
+   * Embed every distinct chunk content in this workspace that misses the
+   * per-content embedding cache (`fs_chunk_embeddings`), in batches through
+   * the injected `embedChunks`. Content-addressed: an edit to one section of
+   * a ten-section page costs one embedding call — the other nine cache-hit,
+   * as does identical content anywhere else in the workspace. Safe to
+   * re-run; webble runs it post-crawl, before branch promotion.
+   */
+  async indexChunkEmbeddings(): Promise<IndexChunkEmbeddingsResult> {
+    const embedBatch = this.embedChunks;
+    if (!embedBatch) {
+      throw new Error(
+        "indexChunkEmbeddings requires the `embedChunks` option (batch embedder)",
+      );
+    }
+    if (!this.permissions.write) {
+      throw new FsError("EPERM", "read-only file system", "/");
+    }
+
+    // Read the misses up front instead of holding one transaction across
+    // the embedder's network calls; the cache is append-only and inserts
+    // use ON CONFLICT DO NOTHING, so concurrent passes are safe.
+    const { total, misses } = await this.withReadOnlyWorkspace(async (tx) => {
+      try {
+        const totalRow = await tx.query<{ count: number | string }>(
+          `SELECT COUNT(DISTINCT content_hash) AS count
+           FROM fs_blob_chunks WHERE workspace_id = $1`,
+          [this.workspaceId],
+        );
+        const missRows = await tx.query<{
+          content_hash: Uint8Array;
+          content: string;
+        }>(
+          `SELECT DISTINCT ON (c.content_hash) c.content_hash, c.content
+           FROM fs_blob_chunks c
+           WHERE c.workspace_id = $1
+             AND NOT EXISTS (
+               SELECT 1 FROM fs_chunk_embeddings e
+               WHERE e.workspace_id = $1 AND e.content_hash = c.content_hash
+             )
+           ORDER BY c.content_hash`,
+          [this.workspaceId],
+        );
+        return {
+          total: Number(totalRow.rows[0]?.count ?? 0),
+          misses: missRows.rows,
+        };
+      } catch (e) {
+        this.rethrowMissingEmbeddingTable(e);
+      }
+    });
+
+    const BATCH = 64;
+    let embedded = 0;
+    for (let i = 0; i < misses.length; i += BATCH) {
+      const batch = misses.slice(i, i + BATCH);
+      const vectors = await embedBatch(batch.map((m) => m.content));
+      if (!Array.isArray(vectors) || vectors.length !== batch.length) {
+        throw new Error(
+          `embedChunks returned ${Array.isArray(vectors) ? vectors.length : "no"} vectors for ${batch.length} texts`,
+        );
+      }
+      for (const vector of vectors) {
+        validateEmbedding(vector, this.embeddingDimensions);
+      }
+      const params: SqlParam[] = [this.workspaceId];
+      const tuples: string[] = [];
+      for (let j = 0; j < batch.length; j++) {
+        params.push(batch[j]!.content_hash, `[${vectors[j]!.join(",")}]`);
+        tuples.push(`($1, $${params.length - 1}, $${params.length}::vector)`);
+      }
+      await this.withWorkspace(async (tx) => {
+        try {
+          await tx.query(
+            `INSERT INTO fs_chunk_embeddings (workspace_id, content_hash, embedding)
+             VALUES ${tuples.join(", ")}
+             ON CONFLICT (workspace_id, content_hash) DO NOTHING`,
+            params,
+          );
+        } catch (e) {
+          this.rethrowMissingEmbeddingTable(e);
+        }
+      });
+      embedded += batch.length;
+    }
+    return { chunks: total, cacheHits: total - misses.length, embedded };
+  }
+
+  /**
+   * Like `rethrowMissingChunkTable`, but for the embedding cache: the table
+   * only ships when setup() runs with vector search enabled.
+   */
+  private rethrowMissingEmbeddingTable(e: unknown): never {
+    if (
+      e instanceof SqlError &&
+      e.code === "42P01" &&
+      /fs_chunk_embeddings/.test(e.message)
+    ) {
+      throw new Error(
+        "the fs_chunk_embeddings table does not exist in this database — " +
+          "re-run setup() (idempotent) with enableVectorSearch: true and " +
+          "embeddingDimensions to migrate it in",
+      );
+    }
+    throw e;
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {

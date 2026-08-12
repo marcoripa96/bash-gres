@@ -322,6 +322,30 @@ const { content } = await fs.readFileLines(hits[0].path, {
 })
 ```
 
+**Embed** chunks for semantic search with an injected batch embedder. Vectors
+live in a per-content cache (`fs_chunk_embeddings`, keyed by the chunk's
+content hash) that only an explicit pass fills — never the write path — so
+you run it when it suits you (webble: post-crawl, before branch promotion):
+
+```ts
+const fs = new PgFileSystem({
+  db, workspaceId,
+  chunking: { volatileFrontmatterKeys: ["fetchedAt"] }, // keep re-crawls cache-stable
+  embedChunks: (texts) => myEmbeddingApi.batch(texts),  // one vector per text
+  embeddingDimensions: 1024,
+})
+await fs.indexChunkEmbeddings()
+// { chunks: 120, cacheHits: 118, embedded: 2 } — only changed sections embed
+```
+
+Requires `setup()` with `enableVectorSearch: true` + `embeddingDimensions`.
+The cache is content-addressed and has no FK to the chunk rows on purpose:
+identical sections anywhere in the workspace share one vector, and content
+that comes back after a sweep or revert still cache-hits. Keys listed in
+`volatileFrontmatterKeys` are stripped from the front-matter chunk's
+*indexed* content (line ranges and bodies stay exact), so a re-crawl that
+only bumps a timestamp re-embeds nothing.
+
 **Migrate** an existing deployment in two idempotent steps:
 
 1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).

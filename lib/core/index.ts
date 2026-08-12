@@ -43,6 +43,7 @@ export {
   type BlobChunk,
   type BackfillChunksResult,
   type ChunkSearchResult,
+  type IndexChunkEmbeddingsResult,
 } from "./types.js";
 export {
   chunkMarkdown,

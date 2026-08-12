@@ -14,8 +14,9 @@
  *    (document title > heading path) so a chunk that is just a price table
  *    still embeds/searches with its context. The prefix counts against the
  *    token budget (metadata-aware budgeting).
- *  - YAML front matter (`---` fenced block at line 1) becomes chunk 0 as-is:
- *    a whole-document signal chunk carrying title/summary/keyword fields.
+ *  - YAML front matter (`---` fenced block at line 1) becomes chunk 0 as-is
+ *    (minus any `volatileFrontmatterKeys` in the indexed content): a
+ *    whole-document signal chunk carrying title/summary/keyword fields.
  */
 
 export interface ChunkingOptions {
@@ -30,6 +31,15 @@ export interface ChunkingOptions {
    * heuristic; inject a real tokenizer for exact budgets.
    */
   estimateTokens?: (text: string) => number;
+  /**
+   * Top-level front-matter keys to strip from chunk 0's indexed `content`
+   * (the `body` and line range stay exact). For keys that change on every
+   * write without carrying meaning — crawl timestamps like `fetchedAt` —
+   * this keeps chunk 0's content hash stable, so embedding caches keyed by
+   * content survive re-crawls. A stripped key's indented continuation lines
+   * (multi-line values, lists) are stripped with it.
+   */
+  volatileFrontmatterKeys?: string[];
 }
 
 export interface MarkdownChunk {
@@ -44,7 +54,8 @@ export interface MarkdownChunk {
   headingPath: string | null;
   /** Exact slice of the source: lines `startLine..endLine` joined by `\n`. */
   body: string;
-  /** What gets indexed/embedded: the breadcrumb prefix + the body. */
+  /** What gets indexed/embedded: the breadcrumb prefix + the body (for the
+   *  front-matter chunk: the body minus any `volatileFrontmatterKeys`). */
   content: string;
 }
 
@@ -80,6 +91,35 @@ function unquote(raw: string): string {
     return s.slice(1, -1);
   }
   return s;
+}
+
+/**
+ * Rebuild the front-matter block (lines `0..close`, fences included) without
+ * the listed top-level keys. A stripped key's indented continuation lines go
+ * with it; any other top-level line (a new key, a comment) ends the strip.
+ */
+function stripFrontmatterKeys(
+  lines: string[],
+  close: number,
+  keys: string[],
+): string {
+  const kept: string[] = [];
+  let skipping = false;
+  for (let i = 0; i <= close; i++) {
+    const line = lines[i]!;
+    if (i === 0 || i === close) {
+      kept.push(line); // the --- fences
+      continue;
+    }
+    const key = /^([^\s:][^:]*)\s*:/.exec(line);
+    if (key) {
+      skipping = keys.includes(key[1]!.trim());
+    } else if (!/^[ \t]/.test(line)) {
+      skipping = false;
+    }
+    if (!skipping) kept.push(line);
+  }
+  return kept.join("\n");
 }
 
 /** Trim blank edge lines off a span; null when nothing remains. */
@@ -179,6 +219,14 @@ export function chunkMarkdown(
       // The block is small by construction; keep it whole even if an
       // estimator would split it — front matter torn apart is useless.
       push({ start: 0, end: close }, []);
+      const volatile = options.volatileFrontmatterKeys;
+      if (volatile && volatile.length > 0) {
+        chunks[chunks.length - 1]!.content = stripFrontmatterKeys(
+          lines,
+          close,
+          volatile,
+        );
+      }
       bodyStart = close + 1;
     }
   }

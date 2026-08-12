@@ -375,6 +375,14 @@ export interface PgFileSystemOptions {
   embed?: (text: string) => Promise<number[]>;
   embeddingDimensions?: number;
   /**
+   * Batch embedder for the chunk-level index, used only by the explicit
+   * `indexChunkEmbeddings()` pass (never by the write path). Receives the
+   * indexed `content` of chunks that miss the per-content embedding cache
+   * and must return one vector per input, in order. Distinct from `embed`,
+   * the blob-level single-text embedder.
+   */
+  embedChunks?: (texts: string[]) => Promise<number[][]>;
+  /**
    * Maintain the chunk-level search index (`fs_blob_chunks`): every text file
    * write also stores its markdown-aware section chunks, keyed by the blob
    * hash — rewriting unchanged content costs one existence probe, never a
@@ -419,4 +427,15 @@ export interface BackfillChunksResult {
   blobs: number;
   /** Chunk rows written for them. */
   chunks: number;
+}
+
+/** What `indexChunkEmbeddings()` did. Counts are distinct chunk contents
+ *  (by content hash), not chunk rows — duplicate sections share a vector. */
+export interface IndexChunkEmbeddingsResult {
+  /** Distinct chunk contents referenced in this workspace. */
+  chunks: number;
+  /** Contents that already had a cached embedding — not re-embedded. */
+  cacheHits: number;
+  /** Contents newly embedded (and cached) by this pass. */
+  embedded: number;
 }

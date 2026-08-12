@@ -60,7 +60,11 @@ EXCEPTION WHEN duplicate_object THEN
 END $$;`);
 
   if (enableRLS) {
-    for (const table of RLS_TABLES) {
+    // fs_chunk_embeddings only exists when vector search is on.
+    const tables = enableVectorSearch
+      ? [...RLS_TABLES, "fs_chunk_embeddings"]
+      : RLS_TABLES;
+    for (const table of tables) {
       parts.push(`
 ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ${table} FORCE ROW LEVEL SECURITY;
