@@ -62,7 +62,7 @@ function snippet(hit: ChunkSearchResult): string {
   const line = body
     .split("\n")
     .map((l) => l.trim())
-    .find((l) => l.length > 0 && !l.startsWith("#"));
+    .find((l) => l.length > 0 && !l.startsWith("#") && l !== "---");
   if (!line) return "";
   return line.length > SNIPPET_MAX ? line.slice(0, SNIPPET_MAX - 1) + "…" : line;
 }
