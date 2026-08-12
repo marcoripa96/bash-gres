@@ -11,6 +11,7 @@ import type {
   ReadFileLinesOptions,
   ReadFileLinesResult,
   SearchResult,
+  ChunkSearchResult,
   PgFileSystemOptions,
   BlobChunk,
   BackfillChunksResult,
@@ -26,6 +27,7 @@ import {
 } from "./path-encoding.js";
 import {
   fullTextSearch,
+  chunkTextSearch,
   semanticSearch,
   hybridSearch,
   validateEmbedding,
@@ -1381,6 +1383,37 @@ export class PgFileSystem extends FsWriteOpsBase {
         query,
         { ...opts, path: internalScope, excludes: this.excludes, mounts: this.mounts },
       );
+      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
+    });
+  }
+
+  /**
+   * BM25 search over the chunk-level index (`fs_blob_chunks`): hits are
+   * sections, not files, each addressable as `path:startLine-endLine` and
+   * hydratable via `readFileLines()`. Only content indexed under the
+   * `chunking` option (or by `backfillChunks()`) is searchable. Requires
+   * the full-text-search setup (`enableFullTextSearch`).
+   */
+  async searchChunks(
+    query: string,
+    opts?: { path?: string; limit?: number },
+  ): Promise<ChunkSearchResult[]> {
+    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopePath);
+    const internalScope = this.toInternalPath(scopePath);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
+      let results;
+      try {
+        results = await chunkTextSearch(tx, this.workspaceId, versionId, query, {
+          ...opts,
+          path: internalScope,
+          excludes: this.excludes,
+          mounts: this.mounts,
+        });
+      } catch (e) {
+        this.rethrowMissingChunkTable(e);
+      }
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
   }

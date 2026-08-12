@@ -42,6 +42,7 @@ export {
   type WorkspaceUsageOptions,
   type BlobChunk,
   type BackfillChunksResult,
+  type ChunkSearchResult,
 } from "./types.js";
 export {
   chunkMarkdown,

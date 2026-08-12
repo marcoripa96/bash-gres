@@ -183,6 +183,10 @@ CREATE INDEX IF NOT EXISTS idx_fs_blobs_content_bm25
   ON fs_blobs USING bm25 (content)
   WITH (text_config = 'english')
   WHERE content IS NOT NULL AND binary_data IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_fs_blob_chunks_content_bm25
+  ON fs_blob_chunks USING bm25 (content)
+  WITH (text_config = 'english');
 `;
 
 function rlsDdl(table: string): string {
