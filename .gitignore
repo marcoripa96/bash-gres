@@ -20,4 +20,4 @@ Thumbs.db
 *.swp
 *.swo
 
-content/
+content/.kanby/
