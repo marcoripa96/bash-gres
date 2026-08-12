@@ -1,4 +1,5 @@
 import { CodeBlock } from "@/components/code-block";
+import { CopyButton } from "@/components/copy-button";
 
 const AGENT_PROMPT = `You are upgrading a host project from bash-gres 2.x to bash-gres 3.0.
 The upgrade has two breaking API changes, one additive database migration,
@@ -221,8 +222,8 @@ embed: async (texts) => {
         </h2>
         <p className="text-sm text-muted-foreground leading-relaxed">
           Enable{" "}
-          <code className="font-mono text-foreground/80">chunking</code> on
-          your instances, then run two idempotent passes once per workspace.
+          <code className="font-mono text-foreground/80">chunking</code>{" "}
+          on your instances, then run two idempotent passes once per workspace.
           Both scope to the handle&apos;s current version:
         </p>
         <CodeBlock
@@ -234,9 +235,12 @@ await fs.indexChunkEmbeddings()  // fill the vector cache (skip if BM25-only)`}
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold tracking-tight">
-          Agent Upgrade Prompt
-        </h2>
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="text-xl font-semibold tracking-tight">
+            Agent Upgrade Prompt
+          </h2>
+          <CopyButton text={AGENT_PROMPT} label="Copy prompt" />
+        </div>
         <p className="text-sm text-muted-foreground leading-relaxed">
           Upgrading with a coding agent? Copy this prompt — it is
           self-contained and walks the agent through the whole migration,

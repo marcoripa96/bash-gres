@@ -65,7 +65,8 @@ const result = await bash.exec("cat /project/src/index.ts")
           </a>{" "}
           inside the session. It dispatches on the handle: hybrid search when
           the filesystem has an{" "}
-          <code className="font-mono text-foreground/80">embed</code> option,
+          <code className="font-mono text-foreground/80">embed</code>{" "}
+          option,
           BM25-only otherwise. Output is grep-style — one hit per line, exit
           1 when nothing matches — and the line ranges hydrate with the
           session&apos;s own tools.
@@ -85,8 +86,8 @@ await bash.exec("sed -n 12,34p /docs/shipping.md") // hydrate the hit`}
           <code className="font-mono text-foreground/80">
             semgrep [-k N] &quot;query&quot; [path]
           </code>{" "}
-          — <code className="font-mono text-foreground/80">-k</code> caps the
-          hits (default 5), the optional path scopes the search and resolves
+          — <code className="font-mono text-foreground/80">-k</code>{" "}
+          caps the hits (default 5), the optional path scopes the search and resolves
           against the session&apos;s working directory.
         </p>
       </section>
