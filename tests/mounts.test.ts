@@ -316,9 +316,9 @@ describe.each(TEST_ADAPTERS)("native mounts [%s]", (_name, factory) => {
     expect(await work.exists("/clienti/acme/revert-visible.md")).toBe(false);
   });
 
-  // Note: textSearch/semanticSearch get the same `buildMountClause` scoping as
-  // glob/walk, but the test harness builds the schema with
-  // enableFullTextSearch:false (no BM25 index), so they can't be exercised here.
+  // Note: textSearch/semanticSearch mount scoping is covered in
+  // text-search.test.ts and chunk-search.test.ts, which layer the FTS setup
+  // on top of the FTS-off global setup.
 
   it("respects an expanded set of allowed clients", async () => {
     const wide = viewForU1(client, ["acme", "globex"]);

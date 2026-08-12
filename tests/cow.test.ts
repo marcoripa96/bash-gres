@@ -931,6 +931,11 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
 
   describe("embedding deduplication (no-vector setup)", () => {
     it("does not call embed() when no embedding column exists", async () => {
+      // Guarantee the premise: other test files (text-search.test.ts) run
+      // setup() with enableVectorSearch and leave the column behind.
+      await client.query(
+        "ALTER TABLE fs_blobs DROP COLUMN IF EXISTS embedding",
+      );
       let calls = 0;
       const embed = async (_text: string): Promise<number[]> => {
         calls++;
