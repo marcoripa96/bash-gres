@@ -929,24 +929,20 @@ describe.each(TEST_ADAPTERS)("COW semantics [%s]", (_name, factory) => {
     });
   });
 
-  describe("embedding deduplication (no-vector setup)", () => {
-    it("does not call embed() when no embedding column exists", async () => {
-      // Guarantee the premise: other test files (text-search.test.ts) run
-      // setup() with enableVectorSearch and leave the column behind.
-      await client.query(
-        "ALTER TABLE fs_blobs DROP COLUMN IF EXISTS embedding",
-      );
+  describe("embedder never runs on write", () => {
+    it("writeFile never invokes the embed option (explicit-pass only)", async () => {
       let calls = 0;
-      const embed = async (_text: string): Promise<number[]> => {
+      const embed = async (texts: string[]): Promise<number[][]> => {
         calls++;
-        return [1, 0, 0, 0];
+        return texts.map(() => [1, 0, 0]);
       };
       const fs = new PgFileSystem({ db: client, workspaceId: WS, embed });
       await fs.init();
       await fs.writeFile("/a.txt", "hello");
       await fs.writeFile("/b.txt", "hello");
 
-      // No embedding column → embed never invoked; writes succeed; dedup holds.
+      // Embedding is indexChunkEmbeddings()'s job; writes stay embed-free
+      // (and content-addressed dedup holds).
       expect(calls).toBe(0);
       expect(await countBlobs(client, WS)).toBe(1);
     });

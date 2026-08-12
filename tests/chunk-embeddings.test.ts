@@ -31,7 +31,7 @@ function fakeEmbedder(dims = 3) {
   const calls: string[][] = [];
   return {
     calls,
-    embedChunks: async (texts: string[]): Promise<number[][]> => {
+    embed: async (texts: string[]): Promise<number[][]> => {
       calls.push(texts);
       return texts.map((t) => Array.from({ length: dims }, (_, i) => (t.length % (i + 3)) / 10));
     },
@@ -68,12 +68,12 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
   let client: SqlClient;
   let teardown: () => Promise<void>;
 
-  const makeFs = (embedChunks?: (texts: string[]) => Promise<number[][]>) =>
+  const makeFs = (embed?: (texts: string[]) => Promise<number[][]>) =>
     new PgFileSystem({
       db: client,
       workspaceId: WS,
       chunking: { volatileFrontmatterKeys: ["fetchedAt"] },
-      embedChunks,
+      embed,
       embeddingDimensions: 3,
     });
 
@@ -105,8 +105,8 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
   });
 
   it("embeds every distinct chunk content once, in one batch", async () => {
-    const { calls, embedChunks } = fakeEmbedder();
-    const fs = makeFs(embedChunks);
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
     await fs.init();
     await fs.writeFile("/a.md", PAGE("2026-01-01"));
 
@@ -121,8 +121,8 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
   });
 
   it("re-embeds only the edited section (the two-level dedup)", async () => {
-    const { calls, embedChunks } = fakeEmbedder();
-    const fs = makeFs(embedChunks);
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
     await fs.init();
     await fs.writeFile("/a.md", PAGE("2026-01-01"));
     const first = await fs.indexChunkEmbeddings();
@@ -140,8 +140,8 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
   });
 
   it("volatile front matter alone triggers no re-embedding (re-crawl case)", async () => {
-    const { calls, embedChunks } = fakeEmbedder();
-    const fs = makeFs(embedChunks);
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
     await fs.init();
     await fs.writeFile("/a.md", PAGE("2026-01-01"));
     await fs.indexChunkEmbeddings();
@@ -157,8 +157,8 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
   });
 
   it("identical sections in different files share one cached vector", async () => {
-    const { calls, embedChunks } = fakeEmbedder();
-    const fs = makeFs(embedChunks);
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
     await fs.init();
     const common = "## Common\n\nshared paragraph";
     await fs.writeFile("/a.md", `# T\n\n${common}\n\n## OnlyA\n\naaa`);
@@ -170,8 +170,8 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
   });
 
   it("is idempotent and survives losing the chunk rows (no FK by design)", async () => {
-    const { calls, embedChunks } = fakeEmbedder();
-    const fs = makeFs(embedChunks);
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
     await fs.init();
     await fs.writeFile("/a.md", PAGE("2026-01-01"));
     const first = await fs.indexChunkEmbeddings();
@@ -189,7 +189,7 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
     expect(await cacheRowCount(client, WS)).toBe(first.chunks);
 
     // The same content re-crawled re-chunks but never re-embeds.
-    const fs2 = makeFs(embedChunks);
+    const fs2 = makeFs(embed);
     await fs2.init();
     await fs2.writeFile("/a.md", PAGE("2026-02-02"));
     const after = await fs2.indexChunkEmbeddings();
@@ -205,7 +205,7 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
       [OTHER],
     );
     const a = fakeEmbedder();
-    const fs = makeFs(a.embedChunks);
+    const fs = makeFs(a.embed);
     await fs.init();
     await fs.writeFile("/a.md", PAGE("2026-01-01"));
     await fs.indexChunkEmbeddings();
@@ -215,7 +215,7 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
       db: client,
       workspaceId: OTHER,
       chunking: { volatileFrontmatterKeys: ["fetchedAt"] },
-      embedChunks: b.embedChunks,
+      embed: b.embed,
       embeddingDimensions: 3,
     });
     await other.init();
@@ -246,25 +246,25 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
 
   it("guards: requires the embedder, write permission, and the cache table", async () => {
     const none = makeFs(undefined);
-    await expect(none.indexChunkEmbeddings()).rejects.toThrow(/embedChunks/);
+    await expect(none.indexChunkEmbeddings()).rejects.toThrow(/embed/);
 
     const readonly = new PgFileSystem({
       db: client,
       workspaceId: WS,
-      embedChunks: async (t) => t.map(() => [0, 0, 0]),
+      embed: async (t) => t.map(() => [0, 0, 0]),
       permissions: { read: true, write: false },
     });
     await expect(readonly.indexChunkEmbeddings()).rejects.toThrow(
       /EPERM|read-only/,
     );
 
-    const fs = makeFs(fakeEmbedder().embedChunks);
+    const fs = makeFs(fakeEmbedder().embed);
     await fs.init();
     await fs.writeFile("/a.md", PAGE("2026-01-01"));
     const old = new PgFileSystem({
       db: missingEmbeddingTableClient(client),
       workspaceId: WS,
-      embedChunks: async (t) => t.map(() => [0, 0, 0]),
+      embed: async (t) => t.map(() => [0, 0, 0]),
     });
     await expect(old.indexChunkEmbeddings()).rejects.toThrow(
       /enableVectorSearch/,

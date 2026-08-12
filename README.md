@@ -268,37 +268,17 @@ const between = await fs.diffVersions(
 
 ## Search
 
-```ts
-// Full-text search (BM25)
-const results = await fs.textSearch("machine learning", {
-  path: "/docs",
-  limit: 20,
-})
+All search is **chunk-granular**: text files are indexed as markdown-aware
+**section chunks** (table `fs_blob_chunks`) — heading-bounded slices with
+1-indexed line ranges, a heading breadcrumb ("Title > Section"), and a token
+budget that fits embedding models. Hits are ranked sections, each addressable
+as `path:startLine-endLine` and hydratable via `readFileLines()`. Chunks are
+keyed by the blob hash, so unchanged content is never re-chunked — across
+rewrites, copies, versions, and branches. At most `perFileCap` hits per file
+(default 3) keep one long page from monopolizing the top-k.
 
-// Semantic search (pgvector)
-const similar = await fs.semanticSearch("how do LLMs work", {
-  path: "/docs",
-  limit: 10,
-})
-
-// Hybrid: BM25 + vector combined
-const hybrid = await fs.hybridSearch("transformer architecture", {
-  path: "/docs",
-  textWeight: 0.4,
-  vectorWeight: 0.6,
-})
-```
-
-### Chunk-level index
-
-Text files can additionally be indexed as markdown-aware **section chunks**
-(table `fs_blob_chunks`): heading-bounded slices with 1-indexed line ranges,
-a heading breadcrumb ("Title > Section"), and a token budget that fits
-embedding models. Chunks are keyed by the blob hash, so unchanged content is
-never re-chunked — across rewrites, copies, versions, and branches.
-
-**Enable** it per instance; it is off by default and existing databases are
-unaffected until you do:
+**Enable** chunking per instance; it is off by default and existing databases
+are unaffected until you do:
 
 ```ts
 const fs = new PgFileSystem({ db, workspaceId, chunking: true })
@@ -309,12 +289,11 @@ const chunks = await fs.readFileChunks("/docs/page.md")
 // [{ chunkIndex, startLine, endLine, headingPath, content }, ...]
 ```
 
-**Search** the chunk index with BM25 (needs the full-text-search setup —
-`enableFullTextSearch`, the default): hits are ranked sections, not files,
-each addressable as `path:startLine-endLine`:
+**Text search** with BM25 (needs the full-text-search setup —
+`enableFullTextSearch`, the default):
 
 ```ts
-const hits = await fs.searchChunks("shipping costs", { path: "/docs", limit: 10 })
+const hits = await fs.textSearch("shipping costs", { path: "/docs", limit: 10 })
 // [{ path, startLine, endLine, headingPath, content, rank }, ...]
 const { content } = await fs.readFileLines(hits[0].path, {
   offset: hits[0].startLine,
@@ -322,16 +301,18 @@ const { content } = await fs.readFileLines(hits[0].path, {
 })
 ```
 
-**Embed** chunks for semantic search with an injected batch embedder. Vectors
-live in a per-content cache (`fs_chunk_embeddings`, keyed by the chunk's
-content hash) that only an explicit pass fills — never the write path — so
-you run it when it suits you (webble: post-crawl, before branch promotion):
+**Embed** chunks with the injected batch embedder — the one `embed` option
+serves the indexing pass and (as single-item batches) query embedding.
+Vectors live in a per-content cache (`fs_chunk_embeddings`, keyed by the
+chunk's content hash) that only an explicit pass fills — never the write
+path — so you run it when it suits you (webble: post-crawl, before branch
+promotion):
 
 ```ts
 const fs = new PgFileSystem({
   db, workspaceId,
   chunking: { volatileFrontmatterKeys: ["fetchedAt"] }, // keep re-crawls cache-stable
-  embedChunks: (texts) => myEmbeddingApi.batch(texts),  // one vector per text
+  embed: (texts) => myEmbeddingApi.batch(texts),        // one vector per text
   embeddingDimensions: 1024,
 })
 await fs.indexChunkEmbeddings()
@@ -345,6 +326,26 @@ that comes back after a sweep or revert still cache-hits. Keys listed in
 `volatileFrontmatterKeys` are stripped from the front-matter chunk's
 *indexed* content (line ranges and bodies stay exact), so a re-crawl that
 only bumps a timestamp re-embeds nothing.
+
+**Semantic search** ranks the embedded chunks by cosine similarity.
+Nearest-neighbor: it always ranks something, so irrelevant queries return
+low-rank hits, not nothing — and chunks not yet embedded are invisible to it:
+
+```ts
+const similar = await fs.semanticSearch("how do refunds work", { limit: 10 })
+```
+
+**Hybrid search** fuses both signals (needs the full-text-search *and*
+vector setups): the BM25 and embedding rankings are combined with
+reciprocal-rank fusion — rank-based, not score-based, because BM25 scores
+and cosine similarities aren't on comparable scales — so an exact rare
+token and a synonym-only paraphrase each still surface, and chunks without
+a cached embedding stay reachable through the lexical side:
+
+```ts
+const hits = await fs.hybridSearch("delivery options", { perFileCap: 2 })
+// same result shape as textSearch()/semanticSearch()
+```
 
 **Migrate** an existing deployment in two idempotent steps:
 

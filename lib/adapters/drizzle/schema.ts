@@ -40,12 +40,9 @@ export interface BashGresSchema {
   fsBlobChunks: ReturnType<typeof buildBlobChunks>;
 }
 
-/** The schema when vector search is on: `fs_blobs` carries the `embedding`
- *  column, and the `fs_chunk_embeddings` cache table exists, both concretely
- *  typed. */
-export interface BashGresSchemaWithVector
-  extends Omit<BashGresSchema, "fsBlobs"> {
-  fsBlobs: ReturnType<typeof buildBlobsWithEmbedding>;
+/** The schema when vector search is on: the `fs_chunk_embeddings` cache
+ *  table exists, concretely typed. */
+export interface BashGresSchemaWithVector extends BashGresSchema {
   fsChunkEmbeddings: ReturnType<typeof buildChunkEmbeddings>;
 }
 
@@ -130,78 +127,20 @@ function buildAncestors() {
   );
 }
 
-// The blob columns and indexes are shared by the two `fs_blobs` builders
-// below. Two separate builders — instead of one with a conditional spread —
-// keep each table's column set statically known: a conditional spread infers
-// `embedding` as an *optional* column, which violates Drizzle's
-// `Record<string, PgColumn>` table constraint and breaks `db.select()`/
-// `db.delete()` typing for every consumer of the schema.
-function blobColumns() {
-  return {
-    workspaceId: text("workspace_id").notNull(),
-    hash: byteaType("hash").notNull(),
-    content: text(),
-    binaryData: byteaType("binary_data"),
-    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull().default(0),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  };
-}
-
-function buildBlobs(options: SchemaOptions) {
-  const { enableFullTextSearch = true } = options;
-  return pgTable("fs_blobs", blobColumns(), (table) => {
-    const indexes: unknown[] = [
-      primaryKey({ columns: [table.workspaceId, table.hash] }),
-    ];
-    if (enableFullTextSearch) {
-      indexes.push(
-        index("idx_fs_blobs_content_bm25")
-          .using("bm25", table.content)
-          .with({ text_config: "english" })
-          .where(
-            sql`${table.content} IS NOT NULL AND ${table.binaryData} IS NULL`,
-          ),
-      );
-    }
-    return indexes as ReturnType<typeof index>[];
-  });
-}
-
-function buildBlobsWithEmbedding(
-  options: SchemaOptions,
-  embeddingDimensions: number,
-) {
-  const { enableFullTextSearch = true } = options;
+function buildBlobs() {
   return pgTable(
     "fs_blobs",
     {
-      ...blobColumns(),
-      embedding: vector("embedding", { dimensions: embeddingDimensions }),
+      workspaceId: text("workspace_id").notNull(),
+      hash: byteaType("hash").notNull(),
+      content: text(),
+      binaryData: byteaType("binary_data"),
+      sizeBytes: bigint("size_bytes", { mode: "number" }).notNull().default(0),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
     },
-    (table) => {
-      const indexes: unknown[] = [
-        primaryKey({ columns: [table.workspaceId, table.hash] }),
-      ];
-      if (enableFullTextSearch) {
-        indexes.push(
-          index("idx_fs_blobs_content_bm25")
-            .using("bm25", table.content)
-            .with({ text_config: "english" })
-            .where(
-              sql`${table.content} IS NOT NULL AND ${table.binaryData} IS NULL`,
-            ),
-        );
-      }
-      indexes.push(
-        index("idx_fs_blobs_embedding").using(
-          "hnsw",
-          table.embedding.op("vector_cosine_ops"),
-        ),
-      );
-      return indexes as ReturnType<typeof index>[];
-    },
+    (table) => [primaryKey({ columns: [table.workspaceId, table.hash] })],
   );
 }
 
@@ -326,15 +265,12 @@ export function createSchema(
     fsVersionRoots: buildVersionRoots(),
     fsVersions: buildVersions(),
     versionAncestors: buildAncestors(),
+    fsBlobs: buildBlobs(),
     fsEntries: buildEntries(),
     fsBlobChunks: buildBlobChunks(options),
   };
   if (enableVectorSearch && embeddingDimensions) {
-    return {
-      ...base,
-      fsBlobs: buildBlobsWithEmbedding(options, embeddingDimensions),
-      fsChunkEmbeddings: buildChunkEmbeddings(embeddingDimensions),
-    };
+    return { ...base, fsChunkEmbeddings: buildChunkEmbeddings(embeddingDimensions) };
   }
-  return { ...base, fsBlobs: buildBlobs(options) };
+  return base;
 }
