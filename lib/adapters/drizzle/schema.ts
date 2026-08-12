@@ -207,7 +207,8 @@ function buildBlobsWithEmbedding(
 // addressed like fs_blobs (see lib/core/setup.ts for the column semantics).
 // The FK to fs_blobs is declared in the core DDL only — this schema mirrors
 // tables for query typing, and no table here declares FKs.
-function buildBlobChunks() {
+function buildBlobChunks(options: SchemaOptions) {
+  const { enableFullTextSearch = true } = options;
   return pgTable(
     "fs_blob_chunks",
     {
@@ -223,11 +224,21 @@ function buildBlobChunks() {
         .notNull()
         .defaultNow(),
     },
-    (table) => [
-      primaryKey({
-        columns: [table.workspaceId, table.blobHash, table.chunkIndex],
-      }),
-    ],
+    (table) => {
+      const indexes: unknown[] = [
+        primaryKey({
+          columns: [table.workspaceId, table.blobHash, table.chunkIndex],
+        }),
+      ];
+      if (enableFullTextSearch) {
+        indexes.push(
+          index("idx_fs_blob_chunks_content_bm25")
+            .using("bm25", table.content)
+            .with({ text_config: "english" }),
+        );
+      }
+      return indexes as ReturnType<typeof index>[];
+    },
   );
 }
 
@@ -292,6 +303,6 @@ export function createSchema(
         ? buildBlobsWithEmbedding(options, embeddingDimensions)
         : buildBlobs(options),
     fsEntries: buildEntries(),
-    fsBlobChunks: buildBlobChunks(),
+    fsBlobChunks: buildBlobChunks(options),
   };
 }

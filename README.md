@@ -309,6 +309,19 @@ const chunks = await fs.readFileChunks("/docs/page.md")
 // [{ chunkIndex, startLine, endLine, headingPath, content }, ...]
 ```
 
+**Search** the chunk index with BM25 (needs the full-text-search setup —
+`enableFullTextSearch`, the default): hits are ranked sections, not files,
+each addressable as `path:startLine-endLine`:
+
+```ts
+const hits = await fs.searchChunks("shipping costs", { path: "/docs", limit: 10 })
+// [{ path, startLine, endLine, headingPath, content, rank }, ...]
+const { content } = await fs.readFileLines(hits[0].path, {
+  offset: hits[0].startLine,
+  limit: hits[0].endLine - hits[0].startLine + 1,
+})
+```
+
 **Migrate** an existing deployment in two idempotent steps:
 
 1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).

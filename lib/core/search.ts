@@ -1,4 +1,9 @@
-import type { SqlClient, SearchResult, SqlParam } from "./types.js";
+import type {
+  SqlClient,
+  SearchResult,
+  ChunkSearchResult,
+  SqlParam,
+} from "./types.js";
 import { pathToLtree, ltreeToPath, fileName } from "./path-encoding.js";
 import {
   emptyExcludes,
@@ -134,6 +139,104 @@ export async function fullTextSearch(
       rank: Number(r.rank),
     };
   });
+}
+
+/**
+ * Chunk-granular BM25 search at version V: same two-stage shape as
+ * `fullTextSearch`, but candidates are `fs_blob_chunks` rows, so lexical
+ * hits rank sections instead of whole files. A blob visible at several
+ * paths yields one hit per (path, chunk); a blob with several matching
+ * chunks yields one hit per chunk.
+ *
+ * Scoring uses the two-argument `to_bm25query(query, index_name)` form:
+ * the single-argument form errors whenever the planner does not pick a
+ * bm25 index scan (e.g. seq scan over a small table), while naming the
+ * index scores per-row on any plan. The index name is fixed by our own
+ * DDL. Non-matching rows score 0 and are filtered out.
+ */
+export async function chunkTextSearch(
+  client: SqlClient,
+  workspaceId: string,
+  versionId: number,
+  query: string,
+  opts?: SearchOpts,
+): Promise<ChunkSearchResult[]> {
+  const limit = clampLimit(opts?.limit);
+  const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
+  const fetchLimit = limit * VISIBILITY_OVERSAMPLE;
+
+  const baseParams: SqlParam[] = [
+    query,
+    workspaceId,
+    versionId,
+    scopeLtree,
+    fetchLimit,
+    limit,
+  ];
+  const exc = excludeWhereSql(
+    opts?.excludes ?? emptyExcludes(),
+    "e.path",
+    baseParams.length + 1,
+  );
+  const mnt = mountWhereSql(
+    opts?.mounts ?? emptyMounts(),
+    "e.path",
+    baseParams.length + 1 + exc.params.length,
+  );
+
+  const result = await client.query<{
+    path: string;
+    start_line: number;
+    end_line: number;
+    heading_path: string | null;
+    content: string;
+    rank: number;
+  }>(
+    `WITH scored AS (
+       SELECT c.blob_hash, c.start_line, c.end_line, c.heading_path,
+              c.content,
+              -(c.content <@> to_bm25query($1, 'idx_fs_blob_chunks_content_bm25')) AS rank
+       FROM fs_blob_chunks c
+       WHERE c.workspace_id = $2
+     ),
+     candidates AS (
+       SELECT * FROM scored
+       WHERE rank > 0
+       ORDER BY rank DESC
+       LIMIT $5
+     ),
+     visible AS (
+       SELECT DISTINCT ON (e.path)
+         e.path::text AS path,
+         e.blob_hash,
+         e.node_type
+       FROM fs_entries e
+       JOIN version_ancestors a
+         ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+       WHERE e.workspace_id = $2
+         AND a.descendant_id = $3
+         AND e.path <@ $4::ltree
+         AND ${exc.sql}
+         AND ${mnt.sql}
+       ORDER BY e.path, a.depth ASC
+     )
+     SELECT v.path, c.start_line, c.end_line, c.heading_path, c.content, c.rank
+     FROM visible v
+     JOIN candidates c ON c.blob_hash = v.blob_hash
+     WHERE v.node_type = 'file'
+     ORDER BY c.rank DESC, v.path, c.start_line
+     LIMIT $6`,
+    [...baseParams, ...exc.params, ...mnt.params],
+  );
+
+  return result.rows.map((r) => ({
+    path: ltreeToPath(r.path),
+    startLine: Number(r.start_line),
+    endLine: Number(r.end_line),
+    headingPath: r.heading_path,
+    content: r.content,
+    rank: Number(r.rank),
+  }));
 }
 
 export async function semanticSearch(

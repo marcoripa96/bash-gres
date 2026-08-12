@@ -397,6 +397,22 @@ export interface BlobChunk {
   content: string;
 }
 
+/**
+ * One chunk-level search hit: a section of a visible file, addressable as
+ * `path:startLine-endLine` and hydratable via `readFileLines()`.
+ */
+export interface ChunkSearchResult {
+  path: string;
+  /** 1-indexed inclusive line range against the file's content. */
+  startLine: number;
+  endLine: number;
+  /** Breadcrumb of the enclosing headings ("Title > H2 > H3"), if any. */
+  headingPath: string | null;
+  /** The indexed text: breadcrumb prefix + the section body. */
+  content: string;
+  rank: number;
+}
+
 /** What `backfillChunks()` did. */
 export interface BackfillChunksResult {
   /** Text blobs that were missing chunks and got chunked. */
