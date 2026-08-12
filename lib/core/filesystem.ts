@@ -1513,6 +1513,16 @@ export class PgFileSystem extends FsWriteOpsBase {
   // long page from monopolizing the top-k.
 
   /**
+   * Whether an `embed` option was injected — `semanticSearch()`,
+   * `hybridSearch()` and `indexChunkEmbeddings()` work. Lets a host that
+   * receives a configured handle (e.g. the `semgrep` command factory) pick
+   * the strongest search the handle supports.
+   */
+  get hasEmbedder(): boolean {
+    return this.embed !== undefined;
+  }
+
+  /**
    * BM25 lexical search. Requires the full-text-search setup
    * (`enableFullTextSearch`).
    */
