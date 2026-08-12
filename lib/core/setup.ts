@@ -218,6 +218,24 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_fs_blobs_embedding ON fs_blobs
   USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
+
+-- Per-content embedding cache for chunk-level semantic search. Keyed by the
+-- chunk content hash and deliberately WITHOUT an FK to fs_blob_chunks: the
+-- cache outlives its chunk rows, so re-crawled or reverted content still
+-- cache-hits, and identical sections across pages share one vector (a
+-- single HNSW entry per unique content). Populated by an explicit
+-- indexChunkEmbeddings() pass, never by the write path.
+CREATE TABLE IF NOT EXISTS fs_chunk_embeddings (
+    workspace_id  text NOT NULL CHECK (length(workspace_id) > 0),
+    content_hash  bytea NOT NULL,
+    embedding     vector(${dimensions}) NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fs_chunk_embeddings_hnsw ON fs_chunk_embeddings
+  USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
 `;
 }
 
@@ -266,5 +284,10 @@ export async function setup(
 
   if (enableVectorSearch && embeddingDimensions) {
     await client.query(vectorDDL(embeddingDimensions));
+    if (enableRLS) {
+      // fs_chunk_embeddings only exists under vector search, so its RLS
+      // rides here instead of the main table loop.
+      await client.query(rlsDdl("fs_chunk_embeddings"));
+    }
   }
 }

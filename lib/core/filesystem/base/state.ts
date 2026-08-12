@@ -57,6 +57,7 @@ export class FsStateBase {
   protected maxCpNodes: number;
   protected statementTimeoutMs: number;
   protected embed?: (text: string) => Promise<number[]>;
+  protected embedChunks?: (texts: string[]) => Promise<number[][]>;
   protected embeddingDimensions?: number;
   /** Chunk-level index options; null when the `chunking` option is off. */
   protected chunking: ChunkingOptions | null;
@@ -145,6 +146,7 @@ export class FsStateBase {
     this.statementTimeoutMs =
       options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
     this.embed = options.embed;
+    this.embedChunks = options.embedChunks;
     this.embeddingDimensions = options.embeddingDimensions;
     this.chunking = options.chunking
       ? options.chunking === true

@@ -211,6 +211,58 @@ describe("chunkMarkdown", () => {
     expect(chunks[0]!.endLine).toBe(3);
   });
 
+  it("strips volatile front-matter keys from chunk 0's content, not its body", () => {
+    const text = [
+      "---",
+      'title: "Widget Co"',
+      "fetchedAt: 2026-08-12T09:00:00Z",
+      "keywords:",
+      "  - widgets",
+      "  - shipping",
+      "---",
+      "",
+      "Body.",
+    ].join("\n");
+
+    const [fm] = chunkMarkdown(text, {
+      volatileFrontmatterKeys: ["fetchedAt"],
+    });
+    expect(fm!.content).not.toContain("fetchedAt");
+    expect(fm!.content).toContain("Widget Co");
+    expect(fm!.content).toContain("- shipping"); // other keys untouched
+    // The body and line range still address the exact source slice.
+    expect(fm!.body).toContain("fetchedAt");
+    expect(fm!).toMatchObject({ startLine: 1, endLine: 7 });
+    expectExactSlices(text, [fm!]);
+  });
+
+  it("strips a volatile key's indented continuation lines with it", () => {
+    const text = [
+      "---",
+      "crawl:",
+      "  startedAt: now",
+      "  depth: 3",
+      "summary: stays",
+      "---",
+      "x",
+    ].join("\n");
+    const [fm] = chunkMarkdown(text, {
+      volatileFrontmatterKeys: ["crawl"],
+    });
+    expect(fm!.content).not.toContain("startedAt");
+    expect(fm!.content).not.toContain("depth");
+    expect(fm!.content).toContain("summary: stays");
+  });
+
+  it("keeps chunk 0's content hashable-stable across volatile-only changes", () => {
+    const page = (ts: string) =>
+      `---\ntitle: T\nfetchedAt: ${ts}\n---\n\nSame body.`;
+    const opts = { volatileFrontmatterKeys: ["fetchedAt"] };
+    const a = chunkMarkdown(page("2026-01-01"), opts);
+    const b = chunkMarkdown(page("2026-06-30"), opts);
+    expect(a.map((c) => c.content)).toEqual(b.map((c) => c.content));
+  });
+
   it("treats an unclosed front-matter fence as plain content", () => {
     const text = "---\ntitle: broken\nno close";
     const chunks = chunkMarkdown(text);
