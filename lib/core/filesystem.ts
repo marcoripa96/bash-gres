@@ -31,6 +31,7 @@ import {
   chunkSemanticSearch,
   chunkHybridSearch,
   validateEmbedding,
+  visibleEntriesSql,
   type ChunkSearchOpts,
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
@@ -616,10 +617,12 @@ export class PgFileSystem extends FsWriteOpsBase {
 
   /**
    * Chunk every text blob that predates the `chunking` option: blobs
-   * referenced by a file entry in any version of the workspace that have no
-   * chunk rows yet. Content-addressed, so it never re-chunks and is safe to
-   * re-run; runs in one transaction. Requires the `chunking` option, since
-   * the rows it writes must match what the write path would produce.
+   * visible at this instance's current version (the same depth-resolved
+   * projection the searches use — shadowed blobs and other versions' content
+   * don't count) that have no chunk rows yet. Honors the instance's
+   * excludes/mounts. Content-addressed, so it never re-chunks and is safe
+   * to re-run; runs in one transaction. Requires the `chunking` option,
+   * since the rows it writes must match what the write path would produce.
    */
   async backfillChunks(): Promise<BackfillChunksResult> {
     if (!this.chunking) {
@@ -631,24 +634,29 @@ export class PgFileSystem extends FsWriteOpsBase {
       throw new FsError("EPERM", "read-only file system", "/");
     }
     return this.withWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
+      const scopeLtree = pathToLtree(this.toInternalPath("/"), this.workspaceId);
+      const vis = visibleEntriesSql(this.excludes, this.mounts, 4);
       let r;
       try {
         r = await tx.query<{ hash: Uint8Array; content: string }>(
-          `SELECT b.hash, b.content
+          `WITH visible AS (
+             ${vis.sql}
+           )
+           SELECT b.hash, b.content
            FROM fs_blobs b
            WHERE b.workspace_id = $1
              AND b.content IS NOT NULL AND b.content <> ''
              AND b.binary_data IS NULL
              AND EXISTS (
-               SELECT 1 FROM fs_entries e
-               WHERE e.workspace_id = $1 AND e.blob_hash = b.hash
-                 AND e.node_type = 'file'
+               SELECT 1 FROM visible v
+               WHERE v.node_type = 'file' AND v.blob_hash = b.hash
              )
              AND NOT EXISTS (
                SELECT 1 FROM fs_blob_chunks c
                WHERE c.workspace_id = $1 AND c.blob_hash = b.hash
              )`,
-          [this.workspaceId],
+          [this.workspaceId, versionId, scopeLtree, ...vis.params],
         );
       } catch (e) {
         this.rethrowMissingChunkTable(e);
@@ -664,12 +672,17 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   /**
-   * Embed every distinct chunk content in this workspace that misses the
-   * per-content embedding cache (`fs_chunk_embeddings`), in batches through
-   * the injected `embed`. Content-addressed: an edit to one section of
-   * a ten-section page costs one embedding call — the other nine cache-hit,
-   * as does identical content anywhere else in the workspace. Safe to
-   * re-run; webble runs it post-crawl, before branch promotion.
+   * Embed every distinct chunk content visible at this instance's current
+   * version that misses the per-content embedding cache
+   * (`fs_chunk_embeddings`), in batches through the injected `embed`.
+   * Version-scoped like every other operation on the handle — the target
+   * flow is `fork("crawl")` → writes → `branch.indexChunkEmbeddings()` →
+   * `promoteTo("main")`, so main is fully indexed the moment it becomes
+   * visible and stale or abandoned versions never cost an embedding call.
+   * Honors the instance's excludes/mounts. Content-addressed on top: an
+   * edit to one section of a ten-section page costs one embedding call —
+   * the other nine cache-hit (the cache itself stays workspace-wide and
+   * append-only, which is what makes promotion free). Safe to re-run.
    */
   async indexChunkEmbeddings(): Promise<IndexChunkEmbeddingsResult> {
     const embedBatch = this.embed;
@@ -686,25 +699,44 @@ export class PgFileSystem extends FsWriteOpsBase {
     // the embedder's network calls; the cache is append-only and inserts
     // use ON CONFLICT DO NOTHING, so concurrent passes are safe.
     const { total, misses } = await this.withReadOnlyWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
+      const scopeLtree = pathToLtree(this.toInternalPath("/"), this.workspaceId);
+      const vis = visibleEntriesSql(this.excludes, this.mounts, 4);
+      const visParams = [this.workspaceId, versionId, scopeLtree, ...vis.params];
       try {
         const totalRow = await tx.query<{ count: number | string }>(
-          `SELECT COUNT(DISTINCT content_hash) AS count
-           FROM fs_blob_chunks WHERE workspace_id = $1`,
-          [this.workspaceId],
+          `WITH visible AS (
+             ${vis.sql}
+           )
+           SELECT COUNT(DISTINCT c.content_hash) AS count
+           FROM fs_blob_chunks c
+           WHERE c.workspace_id = $1
+             AND EXISTS (
+               SELECT 1 FROM visible v
+               WHERE v.node_type = 'file' AND v.blob_hash = c.blob_hash
+             )`,
+          visParams,
         );
         const missRows = await tx.query<{
           content_hash: Uint8Array;
           content: string;
         }>(
-          `SELECT DISTINCT ON (c.content_hash) c.content_hash, c.content
+          `WITH visible AS (
+             ${vis.sql}
+           )
+           SELECT DISTINCT ON (c.content_hash) c.content_hash, c.content
            FROM fs_blob_chunks c
            WHERE c.workspace_id = $1
+             AND EXISTS (
+               SELECT 1 FROM visible v
+               WHERE v.node_type = 'file' AND v.blob_hash = c.blob_hash
+             )
              AND NOT EXISTS (
-               SELECT 1 FROM fs_chunk_embeddings e
-               WHERE e.workspace_id = $1 AND e.content_hash = c.content_hash
+               SELECT 1 FROM fs_chunk_embeddings emb
+               WHERE emb.workspace_id = $1 AND emb.content_hash = c.content_hash
              )
            ORDER BY c.content_hash`,
-          [this.workspaceId],
+          visParams,
         );
         return {
           total: Number(totalRow.rows[0]?.count ?? 0),

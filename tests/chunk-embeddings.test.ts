@@ -132,8 +132,12 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
     calls.length = 0;
     const second = await fs.indexChunkEmbeddings();
 
+    // Version-scoped counts: the page still serves the same number of
+    // sections; all but the edited one cache-hit, and the replaced
+    // content (now invisible) no longer counts at all.
+    expect(second.chunks).toBe(first.chunks);
     expect(second.embedded).toBe(1);
-    expect(second.cacheHits).toBe(first.chunks);
+    expect(second.cacheHits).toBe(first.chunks - 1);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toHaveLength(1);
     expect(calls[0]![0]).toContain("Three hundred people.");
@@ -195,6 +199,91 @@ describe.each(TEST_ADAPTERS)("indexChunkEmbeddings [%s]", (_name, factory) => {
     const after = await fs2.indexChunkEmbeddings();
     expect(after.embedded).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  it("scopes to the handle's version: branch → index → promote", async () => {
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
+    await fs.init();
+    await fs.writeFile("/a.md", PAGE("2026-01-01"));
+    await fs.writeFile("/stale.md", "# Stale\n\nsuperseded on the branch");
+    await fs.indexChunkEmbeddings(); // main fully cached
+
+    const branch = await fs.fork("crawl");
+    await branch.writeFile("/stale.md", "# Fresh\n\nfresh crawl body");
+    await branch.writeFile("/new.md", "# New\n\nbrand new page");
+
+    calls.length = 0;
+    const res = await branch.indexChunkEmbeddings();
+    const sent = calls.flat();
+
+    // Only branch-visible misses cost a call; the blob the branch's
+    // /stale.md shadows lives on main only and must never be embedded.
+    expect(sent.some((t) => t.includes("fresh crawl body"))).toBe(true);
+    expect(sent.some((t) => t.includes("brand new page"))).toBe(true);
+    expect(sent.some((t) => t.includes("superseded"))).toBe(false);
+
+    // Counts describe the branch's version, not the workspace.
+    const aChunks = (await branch.readFileChunks("/a.md")).length;
+    const freshChunks = (await branch.readFileChunks("/stale.md")).length;
+    const newChunks = (await branch.readFileChunks("/new.md")).length;
+    expect(res).toEqual({
+      chunks: aChunks + freshChunks + newChunks,
+      cacheHits: aChunks, // unchanged-from-main content
+      embedded: freshChunks + newChunks,
+    });
+
+    // Promote: a fresh main handle is fully indexed the moment the new
+    // main becomes visible — zero misses, zero embedder calls.
+    await branch.promoteTo("main");
+    calls.length = 0;
+    const after = await makeFs(embed).indexChunkEmbeddings();
+    expect(after).toEqual({
+      chunks: res.chunks,
+      cacheHits: res.chunks,
+      embedded: 0,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("skips excluded and unmounted content (search will never surface it)", async () => {
+    const { calls, embed } = fakeEmbedder();
+    const fs = makeFs(embed);
+    await fs.init();
+    await fs.writeFile("/content/a.md", "# A\n\npublic body");
+    await fs.writeFile("/secret.md", "# S\n\nsecret notes");
+    const publicChunks = (await fs.readFileChunks("/content/a.md")).length;
+
+    const excluded = new PgFileSystem({
+      db: client,
+      workspaceId: WS,
+      chunking: { volatileFrontmatterKeys: ["fetchedAt"] },
+      embed,
+      embeddingDimensions: 3,
+      exclude: ["secret.md"],
+    });
+    const res = await excluded.indexChunkEmbeddings();
+    expect(calls.flat().some((t) => t.includes("secret notes"))).toBe(false);
+    expect(calls.flat().some((t) => t.includes("public body"))).toBe(true);
+    expect(res.chunks).toBe(publicChunks);
+
+    // Same through a mounted view.
+    calls.length = 0;
+    await client.query(
+      "DELETE FROM fs_chunk_embeddings WHERE workspace_id = $1",
+      [WS],
+    );
+    const mounted = new PgFileSystem({
+      db: client,
+      workspaceId: WS,
+      chunking: { volatileFrontmatterKeys: ["fetchedAt"] },
+      embed,
+      embeddingDimensions: 3,
+      mount: [{ path: "/content" }],
+    });
+    const res2 = await mounted.indexChunkEmbeddings();
+    expect(calls.flat().some((t) => t.includes("secret notes"))).toBe(false);
+    expect(res2.chunks).toBe(publicChunks);
   });
 
   it("isolates workspaces: the cache never leaks across them", async () => {
