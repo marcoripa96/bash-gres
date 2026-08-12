@@ -346,6 +346,21 @@ that comes back after a sweep or revert still cache-hits. Keys listed in
 *indexed* content (line ranges and bodies stay exact), so a re-crawl that
 only bumps a timestamp re-embeds nothing.
 
+**Fuse** both signals with `searchChunksHybrid` (needs the full-text-search
+*and* vector setups): the BM25 and embedding rankings are combined with
+reciprocal-rank fusion — rank-based, not score-based, because BM25 scores
+and cosine similarities aren't on comparable scales — so an exact rare
+token and a synonym-only paraphrase each still surface. At most
+`perFileCap` hits per file (default 3) keep one long page from
+monopolizing the top-k. The query is embedded via the `embed` option, or
+falling back to `embedChunks` with a single-item batch:
+
+```ts
+const hits = await fs.searchChunksHybrid("delivery options", { perFileCap: 2 })
+// same shape as searchChunks(); chunks without a cached embedding are
+// still reachable through the lexical side
+```
+
 **Migrate** an existing deployment in two idempotent steps:
 
 1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).

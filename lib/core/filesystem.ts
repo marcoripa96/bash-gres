@@ -29,6 +29,7 @@ import {
 import {
   fullTextSearch,
   chunkTextSearch,
+  chunkHybridSearch,
   semanticSearch,
   hybridSearch,
   validateEmbedding,
@@ -1524,6 +1525,74 @@ export class PgFileSystem extends FsWriteOpsBase {
       }
       return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
     });
+  }
+
+  /**
+   * Hybrid chunk search: the BM25 and embedding rankings over
+   * `fs_blob_chunks`, fused with reciprocal-rank fusion, capped at
+   * `perFileCap` hits per file (default 3). The query embedding comes from
+   * the `embed` option, or — so a caller that only wired the indexing-side
+   * batch embedder isn't forced to configure the same model twice — from
+   * `embedChunks` with a single-item batch. Requires both the
+   * full-text-search setup and the vector setup (`fs_chunk_embeddings`,
+   * populated by `indexChunkEmbeddings()`); chunks not yet embedded are
+   * still reachable through the lexical side.
+   */
+  async searchChunksHybrid(
+    query: string,
+    opts?: { path?: string; limit?: number; perFileCap?: number },
+  ): Promise<ChunkSearchResult[]> {
+    const scopePath = opts?.path ? normalizePath(opts.path) : "/";
+    this.guardRead(scopePath);
+    const internalScope = this.toInternalPath(scopePath);
+    const embedding = await this.embedQuery(query);
+    validateEmbedding(embedding, this.embeddingDimensions);
+    return this.withReadOnlyWorkspace(async (tx) => {
+      const versionId = await this.getCurrentVersionId(tx);
+      let results;
+      try {
+        results = await chunkHybridSearch(
+          tx,
+          this.workspaceId,
+          versionId,
+          query,
+          embedding,
+          {
+            ...opts,
+            path: internalScope,
+            excludes: this.excludes,
+            mounts: this.mounts,
+          },
+        );
+      } catch (e) {
+        if (
+          e instanceof SqlError &&
+          e.code === "42P01" &&
+          /fs_chunk_embeddings/.test(e.message)
+        ) {
+          this.rethrowMissingEmbeddingTable(e);
+        }
+        this.rethrowMissingChunkTable(e);
+      }
+      return results.map((r) => ({ ...r, path: this.toUserPath(r.path) }));
+    });
+  }
+
+  /** Query-time embedding: prefer `embed`, fall back to the `embedChunks` batch DI. */
+  private async embedQuery(query: string): Promise<number[]> {
+    if (this.embed) return this.embed(query);
+    if (this.embedChunks) {
+      const vectors = await this.embedChunks([query]);
+      if (!Array.isArray(vectors) || vectors.length !== 1) {
+        throw new Error(
+          `embedChunks returned ${Array.isArray(vectors) ? vectors.length : "no"} vectors for 1 text`,
+        );
+      }
+      return vectors[0]!;
+    }
+    throw new Error(
+      "No embedding provider configured (set the `embed` or `embedChunks` option)",
+    );
   }
 
   async semanticSearch(

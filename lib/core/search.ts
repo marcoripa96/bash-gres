@@ -20,6 +20,15 @@ import {
 const MAX_SEARCH_LIMIT = 100;
 const VISIBILITY_OVERSAMPLE = 4;
 
+// Reciprocal-rank fusion constant (Cormack et al.'s standard 60). Chunk
+// hybrid search fuses ranks, not scores: BM25 scores and cosine similarities
+// live on incomparable scales, and the two rankings come from different
+// tables with different coverage (a chunk may be unembedded, or lexically
+// unmatched) — rank fusion is scale-free and lets either signal carry a hit
+// the other side missed, where weighted score blending would drop it.
+const RRF_K = 60;
+const DEFAULT_PER_FILE_CAP = 3;
+
 // BM25 scoring must name the index that supplies the corpus statistics:
 // the single-argument to_bm25query() form only resolves the index when the
 // query string is an inline literal the planner can const-fold — with a
@@ -263,6 +272,162 @@ export async function chunkTextSearch(
      JOIN candidates c ON c.blob_hash = v.blob_hash
      WHERE v.node_type = 'file'
      ORDER BY c.rank DESC, v.path, c.start_line
+     LIMIT $6`,
+      [...baseParams, ...exc.params, ...mnt.params],
+    );
+  } catch (e) {
+    rethrowMissingBm25Index(e);
+  }
+
+  return result.rows.map((r) => ({
+    path: ltreeToPath(r.path),
+    startLine: Number(r.start_line),
+    endLine: Number(r.end_line),
+    headingPath: r.heading_path,
+    content: r.content,
+    rank: Number(r.rank),
+  }));
+}
+
+export interface ChunkHybridOpts extends SearchOpts {
+  /** Max hits per file path (default 3) so one long page can't monopolize the top-k. */
+  perFileCap?: number;
+}
+
+/**
+ * Hybrid chunk search at version V: the chunk BM25 ranking and the chunk
+ * vector ranking (chunk rows joined to the `fs_chunk_embeddings` cache via
+ * content hash), fused with reciprocal-rank fusion — see `RRF_K` for why
+ * ranks rather than weighted scores. Each signal is ranked to the oversample
+ * depth first, fused, then projected onto visible paths; a per-file cap is
+ * applied before the final limit. Chunks without a cached embedding still
+ * surface through the lexical side.
+ */
+export async function chunkHybridSearch(
+  client: SqlClient,
+  workspaceId: string,
+  versionId: number,
+  query: string,
+  embedding: number[],
+  opts?: ChunkHybridOpts,
+): Promise<ChunkSearchResult[]> {
+  const limit = clampLimit(opts?.limit);
+  const perFileCap = clampLimit(opts?.perFileCap ?? DEFAULT_PER_FILE_CAP);
+  const scopeLtree = pathToLtree(opts?.path ?? "/", workspaceId);
+  validateEmbedding(embedding);
+  const embeddingStr = `[${embedding.join(",")}]`;
+  const fetchLimit = limit * VISIBILITY_OVERSAMPLE;
+
+  const baseParams: SqlParam[] = [
+    query,
+    workspaceId,
+    versionId,
+    scopeLtree,
+    fetchLimit,
+    limit,
+    embeddingStr,
+    perFileCap,
+  ];
+  const exc = excludeWhereSql(
+    opts?.excludes ?? emptyExcludes(),
+    "e.path",
+    baseParams.length + 1,
+  );
+  const mnt = mountWhereSql(
+    opts?.mounts ?? emptyMounts(),
+    "e.path",
+    baseParams.length + 1 + exc.params.length,
+  );
+
+  let result;
+  try {
+    result = await client.query<{
+      path: string;
+      start_line: number;
+      end_line: number;
+      heading_path: string | null;
+      content: string;
+      rank: number;
+    }>(
+      `WITH text_scored AS (
+       SELECT c.blob_hash, c.chunk_index,
+              -(c.content <@> to_bm25query($1, '${CHUNK_BM25_INDEX}')) AS score
+       FROM fs_blob_chunks c
+       WHERE c.workspace_id = $2
+     ),
+     text_ranked AS (
+       SELECT blob_hash, chunk_index,
+              ROW_NUMBER() OVER (
+                ORDER BY score DESC, blob_hash, chunk_index
+              ) AS r
+       FROM text_scored
+       WHERE score > 0
+       ORDER BY r
+       LIMIT $5
+     ),
+     vector_ranked AS (
+       SELECT c.blob_hash, c.chunk_index,
+              ROW_NUMBER() OVER (
+                ORDER BY emb.embedding <=> $7::vector, c.blob_hash, c.chunk_index
+              ) AS r
+       FROM fs_blob_chunks c
+       JOIN fs_chunk_embeddings emb
+         ON emb.workspace_id = c.workspace_id
+        AND emb.content_hash = c.content_hash
+       WHERE c.workspace_id = $2
+       ORDER BY r
+       LIMIT $5
+     ),
+     fused AS (
+       SELECT COALESCE(t.blob_hash, s.blob_hash) AS blob_hash,
+              COALESCE(t.chunk_index, s.chunk_index) AS chunk_index,
+              COALESCE(1.0 / (${RRF_K} + t.r), 0) +
+              COALESCE(1.0 / (${RRF_K} + s.r), 0) AS rank
+       FROM text_ranked t
+       FULL JOIN vector_ranked s
+         ON s.blob_hash = t.blob_hash AND s.chunk_index = t.chunk_index
+     ),
+     candidates AS (
+       SELECT f.rank, c.blob_hash, c.start_line, c.end_line,
+              c.heading_path, c.content
+       FROM fused f
+       JOIN fs_blob_chunks c
+         ON c.workspace_id = $2
+        AND c.blob_hash = f.blob_hash
+        AND c.chunk_index = f.chunk_index
+       ORDER BY f.rank DESC, c.blob_hash, c.chunk_index
+       LIMIT $5
+     ),
+     visible AS (
+       SELECT DISTINCT ON (e.path)
+         e.path::text AS path,
+         e.blob_hash,
+         e.node_type
+       FROM fs_entries e
+       JOIN version_ancestors a
+         ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
+       WHERE e.workspace_id = $2
+         AND a.descendant_id = $3
+         AND e.path <@ $4::ltree
+         AND ${exc.sql}
+         AND ${mnt.sql}
+       ORDER BY e.path, a.depth ASC
+     ),
+     hits AS (
+       SELECT v.path, c.start_line, c.end_line, c.heading_path, c.content,
+              c.rank,
+              ROW_NUMBER() OVER (
+                PARTITION BY v.path
+                ORDER BY c.rank DESC, c.start_line
+              ) AS file_rank
+       FROM visible v
+       JOIN candidates c ON c.blob_hash = v.blob_hash
+       WHERE v.node_type = 'file'
+     )
+     SELECT path, start_line, end_line, heading_path, content, rank
+     FROM hits
+     WHERE file_rank <= $8
+     ORDER BY rank DESC, path, start_line
      LIMIT $6`,
       [...baseParams, ...exc.params, ...mnt.params],
     );
