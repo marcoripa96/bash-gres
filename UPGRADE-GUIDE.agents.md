@@ -85,8 +85,18 @@ against a migrated database.
 
 - **Native**: re-run `setup(client, { ...the same options })` once — it is
   idempotent and creates only what is missing.
-- **Drizzle**: the tables are in `createSchema()`; re-run
-  `drizzle-kit generate`, and re-run `generateMigrationSQL()` for RLS.
+- **Drizzle**, in this order:
+  1. If your schema file destructures specific tables from `createSchema()`,
+     add `fsBlobChunks` (and `fsChunkEmbeddings` with vector search) to the
+     exports first — otherwise `drizzle-kit generate` sees nothing new and
+     emits an empty migration.
+  2. Run `drizzle-kit generate` — this creates the table(s).
+  3. Paste the **entire** output of `generateMigrationSQL()` into a new
+     custom migration (`drizzle-kit generate --custom`), ordered after the
+     table-creating one (its FK/RLS statements reference `fs_blob_chunks`).
+     Every statement it emits is idempotent (`IF NOT EXISTS` / guarded `DO`
+     blocks), so no diffing against your existing custom migrations — the
+     already-applied statements no-op.
 
 ## Step 4 — enable chunking and index existing content
 

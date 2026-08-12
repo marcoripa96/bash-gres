@@ -40,8 +40,17 @@ New tables: fs_blob_chunks (chunk index) and fs_chunk_embeddings (vector
 cache). No existing table changes; older rows keep working.
 - Native setup() users: re-run setup(client, { ...same options }) once —
   it is idempotent and creates only what is missing.
-- Drizzle users: the tables are in createSchema(); re-run
-  drizzle-kit generate, and re-run generateMigrationSQL() for RLS.
+- Drizzle users, in this order:
+  1. If the schema file destructures specific tables from createSchema(),
+     add fsBlobChunks (and fsChunkEmbeddings with vector search) to the
+     exports first — otherwise drizzle-kit generate sees nothing new and
+     emits an empty migration.
+  2. Run drizzle-kit generate (creates the tables).
+  3. Paste the ENTIRE output of generateMigrationSQL() into a new custom
+     migration (drizzle-kit generate --custom), ordered after the
+     table-creating one. Its statements are all idempotent (IF NOT EXISTS /
+     guarded DO blocks) — no diffing against existing migrations, the
+     already-applied statements no-op.
 
 ## Step 4 — enable chunking and run the two passes once
 
@@ -219,18 +228,29 @@ embed: async (texts) => {
             fs_chunk_embeddings
           </code>{" "}
           (the vector cache) — and no longer touches the old blob-level
-          index. The migration is additive: re-run the idempotent{" "}
-          <code className="font-mono text-foreground/80">setup()</code>{" "}
-          (native), or re-run{" "}
+          index. The migration is additive, and older bash-gres versions keep
+          working against a migrated database. Native{" "}
+          <code className="font-mono text-foreground/80">setup()</code> users
+          just re-run it once — it is idempotent. Drizzle users: if your
+          schema file destructures specific tables from{" "}
+          <code className="font-mono text-foreground/80">createSchema()</code>
+          , add{" "}
+          <code className="font-mono text-foreground/80">fsBlobChunks</code>{" "}
+          (and{" "}
+          <code className="font-mono text-foreground/80">
+            fsChunkEmbeddings
+          </code>{" "}
+          with vector search) to the exports first — otherwise{" "}
           <code className="font-mono text-foreground/80">
             drizzle-kit generate
           </code>{" "}
-          plus{" "}
+          emits an empty migration. Then paste the <em>entire</em> output of{" "}
           <code className="font-mono text-foreground/80">
             generateMigrationSQL()
           </code>{" "}
-          (Drizzle). Older bash-gres versions keep working against a migrated
-          database.
+          into a new custom migration ordered after the table-creating one:
+          every statement it emits is idempotent, so the already-applied ones
+          no-op.
         </p>
       </section>
 
