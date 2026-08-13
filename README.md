@@ -412,6 +412,11 @@ npm run build          # compile to dist/
 
 Full documentation at [bashgres.com/docs](https://bashgres.com/docs).
 
+Upgrading from 2.x? See the [migration guide](https://bashgres.com/docs/migration) —
+or, if a coding agent is doing the upgrade, point it at
+[`UPGRADE-GUIDE.agents.md`](./UPGRADE-GUIDE.agents.md) (setting up fresh:
+[`SETUP-GUIDE.agents.md`](./SETUP-GUIDE.agents.md)).
+
 ## License
 
 [MIT](LICENSE)
