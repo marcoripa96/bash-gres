@@ -15,11 +15,15 @@ const RLS_TABLES = [
 
 /**
  * Returns SQL for a custom Drizzle migration covering what `createSchema()`
- * cannot express: extensions and RLS policies.
+ * cannot express: extensions and `FORCE ROW LEVEL SECURITY`.
  *
- * The tables and indexes are handled by the Drizzle schema (`createSchema()`),
- * so `drizzle-kit generate` picks those up automatically. This function
- * produces the SQL for everything else.
+ * Tables, indexes, the `fs_blob_chunks` FK and the `workspace_isolation` RLS
+ * policies are all declared by `createSchema()` nowadays, so `drizzle-kit
+ * generate` picks them up automatically (and `drizzle-kit push` no longer
+ * flags them as drift). Every statement here is idempotent, so projects whose
+ * migrations predate the in-schema declarations can keep this bootstrap
+ * as-is; it also remains the safety net for the FK and policies when the
+ * schema is used with `enableRLS: false`.
  *
  * @example
  * ```ts

@@ -372,8 +372,9 @@ await bash.exec('semgrep -k 3 "delivery options" /docs')
 **Migrate** an existing deployment in two idempotent steps:
 
 1. Re-run `setup(client)` — it creates `fs_blob_chunks` (no new extensions).
-   Drizzle users: re-run `drizzle-kit generate` (the table is in
-   `createSchema()`) plus `generateMigrationSQL()` for RLS and the blob FK.
+   Drizzle users: re-run `drizzle-kit generate` (the table, its blob FK and
+   its RLS policy are all in `createSchema()`) plus `generateMigrationSQL()`
+   for extensions and `FORCE ROW LEVEL SECURITY`.
 2. Index pre-existing content: `await fs.backfillChunks()` — chunks the
    blobs visible at the handle's version; content-addressed, safe to re-run.
 

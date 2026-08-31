@@ -8,6 +8,8 @@ import {
   customType,
   uniqueIndex,
   index,
+  foreignKey,
+  pgPolicy,
   primaryKey,
   vector,
 } from "drizzle-orm/pg-core";
@@ -29,6 +31,26 @@ export interface SchemaOptions {
   enableFullTextSearch?: boolean;
   enableVectorSearch?: boolean;
   embeddingDimensions?: number;
+  /**
+   * Declare the per-workspace `workspace_isolation` RLS policies on the
+   * schema objects themselves (default true, mirroring `setup()` and
+   * `generateMigrationSQL()`). With the policies in the schema, drizzle-kit
+   * sees them: `generate` emits them into migrations and `push` no longer
+   * proposes `DROP POLICY workspace_isolation` as spurious drift.
+   * `FORCE ROW LEVEL SECURITY` has no drizzle-orm API and still rides the
+   * `generateMigrationSQL()` custom migration.
+   */
+  enableRLS?: boolean;
+}
+
+/** The `workspace_isolation` policy every bash-gres table carries under RLS. */
+function workspaceIsolationPolicy() {
+  const expr = sql`workspace_id = current_setting('app.workspace_id', true)`;
+  return pgPolicy("workspace_isolation", {
+    for: "all",
+    using: expr,
+    withCheck: expr,
+  });
 }
 
 export interface BashGresSchema {
@@ -46,7 +68,7 @@ export interface BashGresSchemaWithVector extends BashGresSchema {
   fsChunkEmbeddings: ReturnType<typeof buildChunkEmbeddings>;
 }
 
-function buildVersionRoots() {
+function buildVersionRoots(enableRLS: boolean) {
   return pgTable(
     "fs_version_roots",
     {
@@ -64,13 +86,14 @@ function buildVersionRoots() {
       ),
       index("idx_fs_version_roots_path_gist").using(
         "gist",
-        sql`${table.path} gist_ltree_ops(siglen=124)`,
+        table.path.op("gist_ltree_ops(siglen=124)"),
       ),
+      ...(enableRLS ? [workspaceIsolationPolicy()] : []),
     ],
   );
 }
 
-function buildVersions() {
+function buildVersions(enableRLS: boolean) {
   return pgTable(
     "fs_versions",
     {
@@ -96,11 +119,12 @@ function buildVersions() {
         table.versionRootId,
         table.parentVersionId,
       ),
+      ...(enableRLS ? [workspaceIsolationPolicy()] : []),
     ],
   );
 }
 
-function buildAncestors() {
+function buildAncestors(enableRLS: boolean) {
   return pgTable(
     "version_ancestors",
     {
@@ -123,11 +147,12 @@ function buildAncestors() {
         table.workspaceId,
         table.ancestorId,
       ),
+      ...(enableRLS ? [workspaceIsolationPolicy()] : []),
     ],
   );
 }
 
-function buildBlobs() {
+function buildBlobs(enableRLS: boolean) {
   return pgTable(
     "fs_blobs",
     {
@@ -140,15 +165,22 @@ function buildBlobs() {
         .notNull()
         .defaultNow(),
     },
-    (table) => [primaryKey({ columns: [table.workspaceId, table.hash] })],
+    (table) => [
+      primaryKey({ columns: [table.workspaceId, table.hash] }),
+      ...(enableRLS ? [workspaceIsolationPolicy()] : []),
+    ],
   );
 }
 
 // Section-level slices of text blobs for chunk-granular search; content-
 // addressed like fs_blobs (see lib/core/setup.ts for the column semantics).
-// The FK to fs_blobs is declared in the core DDL only — this schema mirrors
-// tables for query typing, and no table here declares FKs.
-function buildBlobChunks(options: SchemaOptions) {
+// The FK to fs_blobs is declared here (same name as the core DDL, which stays
+// idempotent) so drizzle-kit sees it instead of flagging it as drift.
+function buildBlobChunks(
+  options: SchemaOptions,
+  fsBlobs: ReturnType<typeof buildBlobs>,
+  enableRLS: boolean,
+) {
   const { enableFullTextSearch = true } = options;
   return pgTable(
     "fs_blob_chunks",
@@ -170,6 +202,11 @@ function buildBlobChunks(options: SchemaOptions) {
         primaryKey({
           columns: [table.workspaceId, table.blobHash, table.chunkIndex],
         }),
+        foreignKey({
+          name: "fs_blob_chunks_blob_fkey",
+          columns: [table.workspaceId, table.blobHash],
+          foreignColumns: [fsBlobs.workspaceId, fsBlobs.hash],
+        }).onDelete("cascade"),
       ];
       if (enableFullTextSearch) {
         indexes.push(
@@ -177,6 +214,9 @@ function buildBlobChunks(options: SchemaOptions) {
             .using("bm25", table.content)
             .with({ text_config: "english" }),
         );
+      }
+      if (enableRLS) {
+        indexes.push(workspaceIsolationPolicy());
       }
       return indexes as ReturnType<typeof index>[];
     },
@@ -186,7 +226,7 @@ function buildBlobChunks(options: SchemaOptions) {
 // Per-content embedding cache for chunk-level semantic search. Deliberately
 // no FK to fs_blob_chunks — the cache outlives its chunk rows (see
 // lib/core/setup.ts for the semantics).
-function buildChunkEmbeddings(embeddingDimensions: number) {
+function buildChunkEmbeddings(embeddingDimensions: number, enableRLS: boolean) {
   return pgTable(
     "fs_chunk_embeddings",
     {
@@ -205,11 +245,12 @@ function buildChunkEmbeddings(embeddingDimensions: number) {
         "hnsw",
         table.embedding.op("vector_cosine_ops"),
       ),
+      ...(enableRLS ? [workspaceIsolationPolicy()] : []),
     ],
   );
 }
 
-function buildEntries() {
+function buildEntries(enableRLS: boolean) {
   return pgTable(
     "fs_entries",
     {
@@ -237,11 +278,12 @@ function buildEntries() {
       ),
       index("idx_fs_entries_path_gist").using(
         "gist",
-        sql`${table.path} gist_ltree_ops(siglen=124)`,
+        table.path.op("gist_ltree_ops(siglen=124)"),
       ),
       index("idx_fs_entries_blob_hash")
         .on(table.workspaceId, table.blobHash)
         .where(sql`${table.blobHash} IS NOT NULL`),
+      ...(enableRLS ? [workspaceIsolationPolicy()] : []),
     ],
   );
 }
@@ -253,7 +295,11 @@ export function createSchema(options?: SchemaOptions): BashGresSchema;
 export function createSchema(
   options: SchemaOptions = {},
 ): BashGresSchema | BashGresSchemaWithVector {
-  const { enableVectorSearch = false, embeddingDimensions } = options;
+  const {
+    enableVectorSearch = false,
+    embeddingDimensions,
+    enableRLS = true,
+  } = options;
 
   if (enableVectorSearch && !embeddingDimensions) {
     throw new Error(
@@ -261,16 +307,20 @@ export function createSchema(
     );
   }
 
+  const fsBlobs = buildBlobs(enableRLS);
   const base = {
-    fsVersionRoots: buildVersionRoots(),
-    fsVersions: buildVersions(),
-    versionAncestors: buildAncestors(),
-    fsBlobs: buildBlobs(),
-    fsEntries: buildEntries(),
-    fsBlobChunks: buildBlobChunks(options),
+    fsVersionRoots: buildVersionRoots(enableRLS),
+    fsVersions: buildVersions(enableRLS),
+    versionAncestors: buildAncestors(enableRLS),
+    fsBlobs,
+    fsEntries: buildEntries(enableRLS),
+    fsBlobChunks: buildBlobChunks(options, fsBlobs, enableRLS),
   };
   if (enableVectorSearch && embeddingDimensions) {
-    return { ...base, fsChunkEmbeddings: buildChunkEmbeddings(embeddingDimensions) };
+    return {
+      ...base,
+      fsChunkEmbeddings: buildChunkEmbeddings(embeddingDimensions, enableRLS),
+    };
   }
   return base;
 }
