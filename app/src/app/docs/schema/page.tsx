@@ -307,8 +307,19 @@ export const schema = createSchema({
           <code className="font-mono text-foreground/80">
             generateMigrationSQL()
           </code>{" "}
-          produces SQL for extensions and RLS policies that Drizzle can&apos;t
-          express. Paste it into a custom migration.
+          produces SQL for what Drizzle can&apos;t express: extensions and{" "}
+          <code className="font-mono text-foreground/80">
+            FORCE ROW LEVEL SECURITY
+          </code>
+          . The{" "}
+          <code className="font-mono text-foreground/80">
+            workspace_isolation
+          </code>{" "}
+          policies and the blob-chunks FK are declared by{" "}
+          <code className="font-mono text-foreground/80">createSchema()</code>{" "}
+          itself, so drizzle-kit generates (and diffs) them like any other
+          schema object. Paste the output into a custom migration — every
+          statement is idempotent.
         </p>
         <CodeBlock
           code={`import { generateMigrationSQL } from "bash-gres/drizzle"
@@ -322,16 +333,31 @@ const sql = generateMigrationSQL({
 console.log(sql)
 // CREATE EXTENSION IF NOT EXISTS ltree;
 // CREATE EXTENSION IF NOT EXISTS pg_textsearch;
-// ALTER TABLE fs_entries ENABLE ROW LEVEL SECURITY;
+// ALTER TABLE fs_entries FORCE ROW LEVEL SECURITY;
 // ...`}
         />
         <CodeBlock
           lang="bash"
-          code={`# Generate the table migration, then add a custom one for extensions + RLS
+          code={`# Generate the table migration, then add a custom one for extensions + FORCE RLS
 npx drizzle-kit generate
 npx drizzle-kit generate --custom
 npx drizzle-kit migrate`}
         />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Upgrading a project whose migrations predate the in-schema policies:
+          the first{" "}
+          <code className="font-mono text-foreground/80">
+            drizzle-kit generate
+          </code>{" "}
+          after the upgrade emits the policies and the blob FK your database
+          already has from the bootstrap migration. Delete those statements
+          from the generated file (keep the file itself — it updates the
+          snapshot) or skip the schema churn entirely with{" "}
+          <code className="font-mono text-foreground/80">
+            createSchema({"{ enableRLS: false }"})
+          </code>
+          .
+        </p>
       </section>
 
     </div>
