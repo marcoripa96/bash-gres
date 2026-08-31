@@ -344,19 +344,48 @@ npx drizzle-kit generate --custom
 npx drizzle-kit migrate`}
         />
         <p className="text-sm text-muted-foreground leading-relaxed">
-          Upgrading a project whose migrations predate the in-schema policies:
-          the first{" "}
+          Upgrading a project whose migrations predate the in-schema
+          declarations: the first{" "}
           <code className="font-mono text-foreground/80">
             drizzle-kit generate
           </code>{" "}
-          after the upgrade emits the policies and the blob FK your database
-          already has from the bootstrap migration. Delete those statements
-          from the generated file (keep the file itself — it updates the
-          snapshot) or skip the schema churn entirely with{" "}
+          after the upgrade emits a migration your bootstrapped database
+          largely already satisfies. Edit the generated file before applying —
+          keep the file itself, it updates the snapshot:
+        </p>
+        <ul className="text-sm text-muted-foreground leading-relaxed list-disc pl-5 space-y-1">
+          <li>
+            <strong className="text-foreground/80">Delete</strong> the{" "}
+            <code className="font-mono text-foreground/80">CREATE POLICY</code>{" "}
+            and{" "}
+            <code className="font-mono text-foreground/80">
+              ADD CONSTRAINT fs_blob_chunks_blob_fkey
+            </code>{" "}
+            statements: they fail on a database that already has them from the
+            bootstrap.
+          </li>
+          <li>
+            <strong className="text-foreground/80">Optionally delete</strong>{" "}
+            the gist index{" "}
+            <code className="font-mono text-foreground/80">DROP/CREATE</code>{" "}
+            pairs: the definition is identical (only the schema-side
+            declaration changed), so applying them just rebuilds the indexes
+            and blocks writes meanwhile.
+          </li>
+          <li>
+            The{" "}
+            <code className="font-mono text-foreground/80">
+              ENABLE ROW LEVEL SECURITY
+            </code>{" "}
+            statements are idempotent — safe to keep.
+          </li>
+        </ul>
+        <p className="text-sm text-muted-foreground leading-relaxed">
           <code className="font-mono text-foreground/80">
             createSchema({"{ enableRLS: false }"})
-          </code>
-          .
+          </code>{" "}
+          omits only the policies — the FK and the index-form change still
+          show up in the diff, so the edit above applies either way.
         </p>
       </section>
 
