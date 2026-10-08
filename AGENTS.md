@@ -108,17 +108,3 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
   "./just-bash":     "dist/adapters/just-bash/index.js"
 }
 ```
-
-<!-- kanby:begin -->
-## Task board (kanby)
-
-This project tracks its work on a kanban board operated with the `kanby`
-CLI (this directory is linked to the project, so commands work from anywhere
-inside it). Before ANY operational task — work that changes code, docs,
-config, or behavior; pure exploration and Q&A are exempt — read the workflow
-skill at `.claude/skills/kanby/SKILL.md` and go through the board.
-
-The skill carries the lifecycle cheat-sheet; consult `kanby agents` only
-when you need commands beyond it. Use only documented commands and flags —
-never guess (unknown commands and flags are errors).
-<!-- kanby:end -->
