@@ -307,8 +307,19 @@ export const schema = createSchema({
           <code className="font-mono text-foreground/80">
             generateMigrationSQL()
           </code>{" "}
-          produces SQL for extensions and RLS policies that Drizzle can&apos;t
-          express. Paste it into a custom migration.
+          produces SQL for what Drizzle can&apos;t express: extensions and{" "}
+          <code className="font-mono text-foreground/80">
+            FORCE ROW LEVEL SECURITY
+          </code>
+          . The{" "}
+          <code className="font-mono text-foreground/80">
+            workspace_isolation
+          </code>{" "}
+          policies and the blob-chunks FK are declared by{" "}
+          <code className="font-mono text-foreground/80">createSchema()</code>{" "}
+          itself, so drizzle-kit generates (and diffs) them like any other
+          schema object. Paste the output into a custom migration — every
+          statement is idempotent.
         </p>
         <CodeBlock
           code={`import { generateMigrationSQL } from "bash-gres/drizzle"
@@ -322,16 +333,60 @@ const sql = generateMigrationSQL({
 console.log(sql)
 // CREATE EXTENSION IF NOT EXISTS ltree;
 // CREATE EXTENSION IF NOT EXISTS pg_textsearch;
-// ALTER TABLE fs_entries ENABLE ROW LEVEL SECURITY;
+// ALTER TABLE fs_entries FORCE ROW LEVEL SECURITY;
 // ...`}
         />
         <CodeBlock
           lang="bash"
-          code={`# Generate the table migration, then add a custom one for extensions + RLS
+          code={`# Generate the table migration, then add a custom one for extensions + FORCE RLS
 npx drizzle-kit generate
 npx drizzle-kit generate --custom
 npx drizzle-kit migrate`}
         />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Upgrading a project whose migrations predate the in-schema
+          declarations: the first{" "}
+          <code className="font-mono text-foreground/80">
+            drizzle-kit generate
+          </code>{" "}
+          after the upgrade emits a migration your bootstrapped database
+          largely already satisfies. Edit the generated file before applying —
+          keep the file itself, it updates the snapshot:
+        </p>
+        <ul className="text-sm text-muted-foreground leading-relaxed list-disc pl-5 space-y-1">
+          <li>
+            <strong className="text-foreground/80">Delete</strong> the{" "}
+            <code className="font-mono text-foreground/80">CREATE POLICY</code>{" "}
+            and{" "}
+            <code className="font-mono text-foreground/80">
+              ADD CONSTRAINT fs_blob_chunks_blob_fkey
+            </code>{" "}
+            statements: they fail on a database that already has them from the
+            bootstrap.
+          </li>
+          <li>
+            <strong className="text-foreground/80">Optionally delete</strong>{" "}
+            the gist index{" "}
+            <code className="font-mono text-foreground/80">DROP/CREATE</code>{" "}
+            pairs: the definition is identical (only the schema-side
+            declaration changed), so applying them just rebuilds the indexes
+            and blocks writes meanwhile.
+          </li>
+          <li>
+            The{" "}
+            <code className="font-mono text-foreground/80">
+              ENABLE ROW LEVEL SECURITY
+            </code>{" "}
+            statements are idempotent — safe to keep.
+          </li>
+        </ul>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          <code className="font-mono text-foreground/80">
+            createSchema({"{ enableRLS: false }"})
+          </code>{" "}
+          omits only the policies — the FK and the index-form change still
+          show up in the diff, so the edit above applies either way.
+        </p>
       </section>
 
     </div>

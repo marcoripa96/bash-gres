@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { eq } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import type postgres from "postgres";
 import { createSchema } from "../lib/adapters/drizzle/schema.js";
 import { ensureSetup } from "./global-setup.js";
@@ -49,5 +50,46 @@ describe("createSchema drizzle typing", () => {
     expect(() => createSchema({ enableVectorSearch: true })).toThrow(
       "embeddingDimensions is required",
     );
+  });
+
+  it("declares the workspace_isolation policy on every table by default", () => {
+    const schema = createSchema({
+      enableVectorSearch: true,
+      embeddingDimensions: 3,
+    });
+    for (const table of Object.values(schema)) {
+      const config = getTableConfig(table);
+      const names = config.policies.map((p) => p.name);
+      expect(names, config.name).toEqual(["workspace_isolation"]);
+      expect(config.policies[0]?.for).toBe("all");
+      expect(config.policies[0]?.using).toBeDefined();
+      expect(config.policies[0]?.withCheck).toBeDefined();
+    }
+  });
+
+  it("omits the policies with enableRLS: false", () => {
+    const schema = createSchema({ enableRLS: false });
+    for (const table of Object.values(schema)) {
+      expect(getTableConfig(table).policies).toEqual([]);
+    }
+  });
+
+  it("declares the fs_blob_chunks FK to fs_blobs with the core DDL's name", () => {
+    const schema = createSchema();
+    const fks = getTableConfig(schema.fsBlobChunks).foreignKeys;
+    expect(fks).toHaveLength(1);
+    const fk = fks[0]!;
+    expect(fk.getName()).toBe("fs_blob_chunks_blob_fkey");
+    expect(fk.onDelete).toBe("cascade");
+    const ref = fk.reference();
+    expect(ref.foreignTable).toBe(schema.fsBlobs);
+    expect(ref.columns.map((c) => c.name)).toEqual([
+      "workspace_id",
+      "blob_hash",
+    ]);
+    expect(ref.foreignColumns.map((c) => c.name)).toEqual([
+      "workspace_id",
+      "hash",
+    ]);
   });
 });

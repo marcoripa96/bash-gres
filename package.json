@@ -57,7 +57,7 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "drizzle-orm": ">=0.30.0",
+    "drizzle-orm": ">=0.36.0",
     "just-bash": ">=2.0.0",
     "pg": ">=8.0.0",
     "postgres": ">=3.0.0"
