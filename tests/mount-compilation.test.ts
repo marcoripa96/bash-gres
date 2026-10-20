@@ -5,6 +5,7 @@ import type { SqlClient } from "./helpers.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 import {
   compileMounts,
+  type CompiledMounts,
   mountVisible,
   mountWritable,
   mountWhereSql,
@@ -21,42 +22,19 @@ import type { MountSpec, SqlParam } from "../lib/core/types.js";
 
 const WS = "mount-compilation-test";
 
-// The original O(mounts) implementation, kept as the reference oracle.
+// The original O(mounts) checks, kept as the reference oracle. They run over
+// the roots `compileMounts` resolved and deduplicated, so the comparison
+// isolates what changed: the per-depth grouping and the SQL it emits.
 interface LegacyMounts {
   empty: boolean;
   entries: Array<{ root: string; readonly: boolean }>;
   ltrees: string[];
 }
 
-function legacyCompile(
-  specs: MountSpec[],
-  rootDirInternal: string,
-  workspaceId: string,
-): LegacyMounts {
-  const empty: LegacyMounts = { empty: true, entries: [], ltrees: [] };
-  if (specs.length === 0) return empty;
-  const byRoot = new Map<string, boolean>();
-  for (const spec of specs) {
-    const userPath = normalizePath(spec.path);
-    const internal =
-      rootDirInternal === "/"
-        ? userPath
-        : userPath === "/"
-          ? rootDirInternal
-          : normalizePath(rootDirInternal + userPath);
-    const readonly = spec.readonly === true;
-    if (byRoot.has(internal)) {
-      if (!readonly) byRoot.set(internal, false);
-      continue;
-    }
-    byRoot.set(internal, readonly);
-  }
-  const hasWritableRoot = byRoot.get("/") === false;
-  const hasReadonlyMount = [...byRoot.values()].some((r) => r);
-  if (hasWritableRoot && !hasReadonlyMount) return empty;
-  const entries = [...byRoot].map(([root, readonly]) => ({ root, readonly }));
+function legacyFrom(c: CompiledMounts, workspaceId: string): LegacyMounts {
+  const entries = [...c.byRoot].map(([root, readonly]) => ({ root, readonly }));
   return {
-    empty: false,
+    empty: c.empty,
     entries,
     ltrees: entries.map((e) => pathToLtree(e.root, workspaceId)),
   };
@@ -199,11 +177,36 @@ function pathUniverse(c: MountCase): string[] {
 }
 
 describe("mount compilation matches the linear-scan reference", () => {
+  it("resolves and deduplicates mount roots", () => {
+    const roots = (specs: MountSpec[], rootDir = "/") => [
+      ...compileMounts(specs, rootDir, WS).byRoot,
+    ];
+    expect(compileMounts([], "/", WS).empty).toBe(true);
+    expect(compileMounts([{ path: "/" }], "/", WS).empty).toBe(true);
+    expect(compileMounts([{ path: "/" }, { path: "/a" }], "/", WS).empty).toBe(true);
+    expect(compileMounts([{ path: "/", readonly: true }], "/", WS).empty).toBe(false);
+    // A writable spec wins for a duplicate path, whichever comes first.
+    expect(
+      roots([
+        { path: "/x", readonly: true },
+        { path: "/x" },
+        { path: "/y" },
+        { path: "/y/", readonly: true },
+      ]),
+    ).toEqual([
+      ["/x", false],
+      ["/y", false],
+    ]);
+    expect(roots([{ path: "/", readonly: true }, { path: "/src/../lib" }], "/proj")).toEqual([
+      ["/proj", true],
+      ["/proj/lib", false],
+    ]);
+  });
+
   for (const c of CASES) {
     it(`mountVisible / mountWritable: ${c.name}`, () => {
       const next = compileMounts(c.specs, c.rootDir, WS);
-      const legacy = legacyCompile(c.specs, c.rootDir, WS);
-      expect(next.empty).toBe(legacy.empty);
+      const legacy = legacyFrom(next, WS);
       for (const p of pathUniverse(c)) {
         expect([p, mountVisible(next, p)]).toEqual([p, legacyVisible(legacy, p)]);
         expect([p, mountWritable(next, p)]).toEqual([p, legacyWritable(legacy, p)]);
@@ -228,30 +231,31 @@ async function filterPaths(
   return r.rows.map((row) => row.p).sort();
 }
 
-const SELLER_CLIENTS = 4045;
+const MOUNTED_CLIENTS = 4045;
+const CLIENT_DIRS = 20000;
 
-/** reco-ai's seller view: /shared plus one readonly mount per assigned client. */
-function sellerMounts(): MountSpec[] {
+/** /shared plus one readonly mount per client dir, for the first 4045 clients. */
+function manySiblingMounts(): MountSpec[] {
   return [
     { path: "/shared", readonly: true },
-    ...Array.from({ length: SELLER_CLIENTS }, (_, i) => ({
+    ...Array.from({ length: MOUNTED_CLIENTS }, (_, i) => ({
       path: `/clients/c${i + 1}`,
       readonly: true,
     })),
   ];
 }
 
-// ~12.8k rows: 6000 client dirs + one file each, 800 shared files, the dirs above.
-const SELLER_ROWS_SQL = `
+// ~40.8k rows: 20k client dirs + one file each, 800 shared files, the dirs above.
+const SIBLING_ROWS_SQL = `
   SELECT ('${pathToLtree("/", WS)}.' || p)::ltree AS path
   FROM (
-    SELECT 'clients.c' || g AS p FROM generate_series(1, 6000) g
-    UNION ALL SELECT 'clients.c' || g || '.f' FROM generate_series(1, 6000) g
+    SELECT 'clients.c' || g AS p FROM generate_series(1, ${CLIENT_DIRS}) g
+    UNION ALL SELECT 'clients.c' || g || '.f' FROM generate_series(1, ${CLIENT_DIRS}) g
     UNION ALL SELECT 'shared.s' || g FROM generate_series(1, 800) g
     UNION ALL SELECT unnest(ARRAY['clients', 'shared', 'other'])
   ) src`;
-// Visible: 4045 client dirs + their files, 800 shared files, /clients, /shared.
-const SELLER_VISIBLE = SELLER_CLIENTS * 2 + 800 + 2;
+// Visible: mounted client dirs + their files, 800 shared files, /clients, /shared.
+const SIBLING_VISIBLE = MOUNTED_CLIENTS * 2 + 800 + 2;
 
 describe.each(TEST_ADAPTERS)("mount SQL [%s]", (_name, factory) => {
   let client: SqlClient;
@@ -271,7 +275,7 @@ describe.each(TEST_ADAPTERS)("mount SQL [%s]", (_name, factory) => {
   for (const c of CASES) {
     it(`selects the same rows as the reference: ${c.name}`, async () => {
       const next = compileMounts(c.specs, c.rootDir, WS);
-      const legacy = legacyCompile(c.specs, c.rootDir, WS);
+      const legacy = legacyFrom(next, WS);
       const universe = pathUniverse(c);
       const ltrees = universe.map((p) => pathToLtree(p, WS));
 
@@ -288,12 +292,12 @@ describe.each(TEST_ADAPTERS)("mount SQL [%s]", (_name, factory) => {
   }
 
   it("plans the membership tests as hashed subplans, custom or generic", async () => {
-    const mnt = mountWhereSql(compileMounts(sellerMounts(), "/", WS), "e.path", 1);
+    const mnt = mountWhereSql(compileMounts(manySiblingMounts(), "/", WS), "e.path", 1);
     for (const mode of ["force_custom_plan", "force_generic_plan"]) {
       const plan = await client.transaction(async (tx) => {
         await tx.query(`SET LOCAL plan_cache_mode = ${mode}`);
         const r = await tx.query<{ "QUERY PLAN": string }>(
-          `EXPLAIN SELECT count(*) FROM (${SELLER_ROWS_SQL}) e WHERE ${mnt.sql}`,
+          `EXPLAIN SELECT count(*) FROM (${SIBLING_ROWS_SQL}) e WHERE ${mnt.sql}`,
           mnt.params,
         );
         return r.rows.map((row) => row["QUERY PLAN"]).join("\n");
@@ -303,26 +307,20 @@ describe.each(TEST_ADAPTERS)("mount SQL [%s]", (_name, factory) => {
     }
   });
 
-  it("filters ~13k rows against 4046 mounts quickly, on every execution", async () => {
-    const mnt = mountWhereSql(compileMounts(sellerMounts(), "/", WS), "e.path", 1);
-    const sql = `SELECT count(*)::int AS n FROM (${SELLER_ROWS_SQL}) e WHERE ${mnt.sql}`;
+  it("filters ~40k rows against 4046 mounts on every execution", async () => {
+    const mnt = mountWhereSql(compileMounts(manySiblingMounts(), "/", WS), "e.path", 1);
+    const sql = `SELECT count(*)::int AS n FROM (${SIBLING_ROWS_SQL}) e WHERE ${mnt.sql}`;
     // Ten runs push a reused prepared statement past the plan cache's switch
-    // to a generic plan, which must stay hashed.
+    // to a generic plan; the EXPLAIN test above pins the plan shape. The bound
+    // is loose on purpose: the linear-scan form takes seconds at this size.
+    let slowest = 0;
     for (let run = 0; run < 10; run++) {
       const start = performance.now();
       const r = await client.query<{ n: number }>(sql, mnt.params);
-      const elapsed = performance.now() - start;
-      expect(r.rows[0]?.n).toBe(SELLER_VISIBLE);
-      expect(elapsed).toBeLessThan(300);
+      slowest = Math.max(slowest, performance.now() - start);
+      expect(r.rows[0]?.n).toBe(SIBLING_VISIBLE);
     }
-    const generic = await client.transaction(async (tx) => {
-      await tx.query("SET LOCAL plan_cache_mode = force_generic_plan");
-      const start = performance.now();
-      const r = await tx.query<{ n: number }>(sql, mnt.params);
-      return { n: r.rows[0]?.n, elapsed: performance.now() - start };
-    });
-    expect(generic.n).toBe(SELLER_VISIBLE);
-    expect(generic.elapsed).toBeLessThan(300);
+    expect(slowest).toBeLessThan(1500);
   });
 
   it("serves a filesystem view with thousands of sibling mounts", async () => {
@@ -337,7 +335,7 @@ describe.each(TEST_ADAPTERS)("mount SQL [%s]", (_name, factory) => {
     }
     await root.mkdir("/private", { recursive: true });
 
-    const view = new PgFileSystem({ db: client, workspaceId: WS, mount: sellerMounts() });
+    const view = new PgFileSystem({ db: client, workspaceId: WS, mount: manySiblingMounts() });
     expect((await view.readdir("/")).sort()).toEqual(["clients", "shared"]);
     expect((await view.readdir("/clients")).sort()).toEqual(["c1", "c2", "c4045"]);
     expect(await view.readFile("/clients/c4045/notes.md")).toBe("c4045\n");

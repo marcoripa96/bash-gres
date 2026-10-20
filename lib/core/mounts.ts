@@ -29,7 +29,7 @@ import { normalizePath, pathToLtree } from "./path-encoding.js";
  */
 export interface CompiledMounts {
   empty: boolean;
-  /** True when `/` is mounted: every path is visible, only writes are scoped. */
+  /** True when `/` itself is mounted: every path is visible, only writes are scoped. */
   coversAll: boolean;
   /** Internal POSIX mount root -> readonly flag. */
   byRoot: ReadonlyMap<string, boolean>;
@@ -47,7 +47,7 @@ export interface CompiledMounts {
 
 const EMPTY: CompiledMounts = Object.freeze({
   empty: true,
-  coversAll: true,
+  coversAll: false,
   byRoot: new Map<string, boolean>(),
   depths: [],
   rootsByDepth: new Map<number, ReadonlySet<string>>(),
