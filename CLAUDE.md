@@ -41,7 +41,7 @@ await bash.exec("echo hello > /file.txt");
 - `lib/core/setup.ts`: idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `lib/core/path-encoding.ts`: path <-> ltree conversion using `_xHEX_` delimited encoding
 - `lib/core/search.ts`: BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
-- `lib/core/mounts.ts`: `mount` allow-list (default-deny scoping to subtrees of one workspace). Sibling to `exclude.ts`: `compileMounts` + `mountVisible`/`mountWritable` (JS guards) + `mountWhereSql` (the `path <@ ANY OR path @> ANY` clause threaded into every listing/walk/glob/search query via `buildMountClause`)
+- `lib/core/mounts.ts`: `mount` allow-list (default-deny scoping to subtrees of one workspace). Sibling to `exclude.ts`: `compileMounts` + `mountVisible`/`mountWritable` (JS guards) + `mountWhereSql` (threaded into every listing/walk/glob/search query via `buildMountClause`). Roots are grouped by depth, so cost scales with distinct root depths, not mount count: one `subpath(path, 0, k)::text IN (SELECT unnest($n::text[]))` per depth plus one for the roots' strict ancestors. Keep the `IN (SELECT unnest(...))` form: it plans as a hashed SubPlan even under a generic plan, where `= ANY($n)` scans the array per row
 - `lib/adapters/drizzle/adapter.ts`: converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `lib/adapters/drizzle/schema.ts`: Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/node-postgres/index.ts`: wraps `pg.Pool` into `SqlClient` (structural `NodePgPool` interface)

@@ -387,7 +387,7 @@ describe("mount SQL helpers", () => {
       mounts: compileMounts([{ path: "/clienti/acme" }], "/", WS),
     });
 
-    expect(capturedText).toContain("AND (e.path <@ ANY");
+    expect(capturedText).toContain("AND (subpath(e.path, 0, 3)::text IN (SELECT unnest(");
     const mountParam = capturedParams.find(
       (param): param is string[] =>
         Array.isArray(param) && param.every((value) => typeof value === "string"),
