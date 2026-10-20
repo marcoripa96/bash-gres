@@ -9,40 +9,63 @@ import { normalizePath, pathToLtree } from "./path-encoding.js";
  *
  * This is what lets a single `PgFileSystem` over one workspace present a
  * scoped per-user view (`/users/<id>` + `/general` + a few `/clienti/<x>`)
- * without remapping paths or wrapping the instance in a router. The visible
- * set is expressed in SQL as
+ * without remapping paths or wrapping the instance in a router.
  *
- *     path <@ ANY(ltrees)   -- inside a mount
- *  OR path @> ANY(ltrees)   -- an ancestor of a mount (so `ls /` walks down)
+ * Mount roots are grouped by depth so the cost of a check scales with the
+ * number of distinct root depths, not the number of mounts (a view can carry
+ * thousands of sibling mounts like `/clients/<code>`). A path is inside a mount
+ * iff its prefix at some root depth is one of the roots at that depth, and it
+ * is an ancestor of a mount iff it is in the precomputed set of strict root
+ * ancestors. In SQL that becomes one hashed set-membership test per depth:
  *
- * which is GiST-indexed, and mirrored in JS by `mountVisible` for the
- * single-path read/write guards.
+ *     subpath(path, 0, d1)::text IN (SELECT unnest($a::text[]))  -- depth d1
+ *  OR subpath(path, 0, d2)::text IN (SELECT unnest($b::text[]))  -- depth d2
+ *  OR path::text IN (SELECT unnest($anc::text[]))                -- ancestors
+ *
+ * The `IN (SELECT unnest(...))` form plans as a hashed SubPlan even under a
+ * generic plan for a reused prepared statement, where `= ANY($n)` would fall
+ * back to a linear scan of the array per row. Comparing as text keeps the
+ * hashing independent of the ltree extension version.
  */
 export interface CompiledMounts {
   empty: boolean;
-  /** Internal POSIX roots of every mount. */
-  roots: string[];
-  /** Internal POSIX roots of writable (non-readonly) mounts. */
-  writableRoots: string[];
-  /** Internal POSIX roots of readonly mounts. */
-  readonlyRoots: string[];
-  /** ltree-encoded roots, for `path <@ ANY(...)` / `path @> ANY(...)` pushdown. */
-  ltrees: string[];
-  /** Mounts with their readonly flag, used for most-specific write decisions. */
-  entries: Array<{ root: string; readonly: boolean }>;
+  /** True when `/` is mounted: every path is visible, only writes are scoped. */
+  coversAll: boolean;
+  /** Internal POSIX mount root -> readonly flag. */
+  byRoot: ReadonlyMap<string, boolean>;
+  /** Distinct root depths (path segment count), ascending. */
+  depths: number[];
+  /** Internal POSIX mount roots grouped by depth. */
+  rootsByDepth: ReadonlyMap<number, ReadonlySet<string>>;
+  /** Strict ancestors of every mount root, as internal POSIX paths. */
+  ancestors: ReadonlySet<string>;
+  /** ltree-encoded roots per depth; `nlevel` counts the workspace label. */
+  ltreesByDepth: Array<{ nlevel: number; ltrees: string[] }>;
+  /** ltree-encoded strict ancestors of every mount root. */
+  ancestorLtrees: string[];
 }
 
 const EMPTY: CompiledMounts = Object.freeze({
   empty: true,
-  roots: [],
-  writableRoots: [],
-  readonlyRoots: [],
-  ltrees: [],
-  entries: [],
+  coversAll: true,
+  byRoot: new Map<string, boolean>(),
+  depths: [],
+  rootsByDepth: new Map<number, ReadonlySet<string>>(),
+  ancestors: new Set<string>(),
+  ltreesByDepth: [],
+  ancestorLtrees: [],
 });
 
 export function emptyMounts(): CompiledMounts {
   return EMPTY;
+}
+
+function segmentsOf(path: string): string[] {
+  return path.split("/").filter(Boolean);
+}
+
+function prefixOf(segments: string[], depth: number): string {
+  return "/" + segments.slice(0, depth).join("/");
 }
 
 /**
@@ -90,25 +113,40 @@ export function compileMounts(
   const hasReadonlyMount = [...byRoot.values()].some((readonly) => readonly);
   if (hasWritableRoot && !hasReadonlyMount) return EMPTY;
 
-  const roots: string[] = [];
-  const writableRoots: string[] = [];
-  const readonlyRoots: string[] = [];
-  const ltrees: string[] = [];
-  const entries: Array<{ root: string; readonly: boolean }> = [];
-  for (const [root, readonly] of byRoot) {
-    roots.push(root);
-    ltrees.push(pathToLtree(root, workspaceId));
-    entries.push({ root, readonly });
-    if (readonly) readonlyRoots.push(root);
-    else writableRoots.push(root);
+  const rootsByDepth = new Map<number, Set<string>>();
+  const ancestors = new Set<string>();
+  for (const root of byRoot.keys()) {
+    const segments = segmentsOf(root);
+    const depth = segments.length;
+    let roots = rootsByDepth.get(depth);
+    if (!roots) {
+      roots = new Set<string>();
+      rootsByDepth.set(depth, roots);
+    }
+    roots.add(root);
+    for (let d = 0; d < depth; d++) ancestors.add(prefixOf(segments, d));
   }
 
-  return { empty: false, roots, writableRoots, readonlyRoots, ltrees, entries };
-}
+  const depths = [...rootsByDepth.keys()].sort((a, b) => a - b);
+  const ltreesByDepth = depths.map((depth) => ({
+    // +1 for the `w_<workspace>` label every ltree path starts with.
+    nlevel: depth + 1,
+    ltrees: [...rootsByDepth.get(depth)!].map((r) =>
+      pathToLtree(r, workspaceId),
+    ),
+  }));
+  const ancestorLtrees = [...ancestors].map((a) => pathToLtree(a, workspaceId));
 
-function isUnder(path: string, root: string): boolean {
-  if (root === "/") return path.startsWith("/");
-  return path === root || path.startsWith(root + "/");
+  return {
+    empty: false,
+    coversAll: byRoot.has("/"),
+    byRoot,
+    depths,
+    rootsByDepth,
+    ancestors,
+    ltreesByDepth,
+    ancestorLtrees,
+  };
 }
 
 /**
@@ -117,49 +155,66 @@ function isUnder(path: string, root: string): boolean {
  * `/` always lists the branches that lead to mounts).
  */
 export function mountVisible(c: CompiledMounts, internalPath: string): boolean {
-  if (c.empty) return true;
+  if (c.empty || c.coversAll) return true;
   if (internalPath === "/") return true;
-  for (const r of c.roots) {
-    if (isUnder(internalPath, r)) return true; // inside a mount
-    if (isUnder(r, internalPath)) return true; // ancestor of a mount
+  const segments = segmentsOf(internalPath);
+  for (const depth of c.depths) {
+    if (depth > segments.length) break;
+    if (c.rootsByDepth.get(depth)!.has(prefixOf(segments, depth))) return true;
   }
-  return false;
+  return c.ancestors.has(internalPath);
 }
 
-/** True when `internalPath` is inside a non-readonly mount. */
+/**
+ * True when `internalPath` is inside a non-readonly mount. The deepest
+ * enclosing mount decides, so a readonly mount nested under a writable one (or
+ * the reverse) carves out its own subtree.
+ */
 export function mountWritable(
   c: CompiledMounts,
   internalPath: string,
 ): boolean {
   if (c.empty) return true;
-  let best: { root: string; readonly: boolean } | null = null;
-  for (const entry of c.entries) {
-    if (!isUnder(internalPath, entry.root)) continue;
-    if (!best || entry.root.length > best.root.length) {
-      best = entry;
-    }
+  const segments = segmentsOf(internalPath);
+  for (let i = c.depths.length - 1; i >= 0; i--) {
+    const depth = c.depths[i]!;
+    if (depth > segments.length) continue;
+    const readonly = c.byRoot.get(prefixOf(segments, depth));
+    if (readonly !== undefined) return !readonly;
   }
-  return best !== null && !best.readonly;
+  return false;
 }
 
 /**
  * Build the SQL fragment that, ANDed into a `WHERE` clause, keeps only entries
  * inside a mount or on an ancestor path leading to one. Returns `TRUE` (no-op)
- * when no mounts are configured.
+ * when no mounts are configured or `/` itself is mounted.
  *
- * `pathExpr` names the ltree path column (e.g. `e.path`). The single array
- * param is referenced twice; every adapter resolves `$N` by position, so the
- * reuse is safe.
+ * `pathExpr` names the ltree path column (e.g. `e.path`). Emits one `text[]`
+ * param per distinct root depth, plus one for the ancestor set when non-empty.
+ * `subpath` clips to the path's own length, so a path shallower than a depth
+ * yields a prefix that can never equal a root at that depth.
  */
 export function mountWhereSql(
   c: CompiledMounts,
   pathExpr: string,
   nextParamIdx: number,
 ): { sql: string; params: SqlParam[] } {
-  if (c.empty) return { sql: "TRUE", params: [] };
-  const i = nextParamIdx;
-  return {
-    sql: `(${pathExpr} <@ ANY($${i}::ltree[]) OR ${pathExpr} @> ANY($${i}::ltree[]))`,
-    params: [c.ltrees],
-  };
+  if (c.empty || c.coversAll) return { sql: "TRUE", params: [] };
+  const disjuncts: string[] = [];
+  const params: SqlParam[] = [];
+  let idx = nextParamIdx;
+  for (const { nlevel, ltrees } of c.ltreesByDepth) {
+    disjuncts.push(
+      `subpath(${pathExpr}, 0, ${nlevel})::text IN (SELECT unnest($${idx++}::text[]))`,
+    );
+    params.push(ltrees);
+  }
+  if (c.ancestorLtrees.length > 0) {
+    disjuncts.push(
+      `${pathExpr}::text IN (SELECT unnest($${idx++}::text[]))`,
+    );
+    params.push(c.ancestorLtrees);
+  }
+  return { sql: `(${disjuncts.join(" OR ")})`, params };
 }
