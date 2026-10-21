@@ -22,6 +22,15 @@ export interface FileReadRow {
   blob_binary_data: Uint8Array | null;
 }
 
+/** One stored chunk row of a blob, as readFileChunks fetches it. */
+export interface ChunkRow {
+  chunk_index: number;
+  start_line: number;
+  end_line: number;
+  heading_path: string | null;
+  content: string;
+}
+
 export interface BlobRow {
   hash: Uint8Array;
   content: string | null;

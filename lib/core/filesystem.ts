@@ -37,7 +37,11 @@ import {
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
 import { Coalescer } from "./filesystem/internals/coalescer.js";
-import type { FileReadRow } from "./filesystem/internals/rows.js";
+import type {
+  ChunkRow,
+  EntryRow,
+  FileReadRow,
+} from "./filesystem/internals/rows.js";
 import { filesystemOpsContext } from "./filesystem/ops/context.js";
 import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
 import {
@@ -677,7 +681,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
-    const entry = await this.resolveEntry(tx, internal);
+    const { entry, chunks } = await this.fetchEntryWithChunks(tx, internal);
     if (!entry) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
@@ -704,31 +708,103 @@ export class PgFileSystem extends FsWriteOpsBase {
       );
     }
     if (!entry.blob_hash) return [];
-    let r;
-    try {
-      r = await tx.query<{
-        chunk_index: number;
-        start_line: number;
-        end_line: number;
-        heading_path: string | null;
-        content: string;
-      }>(
-        `SELECT chunk_index, start_line, end_line, heading_path, content
-         FROM fs_blob_chunks
-         WHERE workspace_id = $1 AND blob_hash = $2
-         ORDER BY chunk_index`,
-        [this.workspaceId, entry.blob_hash],
-      );
-    } catch (e) {
-      this.rethrowMissingChunkTable(e);
+    let rows = chunks;
+    if (rows === null) {
+      try {
+        const r = await tx.query<ChunkRow>(
+          `SELECT chunk_index, start_line, end_line, heading_path, content
+           FROM fs_blob_chunks
+           WHERE workspace_id = $1 AND blob_hash = $2
+           ORDER BY chunk_index`,
+          [this.workspaceId, entry.blob_hash],
+        );
+        rows = r.rows;
+      } catch (e) {
+        this.rethrowMissingChunkTable(e);
+      }
     }
-    return r.rows.map((row) => ({
+    return rows.map((row) => ({
       chunkIndex: Number(row.chunk_index),
       startLine: Number(row.start_line),
       endLine: Number(row.end_line),
       headingPath: row.heading_path,
       content: row.content,
     }));
+  }
+
+  /**
+   * resolveEntry + the entry's chunk rows in one statement (chunks only for
+   * a file). `chunks` is null when they weren't fetched: a database without
+   * `fs_blob_chunks` takes resolveEntry alone here, so a missing path or a
+   * directory still fails with ENOENT/EISDIR before the chunk query raises
+   * the setup error, as it did when these were two statements.
+   */
+  private async fetchEntryWithChunks(
+    tx: SqlClient,
+    internal: string,
+  ): Promise<{
+    entry: Pick<EntryRow, "node_type" | "symlink_target" | "blob_hash"> | null;
+    chunks: ChunkRow[] | null;
+  }> {
+    const versionId = await this.getCurrentVersionId(tx);
+    let r;
+    try {
+      r = await tx.query<
+        Pick<EntryRow, "node_type" | "symlink_target" | "blob_hash"> & {
+          [K in keyof ChunkRow]: ChunkRow[K] | null;
+        }
+      >(
+        `WITH e AS MATERIALIZED (
+           SELECT version_id, node_type, symlink_target, blob_hash
+           FROM fs_entries
+           WHERE workspace_id = $1 AND path = $2::ltree
+         ),
+         picked AS (
+           SELECT e.node_type, e.symlink_target, e.blob_hash
+           FROM e
+           JOIN version_ancestors a
+             ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+           WHERE a.descendant_id = $3
+           ORDER BY a.depth ASC
+           LIMIT 1
+         )
+         SELECT p.node_type, p.symlink_target, p.blob_hash,
+                c.chunk_index, c.start_line, c.end_line, c.heading_path,
+                c.content
+         FROM picked p
+         LEFT JOIN fs_blob_chunks c
+           ON c.workspace_id = $1
+          AND c.blob_hash = p.blob_hash
+          AND p.node_type = 'file'
+         ORDER BY c.chunk_index`,
+        [this.workspaceId, pathToLtree(internal, this.workspaceId), versionId],
+      );
+    } catch (e) {
+      if (
+        e instanceof SqlError &&
+        e.code === "42P01" &&
+        /fs_blob_chunks/.test(e.message)
+      ) {
+        return { entry: await this.resolveEntry(tx, internal), chunks: null };
+      }
+      throw e;
+    }
+    const first = r.rows[0];
+    if (!first || first.node_type === "tombstone") {
+      return { entry: null, chunks: [] };
+    }
+    const chunks: ChunkRow[] = [];
+    for (const row of r.rows) {
+      if (row.chunk_index === null) continue;
+      chunks.push({
+        chunk_index: row.chunk_index,
+        start_line: row.start_line!,
+        end_line: row.end_line!,
+        heading_path: row.heading_path,
+        content: row.content!,
+      });
+    }
+    return { entry: first, chunks };
   }
 
   /**
