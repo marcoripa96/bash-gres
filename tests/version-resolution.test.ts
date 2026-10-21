@@ -125,4 +125,23 @@ describe.each(TEST_ADAPTERS)("version resolution [%s]", (_name, factory) => {
       expect(await fs.stat("/scoped").then((s) => s.isDirectory)).toBe(true);
     });
   });
+
+  it("walk is one statement, also under a rootDir", async () => {
+    const writer = new PgFileSystem({ db: client, workspaceId: WS });
+    await writer.mkdir("/scope/x", { recursive: true });
+    await writer.writeFile("/scope/x/y.txt", "y");
+    const fs = new PgFileSystem({
+      db: client,
+      workspaceId: WS,
+      rootDir: "/scope",
+      trace: (e) => events.push(e),
+    });
+    await fs.exists("/"); // resolve and cache the version id first
+    events.length = 0;
+    expect(await fs.walk("/")).toMatchObject([
+      { path: "/x", depth: 1, isDirectory: true },
+      { path: "/x/y.txt", depth: 2, isFile: true },
+    ]);
+    expect(statements()).toBe(1);
+  });
 });

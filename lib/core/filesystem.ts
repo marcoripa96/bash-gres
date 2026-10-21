@@ -1230,11 +1230,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   async walk(path: string): Promise<WalkEntry[]> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type !== "directory")
-        throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      const realPath = ltreeToPath(node.path);
-      const rows = await this.listVisibleSubtree(tx, realPath, false);
+      const rows = await this.listDirectory(tx, internal, path, "subtree");
       return rows.map((r) => this.mapSubtreeToWalk(r));
     });
   }

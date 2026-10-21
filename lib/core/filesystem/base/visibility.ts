@@ -266,19 +266,31 @@ export class FsVisibilityBase extends FsVersionBase {
   }
 
   /**
-   * `resolveEntryFollowSymlink(dir)` + the ENOTDIR check + `listVisibleChildren`
-   * in one round-trip: the directory's own nearest-ancestor row comes back
-   * first (`self = 0`), its children after, and the children scan is gated on
-   * that row being a directory. Directory listing is what `ls`, `find`,
-   * `grep -r` and `du` are made of, so this halves the queries of every tree
-   * walk. A symlinked directory falls back to the two-step path, which follows
-   * the link chain.
+   * `resolveEntryFollowSymlink(dir)` + the ENOTDIR check + the listing in one
+   * round-trip: the directory's own nearest-ancestor row comes back first
+   * (`self = 0`), the listing after, gated on that row being a directory.
+   * `scope` picks the listing: `listVisibleChildren` (default; readdir*, so
+   * every `ls`/`find`/`grep -r` level) or `listVisibleSubtree` without the
+   * root ("subtree"; walk). A symlinked directory falls back to the
+   * two-step path, which follows the link chain.
    */
+  protected listDirectory(
+    tx: SqlClient,
+    dirPosix: string,
+    userPath: string,
+  ): Promise<DirChildRow[]>;
+  protected listDirectory(
+    tx: SqlClient,
+    dirPosix: string,
+    userPath: string,
+    scope: "subtree",
+  ): Promise<SubtreeRow[]>;
   protected async listDirectory(
     tx: SqlClient,
     dirPosix: string,
     userPath: string,
-  ): Promise<DirChildRow[]> {
+    scope: "children" | "subtree" = "children",
+  ): Promise<DirChildRow[] | SubtreeRow[]> {
     if (this.isHiddenFromReads(dirPosix)) {
       throw new FsError("ENOENT", "no such file or directory", dirPosix);
     }
@@ -292,7 +304,7 @@ export class FsVisibilityBase extends FsVersionBase {
     );
     // `self_e` keeps resolveEntry's MATERIALIZED path-lookup-first shape so
     // the generic plan can't invert the join (see resolveEntry).
-    const r = await tx.query<DirChildRow & { self: number }>(
+    const r = await tx.query<SubtreeRow & { self: number }>(
       `WITH self_e AS MATERIALIZED (
          SELECT version_id, node_type
          FROM fs_entries
@@ -315,7 +327,8 @@ export class FsVisibilityBase extends FsVersionBase {
            e.symlink_target,
            e.mode,
            e.size_bytes,
-           e.mtime
+           e.mtime,
+           nlevel(e.path) - nlevel($3::ltree) AS depth_in_subtree
          FROM fs_entries e
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
@@ -324,7 +337,7 @@ export class FsVisibilityBase extends FsVersionBase {
            AND a.descendant_id = $2
            AND e.path <@ $3::ltree
            AND e.path != $3::ltree
-           AND nlevel(e.path) = nlevel($3::ltree) + 1
+           ${scope === "children" ? "AND nlevel(e.path) = nlevel($3::ltree) + 1" : ""}
            AND ${exc.sql}
            AND ${mnt.sql}
          ORDER BY e.path, a.depth ASC
@@ -332,11 +345,11 @@ export class FsVisibilityBase extends FsVersionBase {
        SELECT 0 AS self, NULL::text AS path, node_type,
               NULL::bytea AS blob_hash, NULL::text AS symlink_target,
               NULL::int AS mode, NULL::bigint AS size_bytes,
-              NULL::timestamptz AS mtime
+              NULL::timestamptz AS mtime, NULL::int AS depth_in_subtree
        FROM dir
        UNION ALL
        SELECT 1, path, node_type, blob_hash, symlink_target, mode,
-              size_bytes, mtime
+              size_bytes, mtime, depth_in_subtree
        FROM visible WHERE node_type != $4
        ORDER BY self, path`,
       [...baseParams, ...exc.params, ...mnt.params],
@@ -349,7 +362,10 @@ export class FsVisibilityBase extends FsVersionBase {
       const node = await this.resolveEntryFollowSymlink(tx, dirPosix);
       if (node.node_type !== "directory")
         throw new FsError("ENOTDIR", "not a directory, scandir", userPath);
-      return this.listVisibleChildren(tx, ltreeToPath(node.path));
+      const real = ltreeToPath(node.path);
+      return scope === "subtree"
+        ? this.listVisibleSubtree(tx, real, false)
+        : this.listVisibleChildren(tx, real);
     }
     if (self.node_type !== "directory")
       throw new FsError("ENOTDIR", "not a directory, scandir", userPath);
