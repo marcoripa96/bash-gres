@@ -1,4 +1,4 @@
-import type { SqlClient, SqlParam } from "../../types.js";
+import type { SqlClient } from "../../types.js";
 import { bytesKey } from "../internals/hashes.js";
 import { op, type FilesystemOpsContext } from "./context.js";
 
@@ -74,25 +74,33 @@ async function hardDeleteVersionById<TFs>(
   );
 
   if (candidates.size === 0) return;
-  const hashes = [...candidates.values()];
+  // Map keys are the hashes' hex encoding (`bytesKey`).
+  const hexHashes = [...candidates.keys()];
   const CHUNK_SIZE = 8000;
-  for (let start = 0; start < hashes.length; start += CHUNK_SIZE) {
-    const chunk = hashes.slice(start, start + CHUNK_SIZE);
-    const params: SqlParam[] = [ctx.workspaceId, ...chunk];
-    const values = chunk
-      .map((_, i) => `($${i + 2}::bytea)`)
-      .join(", ");
+  for (let start = 0; start < hexHashes.length; start += CHUNK_SIZE) {
+    const chunk = hexHashes.slice(start, start + CHUNK_SIZE);
+    // Both lookups are written so the plan can't depend on statistics. A
+    // freshly written workspace is estimated at ~1 row, and a join form
+    // (VALUES + NOT EXISTS) then degrades to rescanning the whole workspace
+    // per candidate: 1000 candidates took ~1.4 s instead of ~6 ms. The
+    // uncorrelated ARRAY(...) runs once as an InitPlan, so `hash = ANY(...)`
+    // stays an index condition on fs_blobs_pkey; the scalar subquery is never
+    // pulled up into a join, so each candidate gets one (workspace_id,
+    // blob_hash) probe that stops at the first reference. One text[] param
+    // keeps the statement text fixed, so a prepared-statement client caches
+    // one statement instead of one per candidate count.
     await tx.query(
-      `WITH candidates(hash) AS (VALUES ${values})
-       DELETE FROM fs_blobs b
-       USING candidates c
+      `DELETE FROM fs_blobs b
        WHERE b.workspace_id = $1
-         AND b.hash = c.hash
-         AND NOT EXISTS (
-            SELECT 1 FROM fs_entries
-            WHERE workspace_id = $1 AND blob_hash = c.hash
-          )`,
-      params,
+         AND b.hash = ANY(
+           ARRAY(SELECT decode(h, 'hex') FROM unnest($2::text[]) AS h)
+         )
+         AND (
+           SELECT 1 FROM fs_entries
+           WHERE workspace_id = $1 AND blob_hash = b.hash
+           LIMIT 1
+         ) IS NULL`,
+      [ctx.workspaceId, chunk],
     );
   }
 }
