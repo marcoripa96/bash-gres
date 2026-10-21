@@ -58,6 +58,27 @@ import {
 } from "./filesystem/internals/glob.js";
 import type { SqlParam } from "./types.js";
 
+/**
+ * just-bash discards `2>/dev/null` itself but sends `> /dev/null`,
+ * `>> /dev/null`, `< /dev/null` and `cp x /dev/null` to the filesystem,
+ * stat-ing the target first, so the device lives here, answered without a
+ * query: writeFile/appendFile and cp's destination discard (on read-only
+ * instances too), readFile/readFileBuffer are empty, exists/stat/lstat
+ * report a character device. Nothing is stored at the path, and
+ * readdir("/dev") doesn't list it. Checked on the caller's path, before
+ * rootDir, mounts and permissions.
+ */
+const isDevNull = (userPath: string) => normalizePath(userPath) === "/dev/null";
+
+const DEV_NULL_STAT: Readonly<FsStat> = {
+  isFile: false,
+  isDirectory: false,
+  isSymbolicLink: false,
+  mode: 0o20666, // S_IFCHR | rw-rw-rw-
+  size: 0,
+  mtime: new Date(0),
+};
+
 export class PgFileSystem extends FsWriteOpsBase {
   [filesystemOpsContext](): FilesystemOpsContext<this> {
     const self = this;
@@ -252,6 +273,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     path: string,
     _options?: { encoding?: string | null } | string,
   ): Promise<string> {
+    if (isDevNull(path)) return "";
     const internal = this.guardRead(path);
     if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", path);
@@ -995,6 +1017,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
+    if (isDevNull(path)) return new Uint8Array(0);
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
       return this.internalReadFileBuffer(tx, internal, path);
@@ -1082,6 +1105,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     content: string | Uint8Array,
     _options?: { encoding?: string } | string,
   ): Promise<void> {
+    if (isDevNull(path)) return;
     const internal = this.guardWrite(path);
     this.guardExcludedWrite(internal, "open", path);
 
@@ -1132,6 +1156,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     content: string | Uint8Array,
     _options?: { encoding?: string } | string,
   ): Promise<void> {
+    if (isDevNull(path)) return;
     const internal = this.guardWrite(path);
     this.guardExcludedWrite(internal, "open", path);
     return this.withWorkspace(async (tx) => {
@@ -1197,11 +1222,13 @@ export class PgFileSystem extends FsWriteOpsBase {
   // concurrent calls share one query (see FsVisibilityBase.lookupEntry).
 
   async exists(path: string): Promise<boolean> {
+    if (isDevNull(path)) return true;
     const internal = this.guardRead(path);
     return (await this.lookupEntry(internal)) !== null;
   }
 
   async stat(path: string): Promise<FsStat> {
+    if (isDevNull(path)) return { ...DEV_NULL_STAT };
     const internal = this.guardRead(path);
     const first = await this.lookupEntry(internal);
     const node = await this.followSymlinkFrom(
@@ -1216,6 +1243,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   async lstat(path: string): Promise<FsStat> {
+    if (isDevNull(path)) return { ...DEV_NULL_STAT };
     const internal = this.guardRead(path);
     const node = await this.lookupEntry(internal);
     if (!node)
@@ -1386,6 +1414,13 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
+    if (isDevNull(dest)) {
+      // Like cp(1): the source must exist and can't be a directory.
+      if ((await this.stat(src)).isDirectory) {
+        throw new FsError("EISDIR", "illegal operation on a directory, cp", src);
+      }
+      return;
+    }
     const srcInternal = this.guardRead(src);
     const destInternal = this.guardWrite(dest);
     this.guardExcludedWrite(destInternal, "cp", dest);
