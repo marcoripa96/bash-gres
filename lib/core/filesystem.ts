@@ -36,6 +36,7 @@ import {
   type ChunkSearchOpts,
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
+import { Coalescer } from "./filesystem/internals/coalescer.js";
 import { filesystemOpsContext } from "./filesystem/ops/context.js";
 import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
 import {
@@ -53,6 +54,17 @@ import {
   analyzeGlobPattern,
 } from "./filesystem/internals/glob.js";
 import type { SqlParam } from "./types.js";
+
+/** One visible entry plus its blob, as readFile fetches it. */
+interface FileReadRow {
+  path: string;
+  blob_hash: Uint8Array | null;
+  node_type: string;
+  symlink_target: string | null;
+  size_bytes: number | string;
+  blob_content: string | null;
+  blob_binary_data: Uint8Array | null;
+}
 
 export class PgFileSystem extends FsWriteOpsBase {
   [filesystemOpsContext](): FilesystemOpsContext<this> {
@@ -199,9 +211,28 @@ export class PgFileSystem extends FsWriteOpsBase {
     _options?: { encoding?: string | null } | string,
   ): Promise<string> {
     const internal = this.guardRead(path);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      return this.internalReadFile(tx, internal, path);
-    });
+    if (this.txClient || this.isHiddenFromReads(internal)) {
+      return this.withReadOnlyWorkspace(async (tx) => {
+        return this.internalReadFile(tx, internal, path);
+      });
+    }
+    // Before any await, so concurrent reads (grep -r, wc *) share a query.
+    const row = await this.fileReads.load(internal);
+    return this.contentOfReadRow(row, internal, path, this.maxSymlinkDepth);
+  }
+
+  /** Coalesces concurrent `readFile` fetches; see `Coalescer`. */
+  private readonly fileReads = new Coalescer<FileReadRow | null>(
+    (internals) =>
+      this.withReadOnlyWorkspace((tx) => this.fetchReadRows(tx, internals)),
+    null,
+  );
+
+  private isHiddenFromReads(internal: string): boolean {
+    return (
+      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, internal))
+    );
   }
 
   private async internalReadFile(
@@ -210,27 +241,131 @@ export class PgFileSystem extends FsWriteOpsBase {
     userPath: string,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<string> {
-    if (
-      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, internal))
-    ) {
+    if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
+    const row = await this.fetchReadRow(tx, internal);
+    return this.contentOfReadRow(row, internal, userPath, maxDepth, tx);
+  }
 
+  /**
+   * Turn a fetched row into file content, with readFile's checks in order:
+   * missing/tombstone, symlink (followed from here, against `tx` when given),
+   * directory, `maxReadSize`.
+   */
+  private async contentOfReadRow(
+    row: FileReadRow | null,
+    internal: string,
+    userPath: string,
+    maxDepth: number,
+    tx?: SqlClient,
+  ): Promise<string> {
+    if (!row || row.node_type === "tombstone") {
+      throw new FsError("ENOENT", "no such file or directory", userPath);
+    }
+    if (row.node_type === "symlink" && row.symlink_target) {
+      if (maxDepth <= 0) {
+        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
+      }
+      const target = this.resolveLinkTargetPath(internal, row.symlink_target);
+      return tx
+        ? this.internalReadFile(tx, target, userPath, maxDepth - 1)
+        : this.withReadOnlyWorkspace((t) =>
+            this.internalReadFile(t, target, userPath, maxDepth - 1),
+          );
+    }
+    if (row.node_type === "directory") {
+      throw new FsError(
+        "EISDIR",
+        "illegal operation on a directory, read",
+        userPath,
+      );
+    }
+
+    const size = Number(row.size_bytes);
+    if (this.maxReadSize !== undefined && size > this.maxReadSize) {
+      throw new FsError(
+        "E2BIG",
+        `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFileRange with { offset, limit } to read in chunks`,
+        userPath,
+      );
+    }
+
+    if (!row.blob_hash) return "";
+    if (row.blob_content !== null) return row.blob_content;
+    if (row.blob_binary_data !== null) {
+      return new TextDecoder().decode(row.blob_binary_data);
+    }
+    return "";
+  }
+
+  /**
+   * `fetchReadRow` for many paths in one round-trip, keyed by the requested
+   * internal path. Same shape as resolveEntries (DISTINCT ON over the
+   * MATERIALIZED path lookup) plus the blob join. One path keeps the
+   * single-path query and its tighter plan.
+   */
+  private async fetchReadRows(
+    tx: SqlClient,
+    internals: string[],
+  ): Promise<Map<string, FileReadRow>> {
+    const out = new Map<string, FileReadRow>();
+    if (internals.length === 1) {
+      const only = internals[0]!;
+      const row = await this.fetchReadRow(tx, only);
+      if (row) out.set(only, row);
+      return out;
+    }
+    const versionId = await this.getCurrentVersionId(tx);
+    const ltToInternal = new Map<string, string>();
+    for (const p of internals) {
+      ltToInternal.set(pathToLtree(p, this.workspaceId), p);
+    }
+    const r = await tx.query<FileReadRow>(
+      `WITH e AS MATERIALIZED (
+         SELECT workspace_id, version_id, path, blob_hash, node_type,
+                symlink_target, size_bytes
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = ANY($2::ltree[])
+       ),
+       picked AS (
+         SELECT DISTINCT ON (e.path)
+                e.path, e.blob_hash, e.node_type, e.symlink_target, e.size_bytes
+         FROM e
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+         WHERE a.descendant_id = $3
+         ORDER BY e.path, a.depth ASC
+       )
+       SELECT picked.path::text AS path,
+              picked.blob_hash,
+              picked.node_type,
+              picked.symlink_target,
+              picked.size_bytes,
+              b.content AS blob_content,
+              b.binary_data AS blob_binary_data
+       FROM picked
+       LEFT JOIN fs_blobs b
+         ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
+      [this.workspaceId, [...ltToInternal.keys()], versionId],
+    );
+    for (const row of r.rows) {
+      const internal = ltToInternal.get(row.path);
+      if (internal !== undefined) out.set(internal, row);
+    }
+    return out;
+  }
+
+  private async fetchReadRow(
+    tx: SqlClient,
+    internal: string,
+  ): Promise<FileReadRow | null> {
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(internal, this.workspaceId);
     // Same flip as resolveEntry, with the CTE materialized as a planner fence
     // so prepared-statement plan caching can't invert the join order. The
     // LEFT JOIN to fs_blobs runs once against the winning row (after LIMIT 1).
-    const r = await tx.query<{
-      path: string;
-      blob_hash: Uint8Array | null;
-      node_type: string;
-      symlink_target: string | null;
-      size_bytes: number | string;
-      blob_content: string | null;
-      blob_binary_data: Uint8Array | null;
-    }>(
+    const r = await tx.query<FileReadRow>(
       `WITH e AS MATERIALIZED (
          SELECT workspace_id, version_id, path, blob_hash, node_type,
                 symlink_target, size_bytes
@@ -258,45 +393,7 @@ export class PgFileSystem extends FsWriteOpsBase {
          ON b.workspace_id = $1 AND b.hash = picked.blob_hash`,
       [this.workspaceId, lt, versionId],
     );
-
-    const row = r.rows[0];
-    if (!row || row.node_type === "tombstone") {
-      throw new FsError("ENOENT", "no such file or directory", userPath);
-    }
-    if (row.node_type === "symlink" && row.symlink_target) {
-      if (maxDepth <= 0) {
-        throw new FsError("ELOOP", "too many levels of symbolic links", userPath);
-      }
-      return this.internalReadFile(
-        tx,
-        this.resolveLinkTargetPath(internal, row.symlink_target),
-        userPath,
-        maxDepth - 1,
-      );
-    }
-    if (row.node_type === "directory") {
-      throw new FsError(
-        "EISDIR",
-        "illegal operation on a directory, read",
-        userPath,
-      );
-    }
-
-    const size = Number(row.size_bytes);
-    if (this.maxReadSize !== undefined && size > this.maxReadSize) {
-      throw new FsError(
-        "E2BIG",
-        `file too large to read (${size} bytes, max ${this.maxReadSize}). Use readFileRange with { offset, limit } to read in chunks`,
-        userPath,
-      );
-    }
-
-    if (!row.blob_hash) return "";
-    if (row.blob_content !== null) return row.blob_content;
-    if (row.blob_binary_data !== null) {
-      return new TextDecoder().decode(row.blob_binary_data);
-    }
-    return "";
+    return r.rows[0] ?? null;
   }
 
   async readFileRange(

@@ -6,9 +6,11 @@ import type { SqlClient, TraceEvent } from "../lib/core/types.js";
 
 const WS = "batched-lookups";
 
-/** resolveEntries' multi-path lookup: what a coalesced batch sends. */
+/** The multi-path lookups a coalesced batch sends (entries, or entries + blobs). */
 const isBatchQuery = (e: TraceEvent) =>
   e.type === "query" && e.sql.includes("ANY($2::ltree[])");
+const isReadBatch = (e: TraceEvent) =>
+  isBatchQuery(e) && e.type === "query" && e.sql.includes("fs_blobs");
 
 type Outcome = { ok: unknown } | { err: string };
 
@@ -59,6 +61,9 @@ describe.each(TEST_ADAPTERS)("batched lookups [%s]", (_name, factory) => {
     await writer.symlink("/d/nowhere", "/d/broken");
     await writer.symlink("/d/loop-b", "/d/loop-a");
     await writer.symlink("/d/loop-a", "/d/loop-b");
+    await writer.writeFile("/d/empty.txt", "");
+    await writer.writeFile("/d/bin.dat", new TextEncoder().encode("bytes"));
+    await writer.writeFile("/d/big.txt", "x".repeat(64));
     events = [];
     fs = new PgFileSystem({
       db: client,
@@ -164,5 +169,60 @@ describe.each(TEST_ADAPTERS)("batched lookups [%s]", (_name, factory) => {
     const ok = new PgFileSystem({ db: client, workspaceId: WS });
     const again = await Promise.all(["/d/f0.txt", "/d/f1.txt"].map((p) => ok.exists(p)));
     expect(again).toEqual([true, true]);
+  });
+
+  describe("readFile", () => {
+    const READS = [
+      "/d/f0.txt",
+      "/d/f1.txt",
+      "/d/f1.txt", // duplicate in the same batch
+      "/d/empty.txt",
+      "/d/bin.dat",
+      "/d/big.txt", // over maxReadSize below
+      "/d/sub", // directory
+      "/d/missing.txt",
+      "/d/secret.log", // excluded
+      "/d/link",
+      "/d/broken",
+      "/d/loop-a",
+    ];
+
+    let reader: PgFileSystem;
+    beforeEach(() => {
+      reader = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        exclude: ["*.log"],
+        maxReadSize: 32,
+        trace: (e) => events.push(e),
+      });
+    });
+
+    it("answers a burst with one query, same results as one at a time", async () => {
+      const sequential: Outcome[] = [];
+      for (const p of READS) sequential.push(await settle(reader.readFile(p)));
+      events.length = 0;
+
+      const batched = await Promise.all(READS.map((p) => settle(reader.readFile(p))));
+
+      expect(batched).toEqual(sequential);
+      expect(sequential).toContainEqual({ err: "EISDIR" });
+      expect(sequential).toContainEqual({ err: "E2BIG" });
+      expect(sequential).toContainEqual({ err: "ELOOP" });
+      expect(sequential).toContainEqual({ ok: "bytes" });
+      expect(events.filter(isReadBatch)).toHaveLength(1);
+    });
+
+    it("does not batch inside a transaction and sees its uncommitted writes", async () => {
+      await reader.transaction(async (tx) => {
+        await tx.writeFile("/d/f0.txt", "changed");
+        const [a, b] = await Promise.all([
+          tx.readFile("/d/f0.txt"),
+          tx.readFile("/d/f1.txt"),
+        ]);
+        expect([a, b]).toEqual(["changed", "1"]);
+      });
+      expect(events.filter(isReadBatch)).toHaveLength(0);
+    });
   });
 });
