@@ -63,7 +63,7 @@ await bash.exec("echo hello > /file.txt");
 - **Tables**: `fs_version_roots`, `fs_versions`, `version_ancestors`, `fs_entries`, `fs_blobs`, `fs_blob_chunks` (opt-in chunk-level index; FK-cascades with its blob; all search is chunk-granular: `textSearch()` with FTS on, `semanticSearch()`/`hybridSearch()` with vector search too), `fs_chunk_embeddings` (vector-search only: per-content_hash embedding cache filled by `indexChunkEmbeddings()`, which — like `backfillChunks()` and the searches — scopes to the handle's current version; no FK — outlives its chunk rows by design)
 - **Extensions**: `ltree`, `pg_textsearch` (v1.0.0), optionally `pgvector`
 - **Indexes**: GiST on ltree paths, version-root label uniqueness, ancestor closure depth/reverse indexes, blob hash, optional BM25/HNSW
-- **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set via `SET LOCAL` in every transaction
+- **RLS**: policy on `workspace_id = current_setting('app.workspace_id', true)`, set locally per transaction or per statement (see Code conventions)
 - **Workspace ID**: text (UUID by default), scoped per `PgFileSystem` instance
 - **Version root**: `/` by default; `mkdir(path, { versioned: true })` creates a non-nested directory-level version root opened via `fs.versioned(path)`
 
@@ -93,7 +93,8 @@ Test DB: `bashgres_test`. Tests use `fileParallelism: false` and shared setup vi
 - `as` casts only at driver boundaries (e.g., `result as T[]` when bridging between type systems)
 - Peer deps: `drizzle-orm`, `postgres`, `pg`, and `just-bash` are all optional
 - Path encoding: special chars become `_xHEX_` (delimited to prevent greedy regex issues)
-- All filesystem operations run inside explicit transactions with `SET LOCAL app.workspace_id` and `SET LOCAL statement_timeout`
+- Every statement runs with `app.workspace_id` and `statement_timeout` set locally. Writes and multi-statement ops get them from an explicit transaction (`withWorkspace`); single-statement reads (`withReadOnlyWorkspace`) skip BEGIN/COMMIT and carry them in a `set_config(..., true)` CTE prepended to the statement. On a read-only instance only statements passing `isPlainRead` (`readonly.ts`) take the CTE path; everything else keeps the READ ONLY transaction
+- `exists`/`stat`/`lstat`/`readFile` reach their `Coalescer` (`filesystem/internals/coalescer.ts`) before their first `await`: that is what lets concurrent calls share one query, so keep new code ahead of it synchronous
 - `setup()` is idempotent (safe to call on every startup); uses `IF NOT EXISTS` / `IF NOT EXISTS` everywhere
 - Prefer named files over `index.ts` (e.g., `filesystem.ts`, `setup.ts`); avoid barrel/re-export files unless strictly necessary
 
