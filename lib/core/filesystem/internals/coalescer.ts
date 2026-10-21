@@ -1,31 +1,42 @@
 interface Waiter<V> {
-  resolve: (value: V) => void;
+  resolve: (value: V | null) => void;
   reject: (error: unknown) => void;
 }
 
+export interface CoalescerLoaders<V> {
+  /** Loads one key on its own: lone calls, and each key of a failed batch. */
+  one: (key: string) => Promise<V | null>;
+  /** Loads several keys in one round-trip; keys absent from the map are null. */
+  many: (keys: string[]) => Promise<Map<string, V>>;
+  /** Most keys one `many()` statement carries; bigger bursts split. */
+  maxBatch: number;
+}
+
 /**
- * Answers every `load()` issued in the same synchronous run with one
- * `loadMany()` call at the next microtask. That is how just-bash fans out
+ * Answers every `load()` issued in the same synchronous run with one `many()`
+ * call at the next microtask. That is how just-bash fans out
  * (`Promise.all(names.map((n) => fs.stat(n)))`), so a burst costs one
  * round-trip instead of a pool's worth of waves. Callers must reach `load()`
- * before their first `await`. Duplicate keys share one slot; keys missing
- * from the result get `missing`; a failed `loadMany()` rejects every caller
- * in the batch.
+ * before their first `await`; duplicate keys share one slot.
+ *
+ * Batching never changes what a caller gets. A lone key runs `one()`, and if
+ * a `many()` statement fails (a path that can't be encoded, a statement
+ * timeout, anything), each of its keys is retried through `one()`, so every
+ * caller settles exactly as it would have without batching. `maxBatch` keeps
+ * one statement from carrying a whole tree's worth of content under a single
+ * statement timeout.
  */
 export class Coalescer<V> {
   private pending: Map<string, Waiter<V>[]> | null = null;
 
-  constructor(
-    private readonly loadMany: (keys: string[]) => Promise<Map<string, V>>,
-    private readonly missing: V,
-  ) {}
+  constructor(private readonly loaders: CoalescerLoaders<V>) {}
 
-  load(key: string): Promise<V> {
+  load(key: string): Promise<V | null> {
     let batch = this.pending;
     if (!batch) {
       const fresh = new Map<string, Waiter<V>[]>();
       this.pending = batch = fresh;
-      queueMicrotask(() => void this.flush(fresh));
+      queueMicrotask(() => this.flush(fresh));
     }
     const waiters = batch.get(key) ?? [];
     batch.set(key, waiters);
@@ -34,18 +45,46 @@ export class Coalescer<V> {
     });
   }
 
-  private async flush(batch: Map<string, Waiter<V>[]>): Promise<void> {
+  private flush(batch: Map<string, Waiter<V>[]>): void {
     this.pending = null;
-    try {
-      const values = await this.loadMany([...batch.keys()]);
-      for (const [key, waiters] of batch) {
-        const value = values.has(key) ? values.get(key)! : this.missing;
-        for (const w of waiters) w.resolve(value);
-      }
-    } catch (error) {
-      for (const waiters of batch.values()) {
-        for (const w of waiters) w.reject(error);
+    const keys = [...batch.keys()];
+    const { maxBatch } = this.loaders;
+    for (let start = 0; start < keys.length; start += maxBatch) {
+      const chunk = keys.slice(start, start + maxBatch);
+      if (chunk.length === 1) {
+        this.settleOne(chunk[0]!, batch);
+      } else {
+        void this.settleMany(chunk, batch);
       }
     }
+  }
+
+  private async settleMany(
+    keys: string[],
+    batch: Map<string, Waiter<V>[]>,
+  ): Promise<void> {
+    let values: Map<string, V>;
+    try {
+      values = await this.loaders.many(keys);
+    } catch {
+      for (const key of keys) this.settleOne(key, batch);
+      return;
+    }
+    for (const key of keys) {
+      const value = values.get(key) ?? null;
+      for (const w of batch.get(key)!) w.resolve(value);
+    }
+  }
+
+  private settleOne(key: string, batch: Map<string, Waiter<V>[]>): void {
+    const waiters = batch.get(key)!;
+    this.loaders.one(key).then(
+      (value) => {
+        for (const w of waiters) w.resolve(value);
+      },
+      (error: unknown) => {
+        for (const w of waiters) w.reject(error);
+      },
+    );
   }
 }

@@ -26,11 +26,20 @@ import { FsVersionBase } from "./version.js";
 
 export class FsVisibilityBase extends FsVersionBase {
   /** Coalesces concurrent `lookupEntry` calls; see `Coalescer`. */
-  private readonly lookups = new Coalescer<EntryRow | null>(
-    (paths) =>
-      this.withReadOnlyWorkspace((tx) => this.resolveEntries(tx, paths)),
-    null,
-  );
+  private readonly lookups = new Coalescer<EntryRow>({
+    one: (path) =>
+      this.withReadOnlyWorkspace((tx) => this.resolveEntry(tx, path)),
+    many: async (paths) => {
+      const rows = await this.withReadOnlyWorkspace((tx) =>
+        this.resolveEntries(tx, paths),
+      );
+      const found = new Map<string, EntryRow>();
+      for (const [path, row] of rows) if (row) found.set(path, row);
+      return found;
+    },
+    // Metadata rows are small; a `du` of a large tree still fits a few.
+    maxBatch: 256,
+  });
 
   /**
    * `resolveEntry` for a public single-path read, with concurrent calls

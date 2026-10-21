@@ -222,11 +222,14 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   /** Coalesces concurrent `readFile` fetches; see `Coalescer`. */
-  private readonly fileReads = new Coalescer<FileReadRow | null>(
-    (internals) =>
+  private readonly fileReads = new Coalescer<FileReadRow>({
+    one: (internal) =>
+      this.withReadOnlyWorkspace((tx) => this.fetchReadRow(tx, internal)),
+    many: (internals) =>
       this.withReadOnlyWorkspace((tx) => this.fetchReadRows(tx, internals)),
-    null,
-  );
+    // Rows carry file content: keep one statement to a modest payload.
+    maxBatch: 32,
+  });
 
   private isHiddenFromReads(internal: string): boolean {
     return (
@@ -302,20 +305,14 @@ export class PgFileSystem extends FsWriteOpsBase {
   /**
    * `fetchReadRow` for many paths in one round-trip, keyed by the requested
    * internal path. Same shape as resolveEntries (DISTINCT ON over the
-   * MATERIALIZED path lookup) plus the blob join. One path keeps the
-   * single-path query and its tighter plan.
+   * MATERIALIZED path lookup) plus the blob join. Lone reads use
+   * `fetchReadRow` and its tighter plan (the coalescer routes them there).
    */
   private async fetchReadRows(
     tx: SqlClient,
     internals: string[],
   ): Promise<Map<string, FileReadRow>> {
     const out = new Map<string, FileReadRow>();
-    if (internals.length === 1) {
-      const only = internals[0]!;
-      const row = await this.fetchReadRow(tx, only);
-      if (row) out.set(only, row);
-      return out;
-    }
     const versionId = await this.getCurrentVersionId(tx);
     const ltToInternal = new Map<string, string>();
     for (const p of internals) {

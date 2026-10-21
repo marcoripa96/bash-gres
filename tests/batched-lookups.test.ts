@@ -148,27 +148,71 @@ describe.each(TEST_ADAPTERS)("batched lookups [%s]", (_name, factory) => {
     expect(events.filter(isBatchQuery)).toHaveLength(0);
   });
 
-  it("rejects every caller in a batch when the query fails", async () => {
+  it("falls back to per-call queries when a batch statement fails", async () => {
+    let batchFailures = 0;
     const failing: SqlClient = {
-      query: (text, params) =>
-        text.includes("ANY($2::ltree[])")
-          ? Promise.reject(new Error("boom"))
-          : client.query(text, params),
+      query: (text, params) => {
+        if (text.includes("ANY($2::ltree[])")) {
+          batchFailures++;
+          return Promise.reject(new Error("statement timeout"));
+        }
+        return client.query(text, params);
+      },
       transaction: (fn) => client.transaction(fn),
     };
-    const broken = new PgFileSystem({ db: failing, workspaceId: WS });
+    const flaky = new PgFileSystem({ db: failing, workspaceId: WS });
     const results = await Promise.all(
-      ["/d/f0.txt", "/d/f1.txt", "/d/f2.txt"].map((p) => settle(broken.stat(p))),
+      ["/d/f0.txt", "/d/missing.txt", "/d/sub"].map((p) => settle(flaky.exists(p))),
     );
-    expect(results).toEqual([
-      { err: "Error: boom" },
-      { err: "Error: boom" },
-      { err: "Error: boom" },
+    expect(batchFailures).toBe(1);
+    expect(results).toEqual([{ ok: true }, { ok: false }, { ok: true }]);
+  });
+
+  it("fails only the call whose path can't be encoded", async () => {
+    const tooLong = "/d/" + "a".repeat(300);
+    const alone = await settle(fs.exists(tooLong));
+    expect("err" in alone).toBe(true);
+
+    const [bad, good, missing] = await Promise.all([
+      settle(fs.exists(tooLong)),
+      settle(fs.exists("/d/f0.txt")),
+      settle(fs.stat("/d/missing.txt")),
     ]);
-    // The next burst starts a fresh batch.
-    const ok = new PgFileSystem({ db: client, workspaceId: WS });
-    const again = await Promise.all(["/d/f0.txt", "/d/f1.txt"].map((p) => ok.exists(p)));
-    expect(again).toEqual([true, true]);
+    expect(bad).toEqual(alone);
+    expect(good).toEqual({ ok: true });
+    expect(missing).toEqual({ err: "ENOENT" });
+  });
+
+  it("splits bursts larger than one statement carries", async () => {
+    await fs.exists("/"); // resolve and cache the version id first
+    events.length = 0;
+    const paths = Array.from({ length: 300 }, (_, i) => `/d/n${i}.txt`);
+    const found = await Promise.all(paths.map((p) => fs.exists(p)));
+    expect(found.every((x) => x === false)).toBe(true);
+    // 256 + 44: two batch statements, issued together.
+    expect(events.filter(isBatchQuery)).toHaveLength(2);
+  });
+
+  it("keeps mount-hidden paths hidden inside a batch", async () => {
+    const view = new PgFileSystem({
+      db: client,
+      workspaceId: WS,
+      mount: [{ path: "/d/sub" }],
+    });
+    const results = await Promise.all(
+      ["/d/f0.txt", "/d/sub", "/d", "/"].map((p) => settle(view.exists(p))),
+    );
+    // Outside the mount is invisible; the mount and its ancestors are visible.
+    expect(results).toEqual([
+      { ok: false },
+      { ok: true },
+      { ok: true },
+      { ok: true },
+    ]);
+    const reads = await Promise.all(
+      ["/d/f0.txt", "/d/f1.txt"].map((p) => settle(view.readFile(p))),
+    );
+    expect(reads).toEqual([{ err: "ENOENT" }, { err: "ENOENT" }]);
   });
 
   describe("readFile", () => {
@@ -211,6 +255,34 @@ describe.each(TEST_ADAPTERS)("batched lookups [%s]", (_name, factory) => {
       expect(sequential).toContainEqual({ err: "ELOOP" });
       expect(sequential).toContainEqual({ ok: "bytes" });
       expect(events.filter(isReadBatch)).toHaveLength(1);
+    });
+
+    it("fails only the read whose path can't be encoded", async () => {
+      const tooLong = "/d/" + "b".repeat(300);
+      const alone = await settle(reader.readFile(tooLong));
+      expect("err" in alone).toBe(true);
+      const paths = [tooLong, ...Array.from({ length: 20 }, (_, i) => `/d/f${i}.txt`)];
+      const results = await Promise.all(paths.map((p) => settle(reader.readFile(p))));
+      expect(results[0]).toEqual(alone);
+      expect(results.slice(1)).toEqual(
+        Array.from({ length: 20 }, (_, i) => ({ ok: `${i}` })),
+      );
+    });
+
+    it("splits bursts larger than one statement carries", async () => {
+      await reader.readFile("/d/f0.txt"); // resolve and cache the version id first
+      events.length = 0;
+      const paths = [
+        ...Array.from({ length: 20 }, (_, i) => `/d/f${i}.txt`),
+        ...Array.from({ length: 20 }, (_, i) => `/d/gone${i}.txt`),
+      ];
+      const results = await Promise.all(paths.map((p) => settle(reader.readFile(p))));
+      expect(results.slice(0, 20)).toEqual(
+        Array.from({ length: 20 }, (_, i) => ({ ok: `${i}` })),
+      );
+      expect(results.slice(20).every((r) => "err" in r && r.err === "ENOENT")).toBe(true);
+      // 40 distinct paths: 32 + 8, two batch statements issued together.
+      expect(events.filter(isReadBatch)).toHaveLength(2);
     });
 
     it("does not batch inside a transaction and sees its uncommitted writes", async () => {
