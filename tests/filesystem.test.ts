@@ -341,6 +341,33 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
       await expect(fs.readdir("/nope")).rejects.toThrow("ENOENT");
     });
 
+    it("throws ENOTDIR for a file, on every listing variant", async () => {
+      await fs.writeFile("/plain.txt", "x");
+      await expect(fs.readdir("/plain.txt")).rejects.toThrow("ENOTDIR");
+      await expect(fs.readdirWithFileTypes("/plain.txt")).rejects.toThrow(
+        "ENOTDIR",
+      );
+      await expect(fs.readdirWithStats("/plain.txt")).rejects.toThrow(
+        "ENOTDIR",
+      );
+    });
+
+    it("lists an empty directory as empty", async () => {
+      await fs.mkdir("/empty");
+      expect(await fs.readdir("/empty")).toEqual([]);
+      expect(await fs.readdirWithFileTypes("/empty")).toEqual([]);
+    });
+
+    it("throws ENOENT for a directory removed in a fork but kept by its parent", async () => {
+      await fs.mkdir("/parent/sub", { recursive: true });
+      await fs.writeFile("/parent/sub/f.txt", "f");
+      const child = await fs.fork("readdir-tombstone");
+      await child.rm("/parent/sub", { recursive: true });
+      await expect(child.readdir("/parent/sub")).rejects.toThrow("ENOENT");
+      expect(await child.readdir("/parent")).toEqual([]);
+      expect(await fs.readdir("/parent/sub")).toEqual(["f.txt"]);
+    });
+
     it("readdirWithStats returns metadata in one pass", async () => {
       await fs.mkdir("/parent");
       await fs.writeFile("/parent/a.txt", "hello");

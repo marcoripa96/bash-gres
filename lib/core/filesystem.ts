@@ -22,6 +22,7 @@ import { chunkMarkdown } from "./chunking.js";
 import {
   pathToLtree,
   ltreeToPath,
+  ltreeFileName,
   normalizePath,
   parentPath,
   fileName,
@@ -1092,22 +1093,15 @@ export class PgFileSystem extends FsWriteOpsBase {
   async readdir(path: string): Promise<string[]> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type !== "directory")
-        throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      const realPath = ltreeToPath(node.path);
-      return this.listVisibleChildNames(tx, realPath);
+      const children = await this.listDirectory(tx, internal, path);
+      return children.map((c) => ltreeFileName(c.path));
     });
   }
 
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type !== "directory")
-        throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      const realPath = ltreeToPath(node.path);
-      const children = await this.listVisibleChildren(tx, realPath);
+      const children = await this.listDirectory(tx, internal, path);
       return children.map((c) => this.mapDirChildToDirent(c));
     });
   }
@@ -1115,11 +1109,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   async readdirWithStats(path: string): Promise<DirentStatEntry[]> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type !== "directory")
-        throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      const realPath = ltreeToPath(node.path);
-      const children = await this.listVisibleChildren(tx, realPath);
+      const children = await this.listDirectory(tx, internal, path);
       return children.map((c) => this.mapDirChildToStatEntry(c));
     });
   }
