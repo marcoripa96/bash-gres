@@ -229,6 +229,20 @@ describe.each(TEST_ADAPTERS)("semanticSearch & hybridSearch [%s]", (_name, facto
     ).toEqual(["/content/a.md"]);
   });
 
+  it("ranks only chunks in the search path (no crowding from outside it)", async () => {
+    // Ten closer matches outside the path, one farther match inside it.
+    for (let i = 0; i < 10; i++) {
+      await fs.writeFile(`/docs/d${i}.md`, `## D${i}\n\nshipping shipping shipping`);
+    }
+    await fs.writeFile("/content/a.md", "## A\n\nshipping, returns and widgets");
+    await fs.indexChunkEmbeddings();
+
+    const semantic = await fs.semanticSearch("shipping", { path: "/content", limit: 1 });
+    expect(semantic.map((h) => h.path)).toEqual(["/content/a.md"]);
+    const hybrid = await fs.hybridSearch("shipping", { path: "/content", limit: 1 });
+    expect(hybrid.map((h) => h.path)).toEqual(["/content/a.md"]);
+  });
+
   it("semanticSearch: ranks by vector similarity alone, synonyms included", async () => {
     await fs.writeFile("/shipping.md", "## Shipping\n\nOrders ship free over fifty euros.");
     await fs.writeFile("/returns.md", "## Returns\n\nRefunds within thirty days.");
