@@ -4,6 +4,7 @@ import { ensureSetup } from "./global-setup.js";
 import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import type { SqlClient } from "./helpers.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
+import type { TraceEvent } from "../lib/core/types.js";
 
 describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
   let client: SqlClient;
@@ -140,5 +141,76 @@ describe.each(TEST_ADAPTERS)("just-bash integration [%s]", (_name, factory) => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe("guarded\n");
+  });
+
+  describe("/dev/null", () => {
+    // just-bash discards `2>/dev/null` itself but hands `>`, `>>` and `<`
+    // to the filesystem.
+    it("discards redirected output on a read-only instance", async () => {
+      const ro = new PgFileSystem({
+        db: client,
+        workspaceId: wsId,
+        permissions: { read: true, write: false },
+      });
+      const roBash = new Bash({ fs: ro });
+      const result = await roBash.exec(
+        "echo hi > /dev/null; echo more >> /dev/null; cat < /dev/null; echo ok",
+      );
+      expect(result).toMatchObject({ exitCode: 0, stdout: "ok\n", stderr: "" });
+    });
+
+    it("stores nothing on a writable instance", async () => {
+      await bash.exec("echo hi > /dev/null; echo more >> /dev/null");
+      expect(await pgFs.exists("/dev")).toBe(false);
+    });
+
+    it("is a character device that costs no queries", async () => {
+      const events: TraceEvent[] = [];
+      const ro = new PgFileSystem({
+        db: client,
+        workspaceId: wsId,
+        permissions: { read: true, write: false },
+        trace: (e) => events.push(e),
+      });
+      const roBash = new Bash({ fs: ro });
+      await pgFs.writeFile("/a.txt", "alpha");
+      const result = await roBash.exec(
+        "[ -e /dev/null ] && echo exists; echo hi > /dev/null; cp /a.txt /dev/null; echo ok",
+      );
+      expect(result).toMatchObject({ exitCode: 0, stdout: "exists\nok\n", stderr: "" });
+      const devNullOps = events.filter(
+        (e) => e.type === "op" && e.args.includes("/dev/null"),
+      );
+      expect(devNullOps.length).toBeGreaterThan(0);
+      expect(devNullOps.every((e) => e.type === "op" && e.queries === 0)).toBe(true);
+
+      expect(await ro.exists("/dev/null")).toBe(true);
+      for (const st of [await ro.stat("/dev/null"), await ro.lstat("/dev/null")]) {
+        expect(st).toMatchObject({ isFile: false, isDirectory: false, isSymbolicLink: false, size: 0 });
+      }
+    });
+
+    it("cp to /dev/null still needs a source file", async () => {
+      await pgFs.mkdir("/dir");
+      await expect(pgFs.cp("/missing", "/dev/null")).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(pgFs.cp("/dir", "/dev/null", { recursive: true })).rejects.toMatchObject({ code: "EISDIR" });
+      expect(await pgFs.exists("/dev")).toBe(false);
+    });
+
+    it("is a sink for the fs API, under a rootDir and mounts too", async () => {
+      const scoped = new PgFileSystem({ db: client, workspaceId: wsId, rootDir: "/scoped" });
+      const mounted = new PgFileSystem({
+        db: client,
+        workspaceId: wsId,
+        mount: [{ path: "/general", readonly: true }],
+      });
+      for (const fs of [pgFs, scoped, mounted]) {
+        await fs.writeFile("/dev/null", "x");
+        await fs.appendFile("/dev//null", "y");
+        expect(await fs.readFile("/dev/null")).toBe("");
+        expect(await fs.readFileBuffer("/dev/../dev/null")).toEqual(new Uint8Array(0));
+      }
+      expect(await pgFs.exists("/scoped/dev/null")).toBe(false);
+    });
   });
 });
