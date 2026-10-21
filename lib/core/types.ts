@@ -391,7 +391,62 @@ export interface PgFileSystemOptions {
    * was enabled, run `backfillChunks()`.
    */
   chunking?: boolean | ChunkingOptions;
+  /**
+   * Observability hook: receives one `query` event per SQL statement sent to
+   * Postgres and one `op` event per public filesystem call when it settles.
+   * Queries are attributed to the innermost op that issued them, also when a
+   * caller (e.g. a just-bash session) runs ops concurrently. Inherited by
+   * forks, `versioned()` children and `transaction()` facades. Off by
+   * default; when unset nothing is wrapped. The sink runs synchronously on
+   * the query path, so keep it cheap and non-throwing.
+   */
+  trace?: (event: TraceEvent) => void;
 }
+
+/** The public filesystem call a traced query ran under. */
+export interface TraceOpRef {
+  /** Unique per traced call within the process. */
+  id: number;
+  /** Method name, e.g. `readFile`, `readdirWithFileTypes`, `fork`. */
+  name: string;
+}
+
+/** One SQL statement as it was sent to Postgres. */
+export interface TraceQueryEvent {
+  type: "query";
+  /** Exact text sent, including any injected `set_config` CTE. */
+  sql: string;
+  /** Number of bound parameters (values are not included). */
+  paramCount: number;
+  durationMs: number;
+  /** Rows returned; 0 when the statement failed. */
+  rows: number;
+  /** True when the statement ran inside an explicit transaction. */
+  transaction: boolean;
+  /** Innermost traced op that issued it; null for untraced callers. */
+  op: TraceOpRef | null;
+  error?: unknown;
+}
+
+/** One public filesystem call, emitted when it settles. */
+export interface TraceOpEvent {
+  type: "op";
+  id: number;
+  name: string;
+  /** The call's string arguments (paths, labels); other arguments omitted. */
+  args: string[];
+  durationMs: number;
+  /** Statements issued while this op was innermost (nested ops excluded). */
+  queries: number;
+  /** Summed duration of those statements; can exceed `durationMs` when
+   *  the op runs queries concurrently. */
+  sqlMs: number;
+  /** Enclosing traced op, e.g. the `transaction` a facade call ran in. */
+  parentId: number | null;
+  error?: unknown;
+}
+
+export type TraceEvent = TraceQueryEvent | TraceOpEvent;
 
 /** One stored row of the chunk-level search index, in document order. */
 export interface BlobChunk {

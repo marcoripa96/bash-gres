@@ -28,6 +28,12 @@ function createPostgresTestClient(): TestClient {
   return { client, teardown: () => sql.end() };
 }
 
+function createPreparedPostgresTestClient(): TestClient {
+  const sql = createTestSql();
+  const client = createPostgresClient(sql, { prepare: true });
+  return { client, teardown: () => sql.end() };
+}
+
 function createDrizzleTestClient(): TestClient {
   const sql = postgres(TEST_DB_URL, { onnotice: () => {} });
   const db = drizzle(sql);
@@ -82,6 +88,7 @@ export type AdapterFactory = () => TestClient;
 
 export const TEST_ADAPTERS: [string, AdapterFactory][] = [
   ["postgres", createPostgresTestClient],
+  ["postgres-prepared", createPreparedPostgresTestClient],
   ["drizzle", createDrizzleTestClient],
   ["node-postgres", createNodePgTestClient],
 ];

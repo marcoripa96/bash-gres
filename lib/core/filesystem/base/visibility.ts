@@ -222,27 +222,65 @@ export class FsVisibilityBase extends FsVersionBase {
     return r.rows;
   }
 
-  protected async listVisibleChildNames(
+  /**
+   * `resolveEntryFollowSymlink(dir)` + the ENOTDIR check + `listVisibleChildren`
+   * in one round-trip: the directory's own nearest-ancestor row comes back
+   * first (`self = 0`), its children after, and the children scan is gated on
+   * that row being a directory. Directory listing is what `ls`, `find`,
+   * `grep -r` and `du` are made of, so this halves the queries of every tree
+   * walk. A symlinked directory falls back to the two-step path, which follows
+   * the link chain.
+   */
+  protected async listDirectory(
     tx: SqlClient,
-    parentPosix: string,
-  ): Promise<string[]> {
+    dirPosix: string,
+    userPath: string,
+  ): Promise<DirChildRow[]> {
+    if (
+      (!this.excludes.empty && isExcluded(this.excludes, dirPosix)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, dirPosix))
+    ) {
+      throw new FsError("ENOENT", "no such file or directory", dirPosix);
+    }
     const versionId = await this.getCurrentVersionId(tx);
-    const lt = pathToLtree(parentPosix, this.workspaceId);
+    const lt = pathToLtree(dirPosix, this.workspaceId);
     const baseParams: SqlParam[] = [this.workspaceId, versionId, lt, TOMBSTONE];
     const exc = this.buildExcludeClause("e.path", baseParams.length + 1);
     const mnt = this.buildMountClause(
       "e.path",
       baseParams.length + 1 + exc.params.length,
     );
-    const r = await tx.query<{ path: string; node_type: string }>(
-      `WITH visible AS (
+    // `self_e` keeps resolveEntry's MATERIALIZED path-lookup-first shape so
+    // the generic plan can't invert the join (see resolveEntry).
+    const r = await tx.query<DirChildRow & { self: number }>(
+      `WITH self_e AS MATERIALIZED (
+         SELECT version_id, node_type
+         FROM fs_entries
+         WHERE workspace_id = $1 AND path = $3::ltree
+       ),
+       dir AS MATERIALIZED (
+         SELECT s.node_type
+         FROM self_e s
+         JOIN version_ancestors a
+           ON a.workspace_id = $1 AND a.ancestor_id = s.version_id
+         WHERE a.descendant_id = $2
+         ORDER BY a.depth ASC
+         LIMIT 1
+       ),
+       visible AS (
          SELECT DISTINCT ON (e.path)
            e.path::text AS path,
-           e.node_type
+           e.node_type,
+           e.blob_hash,
+           e.symlink_target,
+           e.mode,
+           e.size_bytes,
+           e.mtime
          FROM fs_entries e
          JOIN version_ancestors a
            ON a.workspace_id = e.workspace_id AND a.ancestor_id = e.version_id
-         WHERE e.workspace_id = $1
+         WHERE EXISTS (SELECT 1 FROM dir WHERE node_type = 'directory')
+           AND e.workspace_id = $1
            AND a.descendant_id = $2
            AND e.path <@ $3::ltree
            AND e.path != $3::ltree
@@ -251,10 +289,31 @@ export class FsVisibilityBase extends FsVersionBase {
            AND ${mnt.sql}
          ORDER BY e.path, a.depth ASC
        )
-       SELECT path, node_type FROM visible WHERE node_type != $4 ORDER BY path`,
+       SELECT 0 AS self, NULL::text AS path, node_type,
+              NULL::bytea AS blob_hash, NULL::text AS symlink_target,
+              NULL::int AS mode, NULL::bigint AS size_bytes,
+              NULL::timestamptz AS mtime
+       FROM dir
+       UNION ALL
+       SELECT 1, path, node_type, blob_hash, symlink_target, mode,
+              size_bytes, mtime
+       FROM visible WHERE node_type != $4
+       ORDER BY self, path`,
       [...baseParams, ...exc.params, ...mnt.params],
     );
-    return r.rows.map((row) => ltreeFileName(row.path));
+    const self = r.rows[0];
+    if (!self || Number(self.self) !== 0 || self.node_type === TOMBSTONE) {
+      throw new FsError("ENOENT", "no such file or directory", dirPosix);
+    }
+    if (self.node_type === "symlink") {
+      const node = await this.resolveEntryFollowSymlink(tx, dirPosix);
+      if (node.node_type !== "directory")
+        throw new FsError("ENOTDIR", "not a directory, scandir", userPath);
+      return this.listVisibleChildren(tx, ltreeToPath(node.path));
+    }
+    if (self.node_type !== "directory")
+      throw new FsError("ENOTDIR", "not a directory, scandir", userPath);
+    return r.rows.slice(1);
   }
 
   /**

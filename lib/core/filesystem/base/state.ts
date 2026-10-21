@@ -3,6 +3,7 @@ import type { ChunkingOptions } from "../../chunking.js";
 import type { PgFileSystemOptions, SqlClient, SqlParam } from "../../types.js";
 import { FsError, SqlError } from "../../types.js";
 import { readonlySqlClient } from "../../readonly.js";
+import { traceMethods, traceSqlClient } from "../../trace.js";
 import { normalizePath } from "../../path-encoding.js";
 import {
   compileExcludes,
@@ -126,7 +127,12 @@ export class FsStateBase {
     };
     this.permissions = perms;
     this.rawDb = options.db;
-    this.client = perms.write ? options.db : readonlySqlClient(options.db);
+    // Trace below the read-only wrapper so its extra statements show up too.
+    const wire = options.trace
+      ? traceSqlClient(options.db, options.trace)
+      : options.db;
+    this.client = perms.write ? wire : readonlySqlClient(wire);
+    if (options.trace) traceMethods(this, options.trace);
     this.workspaceId = options.workspaceId ?? randomUUID();
     this.versionLabel = options.version ?? DEFAULT_VERSION;
     this.requestedVersionId = options.versionId ?? null;
