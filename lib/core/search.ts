@@ -132,19 +132,33 @@ export function visibleEntriesSql(
 }
 
 /**
- * Every search shares one two-stage shape: a signal-specific `candidates`
- * CTE ranks chunks workspace-wide to the oversample depth, then the shared
- * tail projects them onto paths visible at version V (fs_entries +
- * version_ancestors), caps hits per file, and applies the final limit.
+ * Chunks of the blobs the handle can see: visible at V, inside the search
+ * path, past excludes/mounts. Every signal ranks only these, so cost scales
+ * with the scope and a reachable hit is never crowded out of the candidate
+ * window by chunks the handle can't see (other versions, other subtrees,
+ * excluded paths).
  *
- * Recall is approximate under heavy version divergence — a top-K candidate
- * whose blob is not visible in V is dropped. `VISIBILITY_OVERSAMPLE`
- * compensates for the common case (mild divergence), and feeds the per-file
- * cap enough surplus to backfill from other files.
+ * Needs the chunk table aliased `c` and the `visible` CTE in scope. `IS
+ * TRUE` keeps the planner from turning the IN into a semi-join: `visible`
+ * is estimated at ~1 file whatever its size, and as a join that picks
+ * nested loops (one embedding lookup per chunk, 1.3x slower unscoped on
+ * 22k chunks); as a filter it plans as a hashed SubPlan probed once per
+ * chunk row, leaving the old hash joins in place.
+ */
+const IN_SCOPE = `(c.blob_hash IN (SELECT blob_hash FROM visible WHERE node_type = 'file')) IS TRUE`;
+
+/**
+ * Every search shares one two-stage shape: the `visible` CTE projects the
+ * handle's view (fs_entries + version_ancestors, scoped and filtered), a
+ * signal-specific `candidates` CTE ranks the chunks of those blobs
+ * (`IN_SCOPE`) to the oversample depth, then the shared tail maps them back
+ * onto their paths, caps hits per file, and applies the final limit.
+ * `VISIBILITY_OVERSAMPLE` feeds the per-file cap enough surplus to backfill
+ * from other files.
  *
  * The candidates CTE must produce (blob_hash, start_line, end_line,
- * heading_path, content, rank) and may reference $1 (workspace), $4
- * (oversample limit) and its own signal params from $7 up.
+ * heading_path, content, rank) and may reference `visible`, $1
+ * (workspace), $4 (oversample limit) and its own signal params from $7 up.
  */
 async function runChunkSearch(
   client: SqlClient,
@@ -184,10 +198,11 @@ async function runChunkSearch(
       content: string;
       rank: number;
     }>(
-      `WITH ${candidatesSql},
-     visible AS (
+      // Computed once, shared by each signal's IN_SCOPE and the tail join.
+      `WITH visible AS MATERIALIZED (
        ${vis.sql}
      ),
+     ${candidatesSql},
      hits AS (
        SELECT v.path, c.start_line, c.end_line, c.heading_path, c.content,
               c.rank,
@@ -221,6 +236,21 @@ async function runChunkSearch(
 }
 
 /**
+ * BM25 score of every in-scope chunk, keyed by (blob_hash, chunk_index).
+ * Scoring re-tokenizes the chunk, so it must run only on rows that passed
+ * `IN_SCOPE`: MATERIALIZED keeps the caller's `> 0` filter out of the
+ * chunk scan, where quals run in cost order and the score could be
+ * computed for every chunk of the workspace before `IN_SCOPE` rejects it.
+ */
+const TEXT_SCORED = `text_scored AS MATERIALIZED (
+       SELECT c.blob_hash, c.chunk_index,
+              -(c.content <@> to_bm25query($7, '${CHUNK_BM25_INDEX}')) AS score
+       FROM fs_blob_chunks c
+       WHERE c.workspace_id = $1
+         AND ${IN_SCOPE}
+     )`;
+
+/**
  * BM25 search at version V: lexical hits rank sections. A blob visible at
  * several paths yields one hit per (path, chunk); a blob with several
  * matching chunks yields one hit per chunk (up to the per-file cap).
@@ -235,19 +265,22 @@ export async function chunkTextSearch(
 ): Promise<ChunkSearchResult[]> {
   return runChunkSearch(
     client,
-    `text_scored AS (
-       SELECT c.blob_hash, c.chunk_index, c.start_line, c.end_line,
-              c.heading_path, c.content,
-              -(c.content <@> to_bm25query($7, '${CHUNK_BM25_INDEX}')) AS rank
-       FROM fs_blob_chunks c
-       WHERE c.workspace_id = $1
+    `${TEXT_SCORED},
+     text_top AS (
+       SELECT blob_hash, chunk_index, score AS rank
+       FROM text_scored
+       WHERE score > 0
+       ORDER BY score DESC, blob_hash, chunk_index
+       LIMIT $4
      ),
      candidates AS (
-       SELECT blob_hash, start_line, end_line, heading_path, content, rank
-       FROM text_scored
-       WHERE rank > 0
-       ORDER BY rank DESC, blob_hash, chunk_index
-       LIMIT $4
+       SELECT c.blob_hash, c.start_line, c.end_line, c.heading_path,
+              c.content, t.rank
+       FROM text_top t
+       JOIN fs_blob_chunks c
+         ON c.workspace_id = $1
+        AND c.blob_hash = t.blob_hash
+        AND c.chunk_index = t.chunk_index
      )`,
     [query],
     workspaceId,
@@ -282,6 +315,7 @@ export async function chunkSemanticSearch(
          ON emb.workspace_id = c.workspace_id
         AND emb.content_hash = c.content_hash
        WHERE c.workspace_id = $1
+         AND ${IN_SCOPE}
        ORDER BY emb.embedding <=> $7::vector, c.blob_hash, c.chunk_index
        LIMIT $4
      )`,
@@ -309,12 +343,7 @@ export async function chunkHybridSearch(
   validateEmbedding(embedding);
   return runChunkSearch(
     client,
-    `text_scored AS (
-       SELECT c.blob_hash, c.chunk_index,
-              -(c.content <@> to_bm25query($7, '${CHUNK_BM25_INDEX}')) AS score
-       FROM fs_blob_chunks c
-       WHERE c.workspace_id = $1
-     ),
+    `${TEXT_SCORED},
      text_ranked AS (
        SELECT blob_hash, chunk_index,
               ROW_NUMBER() OVER (
@@ -335,6 +364,7 @@ export async function chunkHybridSearch(
          ON emb.workspace_id = c.workspace_id
         AND emb.content_hash = c.content_hash
        WHERE c.workspace_id = $1
+         AND ${IN_SCOPE}
        ORDER BY r
        LIMIT $4
      ),

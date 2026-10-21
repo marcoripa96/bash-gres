@@ -170,6 +170,39 @@ describe.each(TEST_ADAPTERS)("textSearch [%s]", (_name, factory) => {
     ).toEqual(["/content/a.md"]);
   });
 
+  describe("ranks only what the handle can see", () => {
+    // Ten strong matches the handle can't reach, one weak one it can: the
+    // reachable hit must not be crowded out of the candidate window.
+    const writeCrowd = async (target: PgFileSystem) => {
+      for (let i = 0; i < 10; i++) {
+        await target.writeFile(`/docs/d${i}.md`, `# D${i}\n\npricing pricing pricing`);
+      }
+    };
+    const WEAK = "# A\n\npricing, among many other unrelated words in this section";
+
+    it("outside the search path", async () => {
+      await writeCrowd(fs);
+      await fs.writeFile("/content/a.md", WEAK);
+      const hits = await fs.textSearch("pricing", { path: "/content", limit: 1 });
+      expect(hits.map((h) => h.path)).toEqual(["/content/a.md"]);
+    });
+
+    it("excluded", async () => {
+      await writeCrowd(fs);
+      await fs.writeFile("/content/a.md", WEAK);
+      const excluded = new PgFileSystem({ db: client, workspaceId: WS, exclude: ["docs"] });
+      const hits = await excluded.textSearch("pricing", { limit: 1 });
+      expect(hits.map((h) => h.path)).toEqual(["/content/a.md"]);
+    });
+
+    it("in another version", async () => {
+      await fs.writeFile("/content/a.md", WEAK);
+      await writeCrowd(await fs.fork("crawl"));
+      const hits = await fs.textSearch("pricing", { limit: 1 });
+      expect(hits.map((h) => h.path)).toEqual(["/content/a.md"]);
+    });
+  });
+
   it("isolates workspaces", async () => {
     const OTHER = "text-search-other";
     await resetWorkspace(client, OTHER);

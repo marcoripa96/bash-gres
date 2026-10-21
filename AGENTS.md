@@ -44,7 +44,7 @@ await bash.exec("echo hello > /file.txt");
 - `lib/core/filesystem/ops/`: per-op implementations installed onto `PgFileSystem.prototype` (one file per op, e.g. `list-history.ts`, `version-diff.ts`, `merge.ts`); shared SQL helpers live next to them (`fetch-diff.ts`, `fetch-page-changes.ts`, `fetch-version-changes.ts`)
 - `lib/core/setup.ts`: idempotent DDL: extensions, table, indexes, RLS, optional pgvector
 - `lib/core/path-encoding.ts`: path <-> ltree conversion using `_xHEX_` delimited encoding
-- `lib/core/search.ts`: BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid
+- `lib/core/search.ts`: BM25 full-text search via pg_textsearch, optional pgvector semantic/hybrid. Every signal ranks only the chunks of blobs the handle can see (`visible` CTE + `IN_SCOPE`), so cost follows the search scope. Keep `IN_SCOPE`'s `IS TRUE` (a hashed SubPlan filter: as a semi-join the ~1-row estimate for `visible` picks nested loops) and the `MATERIALIZED` fence on BM25 scoring (otherwise `score > 0` can run in the chunk scan ahead of the scope test)
 - `lib/adapters/drizzle/adapter.ts`: converts Drizzle `db` into `SqlClient` (`DrizzleDb` interface, `createDrizzleClient`)
 - `lib/adapters/drizzle/schema.ts`: Drizzle `pgTable` with all indexes (GiST, BM25, partial)
 - `lib/adapters/postgres/index.ts`: wraps `postgres.Sql` into `SqlClient`
