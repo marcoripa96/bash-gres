@@ -423,7 +423,10 @@ export interface TraceQueryEvent {
   rows: number;
   /** True when the statement ran inside an explicit transaction. */
   transaction: boolean;
-  /** Innermost traced op that issued it; null for untraced callers. */
+  /**
+   * Innermost traced op that issued it; null for untraced callers. A
+   * statement shared by coalesced calls carries the op that enqueued first.
+   */
   op: TraceOpRef | null;
   error?: unknown;
 }
@@ -436,7 +439,12 @@ export interface TraceOpEvent {
   /** The call's string arguments (paths, labels); other arguments omitted. */
   args: string[];
   durationMs: number;
-  /** Statements issued while this op was innermost (nested ops excluded). */
+  /**
+   * Statements issued while this op was innermost (nested ops excluded).
+   * Concurrent `exists`/`stat`/`lstat`/`readFile` calls share one coalesced
+   * statement: it counts toward the op that enqueued first and the others
+   * report 0, so sum across ops to count round-trips.
+   */
   queries: number;
   /** Summed duration of those statements; can exceed `durationMs` when
    *  the op runs queries concurrently. */

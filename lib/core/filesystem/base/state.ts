@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import type { ChunkingOptions } from "../../chunking.js";
 import type { PgFileSystemOptions, SqlClient, SqlParam } from "../../types.js";
 import { FsError, SqlError } from "../../types.js";
-import { readonlySqlClient } from "../../readonly.js";
+import { isPlainRead, readonlySqlClient } from "../../readonly.js";
 import { traceMethods, traceSqlClient } from "../../trace.js";
 import { normalizePath } from "../../path-encoding.js";
 import {
@@ -30,6 +30,13 @@ import {
 
 export class FsStateBase {
   protected client: SqlClient;
+  /**
+   * The adapter's client before the read-only wrapper (tracing included).
+   * Same as `client` on a writable instance. A read-only instance sends
+   * plain reads here (see `getReadOnlyClient`) and everything else through
+   * `client`, so writes still hit a READ ONLY transaction.
+   */
+  private wireClient: SqlClient;
   /**
    * The value the adapter wants threaded back into its own constructor when the
    * core needs to reconstruct a sibling instance (fork, scope, tx facade). For
@@ -132,6 +139,7 @@ export class FsStateBase {
       ? traceSqlClient(options.db, options.trace)
       : options.db;
     this.client = perms.write ? wire : readonlySqlClient(wire);
+    this.wireClient = wire;
     if (options.trace) traceMethods(this, options.trace);
     this.workspaceId = options.workspaceId ?? randomUUID();
     this.versionLabel = options.version ?? DEFAULT_VERSION;
@@ -256,7 +264,14 @@ export class FsStateBase {
 
   private getReadOnlyClient(): SqlClient {
     if (this.cachedReadOnlyClient) return this.cachedReadOnlyClient;
-    const inner = this.client;
+    const guarded = this.client;
+    const wire = this.wireClient;
+    // On a read-only instance `guarded` wraps every statement in BEGIN / SET
+    // TRANSACTION READ ONLY / COMMIT: four round-trips per read. A statement
+    // that can't write on its own doesn't need that fence (`isPlainRead`).
+    const clientFor = this.permissions.write
+      ? () => guarded
+      : (text: string) => (isPlainRead(text) ? wire : guarded);
     const workspaceId = this.workspaceId;
     const timeoutStr = String(this.statementTimeoutMs);
     const wrap = (text: string, params: SqlParam[]): { sql: string; params: SqlParam[] } => {
@@ -272,10 +287,12 @@ export class FsStateBase {
     };
     this.cachedReadOnlyClient = {
       query: async (text, params = []) => {
+        // Classify the caller's text: the wrapper adds a set_config CTE.
+        const inner = clientFor(text);
         const w = wrap(text, params);
         return inner.query(w.sql, w.params);
       },
-      transaction: inner.transaction.bind(inner),
+      transaction: guarded.transaction.bind(guarded),
     };
     return this.cachedReadOnlyClient;
   }

@@ -28,6 +28,9 @@ interface OpFrame extends TraceOpRef {
 }
 
 const currentOp = new AsyncLocalStorage<OpFrame>();
+// Bound at load: just-bash blocks `globalThis.performance` while a script
+// runs, and these calls sit on the filesystem call path, outside `emit`'s guard.
+const now = performance.now.bind(performance);
 let nextOpId = 1;
 
 /** Public methods reported as `op` events. Sync helpers are left out. */
@@ -104,10 +107,10 @@ export function traceSqlClient(
     ): Promise<QueryResult<T>> {
       const frame = currentOp.getStore() ?? null;
       const op = frame ? { id: frame.id, name: frame.name } : null;
-      const t0 = performance.now();
+      const t0 = now();
       try {
         const r = await inner.query<T>(text, params);
-        const durationMs = performance.now() - t0;
+        const durationMs = now() - t0;
         if (frame) {
           frame.queries++;
           frame.sqlMs += durationMs;
@@ -123,7 +126,7 @@ export function traceSqlClient(
         });
         return r;
       } catch (error) {
-        const durationMs = performance.now() - t0;
+        const durationMs = now() - t0;
         if (frame) {
           frame.queries++;
           frame.sqlMs += durationMs;
@@ -167,14 +170,14 @@ export function traceMethods(target: object, sink: TraceSink): void {
         queries: 0,
         sqlMs: 0,
       };
-      const t0 = performance.now();
+      const t0 = now();
       const finish = (error?: unknown) =>
         emit(sink, {
           type: "op",
           id: frame.id,
           name,
           args: args.filter((a): a is string => typeof a === "string"),
-          durationMs: performance.now() - t0,
+          durationMs: now() - t0,
           queries: frame.queries,
           sqlMs: frame.sqlMs,
           parentId: parent?.id ?? null,
