@@ -136,7 +136,9 @@ describe.each(TEST_ADAPTERS)("trace [%s]", (_name, factory) => {
       trace: (e) => events.push(e),
     });
     events.length = 0;
-    await ro.readFile("/a.txt");
+    // Writes still run in the wrapper's READ ONLY transaction (plain reads
+    // skip it), so the wrapper's own statement shows up in the trace.
+    await expect(ro.writeFile("/b.txt", "nope")).rejects.toThrow("EPERM");
     const sqls = queries(events).map((q) => q.sql);
     expect(sqls).toContain("SET TRANSACTION READ ONLY");
   });
