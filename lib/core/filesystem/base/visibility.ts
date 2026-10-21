@@ -39,7 +39,17 @@ export class FsVisibilityBase extends FsVersionBase {
     },
     // Metadata rows are small; a `du` of a large tree still fits a few.
     maxBatch: 256,
+    // A transaction's calls run on its own connection, one at a time.
+    unbatched: () => this.txClient !== null,
   });
+
+  /** True when excludes or mounts make `posixPath` invisible to reads. */
+  protected isHiddenFromReads(posixPath: string): boolean {
+    return (
+      (!this.excludes.empty && isExcluded(this.excludes, posixPath)) ||
+      (!this.mounts.empty && !mountVisible(this.mounts, posixPath))
+    );
+  }
 
   /**
    * `resolveEntry` for a public single-path read, with concurrent calls
@@ -48,11 +58,6 @@ export class FsVisibilityBase extends FsVersionBase {
    * Inside `transaction()` lookups run directly against the open transaction.
    */
   protected lookupEntry(posixPath: string): Promise<EntryRow | null> {
-    if (this.txClient) {
-      return this.withReadOnlyWorkspace((tx) =>
-        this.resolveEntry(tx, posixPath),
-      );
-    }
     return this.lookups.load(posixPath);
   }
 
@@ -60,12 +65,7 @@ export class FsVisibilityBase extends FsVersionBase {
     tx: SqlClient,
     posixPath: string,
   ): Promise<EntryRow | null> {
-    if (!this.excludes.empty && isExcluded(this.excludes, posixPath)) {
-      return null;
-    }
-    if (!this.mounts.empty && !mountVisible(this.mounts, posixPath)) {
-      return null;
-    }
+    if (this.isHiddenFromReads(posixPath)) return null;
     const versionId = await this.getCurrentVersionId(tx);
     const lt = pathToLtree(posixPath, this.workspaceId);
     // Flip: select entries at this exact path first (typically 1 row), then
@@ -121,11 +121,7 @@ export class FsVisibilityBase extends FsVersionBase {
     const lookups: { posix: string; lt: string }[] = [];
     for (const posix of posixPaths) {
       if (out.has(posix)) continue;
-      if (!this.excludes.empty && isExcluded(this.excludes, posix)) {
-        out.set(posix, null);
-        continue;
-      }
-      if (!this.mounts.empty && !mountVisible(this.mounts, posix)) {
+      if (this.isHiddenFromReads(posix)) {
         out.set(posix, null);
         continue;
       }
@@ -180,6 +176,20 @@ export class FsVisibilityBase extends FsVersionBase {
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<EntryRow> {
     const node = await this.resolveEntry(tx, posixPath);
+    return this.followSymlinkFrom(posixPath, node, maxDepth, tx);
+  }
+
+  /**
+   * The rest of `resolveEntryFollowSymlink` for a row already fetched at
+   * `posixPath` (e.g. by a coalesced lookup): ENOENT when missing, else follow
+   * symlinks up to `maxDepth`, against `tx` when given.
+   */
+  protected async followSymlinkFrom(
+    posixPath: string,
+    node: EntryRow | null,
+    maxDepth: number,
+    tx?: SqlClient,
+  ): Promise<EntryRow> {
     if (!node)
       throw new FsError("ENOENT", "no such file or directory", posixPath);
     if (node.node_type === "symlink" && node.symlink_target) {
@@ -189,11 +199,12 @@ export class FsVisibilityBase extends FsVersionBase {
           "too many levels of symbolic links",
           posixPath,
         );
-      return this.resolveEntryFollowSymlink(
-        tx,
-        this.resolveLinkTargetPath(posixPath, node.symlink_target),
-        maxDepth - 1,
-      );
+      const target = this.resolveLinkTargetPath(posixPath, node.symlink_target);
+      return tx
+        ? this.resolveEntryFollowSymlink(tx, target, maxDepth - 1)
+        : this.withReadOnlyWorkspace((t) =>
+            this.resolveEntryFollowSymlink(t, target, maxDepth - 1),
+          );
     }
     return node;
   }
@@ -268,10 +279,7 @@ export class FsVisibilityBase extends FsVersionBase {
     dirPosix: string,
     userPath: string,
   ): Promise<DirChildRow[]> {
-    if (
-      (!this.excludes.empty && isExcluded(this.excludes, dirPosix)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, dirPosix))
-    ) {
+    if (this.isHiddenFromReads(dirPosix)) {
       throw new FsError("ENOENT", "no such file or directory", dirPosix);
     }
     const versionId = await this.getCurrentVersionId(tx);

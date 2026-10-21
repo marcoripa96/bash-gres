@@ -11,6 +11,17 @@ export interface EntryRow {
   created_at: Date;
 }
 
+/** One visible entry plus its blob, as readFile fetches it. */
+export interface FileReadRow {
+  path: string;
+  blob_hash: Uint8Array | null;
+  node_type: string;
+  symlink_target: string | null;
+  size_bytes: number | string;
+  blob_content: string | null;
+  blob_binary_data: Uint8Array | null;
+}
+
 export interface BlobRow {
   hash: Uint8Array;
   content: string | null;

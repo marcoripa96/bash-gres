@@ -10,6 +10,8 @@ export interface CoalescerLoaders<V> {
   many: (keys: string[]) => Promise<Map<string, V>>;
   /** Most keys one `many()` statement carries; bigger bursts split. */
   maxBatch: number;
+  /** When true, `load()` runs `one()` right away (e.g. inside a transaction). */
+  unbatched: () => boolean;
 }
 
 /**
@@ -32,6 +34,7 @@ export class Coalescer<V> {
   constructor(private readonly loaders: CoalescerLoaders<V>) {}
 
   load(key: string): Promise<V | null> {
+    if (this.loaders.unbatched()) return this.loaders.one(key);
     let batch = this.pending;
     if (!batch) {
       const fresh = new Map<string, Waiter<V>[]>();

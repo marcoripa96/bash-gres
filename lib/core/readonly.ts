@@ -1,5 +1,25 @@
 import type { SqlClient, SqlParam, QueryResult } from "./types.js";
 
+const READ_START = /^[\s;(]*(WITH|SELECT)\b/i;
+const WRITE_CAPABLE =
+  /\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY|CREATE|ALTER|DROP|GRANT|REVOKE|COMMENT|CALL|DO|LOCK|INTO|VACUUM|ANALYZE|REINDEX|CLUSTER|REFRESH|SECURITY|IMPORT|LISTEN|NOTIFY|PREPARE|EXECUTE|DEALLOCATE|SET|RESET|DISCARD|SHARE)\b|\b(nextval|setval|set_config|lo_\w+|pg_\w+|dblink\w*)\s*\(/i;
+
+/**
+ * True only for a statement that can't write when run on its own: it starts
+ * with SELECT/WITH and mentions no write-capable keyword or side-effecting
+ * function. Deliberately over-broad: a read it misclassifies just keeps the
+ * read-only transaction, so the check can only cost speed, never safety.
+ * Read-only instances run statements that pass it as one implicit
+ * transaction instead of BEGIN / SET TRANSACTION READ ONLY / query / COMMIT.
+ *
+ * Sound only for the library's own SQL, which is all that reaches it: a
+ * deny-list can't see a volatile user/extension function that writes, so it
+ * must never classify caller-supplied statement text.
+ */
+export function isPlainRead(text: string): boolean {
+  return READ_START.test(text) && !WRITE_CAPABLE.test(text);
+}
+
 /**
  * Wraps a `SqlClient` so that every transaction is marked `READ ONLY`.
  * PostgreSQL will reject any INSERT / UPDATE / DELETE / DDL automatically.
@@ -16,22 +36,6 @@ import type { SqlClient, SqlParam, QueryResult } from "./types.js";
  * // fs.readFile() works; fs.writeFile() throws SqlError (code 25006)
  * ```
  */
-const READ_START = /^[\s;(]*(WITH|SELECT)\b/i;
-const WRITE_CAPABLE =
-  /\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY|CREATE|ALTER|DROP|GRANT|REVOKE|COMMENT|CALL|DO|LOCK|INTO|VACUUM|ANALYZE|REINDEX|CLUSTER|REFRESH|SECURITY|IMPORT|LISTEN|NOTIFY|PREPARE|EXECUTE|DEALLOCATE|SET|RESET|DISCARD|SHARE)\b|\b(nextval|setval|set_config|lo_\w+|pg_\w+|dblink\w*)\s*\(/i;
-
-/**
- * True only for a statement that can't write when run on its own: it starts
- * with SELECT/WITH and mentions no write-capable keyword or side-effecting
- * function. Deliberately over-broad: a read it misclassifies just keeps the
- * read-only transaction, so the check can only cost speed, never safety.
- * Read-only instances run statements that pass it as one implicit
- * transaction instead of BEGIN / SET TRANSACTION READ ONLY / query / COMMIT.
- */
-export function isPlainRead(text: string): boolean {
-  return READ_START.test(text) && !WRITE_CAPABLE.test(text);
-}
-
 export function readonlySqlClient(client: SqlClient): SqlClient {
   return {
     query<T = Record<string, unknown>>(

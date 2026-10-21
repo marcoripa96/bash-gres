@@ -37,6 +37,7 @@ import {
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
 import { Coalescer } from "./filesystem/internals/coalescer.js";
+import type { FileReadRow } from "./filesystem/internals/rows.js";
 import { filesystemOpsContext } from "./filesystem/ops/context.js";
 import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
 import {
@@ -45,8 +46,6 @@ import {
   removeVersionRoot,
   type FilesystemOpsApi,
 } from "./filesystem/ops/index.js";
-import { isExcluded } from "./exclude.js";
-import { mountVisible } from "./mounts.js";
 import {
   encodeBasenameForLtree,
   globToRegex,
@@ -54,17 +53,6 @@ import {
   analyzeGlobPattern,
 } from "./filesystem/internals/glob.js";
 import type { SqlParam } from "./types.js";
-
-/** One visible entry plus its blob, as readFile fetches it. */
-interface FileReadRow {
-  path: string;
-  blob_hash: Uint8Array | null;
-  node_type: string;
-  symlink_target: string | null;
-  size_bytes: number | string;
-  blob_content: string | null;
-  blob_binary_data: Uint8Array | null;
-}
 
 export class PgFileSystem extends FsWriteOpsBase {
   [filesystemOpsContext](): FilesystemOpsContext<this> {
@@ -211,10 +199,8 @@ export class PgFileSystem extends FsWriteOpsBase {
     _options?: { encoding?: string | null } | string,
   ): Promise<string> {
     const internal = this.guardRead(path);
-    if (this.txClient || this.isHiddenFromReads(internal)) {
-      return this.withReadOnlyWorkspace(async (tx) => {
-        return this.internalReadFile(tx, internal, path);
-      });
+    if (this.isHiddenFromReads(internal)) {
+      throw new FsError("ENOENT", "no such file or directory", path);
     }
     // Before any await, so concurrent reads (grep -r, wc *) share a query.
     const row = await this.fileReads.load(internal);
@@ -229,14 +215,8 @@ export class PgFileSystem extends FsWriteOpsBase {
       this.withReadOnlyWorkspace((tx) => this.fetchReadRows(tx, internals)),
     // Rows carry file content: keep one statement to a modest payload.
     maxBatch: 32,
+    unbatched: () => this.txClient !== null,
   });
-
-  private isHiddenFromReads(internal: string): boolean {
-    return (
-      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, internal))
-    );
-  }
 
   private async internalReadFile(
     tx: SqlClient,
@@ -410,10 +390,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     options?: ReadFileRangeOptions,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<string> {
-    if (
-      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, internal))
-    ) {
+    if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -525,10 +502,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     limit: number | undefined,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<ReadFileLinesResult> {
-    if (
-      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, internal))
-    ) {
+    if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -650,10 +624,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     userPath: string,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<BlobChunk[]> {
-    if (
-      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, internal))
-    ) {
+    if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
     const entry = await this.resolveEntry(tx, internal);
@@ -910,10 +881,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     userPath: string,
     maxDepth: number = this.maxSymlinkDepth,
   ): Promise<Uint8Array> {
-    if (
-      (!this.excludes.empty && isExcluded(this.excludes, internal)) ||
-      (!this.mounts.empty && !mountVisible(this.mounts, internal))
-    ) {
+    if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
 
@@ -1109,23 +1077,12 @@ export class PgFileSystem extends FsWriteOpsBase {
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    let node = await this.lookupEntry(internal);
-    if (!node)
-      throw new FsError("ENOENT", "no such file or directory", internal);
-    if (node.node_type === "symlink" && node.symlink_target) {
-      // First hop came from the batch; follow the rest exactly as
-      // resolveEntryFollowSymlink would have from here.
-      if (this.maxSymlinkDepth <= 0)
-        throw new FsError(
-          "ELOOP",
-          "too many levels of symbolic links",
-          internal,
-        );
-      const target = this.resolveLinkTargetPath(internal, node.symlink_target);
-      node = await this.withReadOnlyWorkspace((tx) =>
-        this.resolveEntryFollowSymlink(tx, target, this.maxSymlinkDepth - 1),
-      );
-    }
+    const first = await this.lookupEntry(internal);
+    const node = await this.followSymlinkFrom(
+      internal,
+      first,
+      this.maxSymlinkDepth,
+    );
     return {
       ...this.statFromEntry(node),
       isSymbolicLink: false,

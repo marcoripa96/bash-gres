@@ -269,7 +269,7 @@ export class FsStateBase {
     // On a read-only instance `guarded` wraps every statement in BEGIN / SET
     // TRANSACTION READ ONLY / COMMIT: four round-trips per read. A statement
     // that can't write on its own doesn't need that fence (`isPlainRead`).
-    const pick = this.permissions.write
+    const clientFor = this.permissions.write
       ? () => guarded
       : (text: string) => (isPlainRead(text) ? wire : guarded);
     const workspaceId = this.workspaceId;
@@ -288,7 +288,7 @@ export class FsStateBase {
     this.cachedReadOnlyClient = {
       query: async (text, params = []) => {
         // Classify the caller's text: the wrapper adds a set_config CTE.
-        const inner = pick(text);
+        const inner = clientFor(text);
         const w = wrap(text, params);
         return inner.query(w.sql, w.params);
       },
