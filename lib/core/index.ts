@@ -44,6 +44,10 @@ export {
   type BackfillChunksResult,
   type ChunkSearchResult,
   type IndexChunkEmbeddingsResult,
+  type TraceEvent,
+  type TraceQueryEvent,
+  type TraceOpEvent,
+  type TraceOpRef,
 } from "./types.js";
 export {
   chunkMarkdown,
