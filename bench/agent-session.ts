@@ -23,19 +23,13 @@
  * Median times on the proxy vary ~±15% run to run; compare branches with
  * alternating runs, and lean on the statement counts, which don't vary.
  */
-import { fork, type ChildProcess } from "node:child_process";
 import { appendFileSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { performance } from "node:perf_hooks";
-import postgresLib from "postgres";
 import { Bash } from "just-bash";
-import { createPostgresClient } from "../lib/adapters/postgres/index.js";
-import {
-  createDrizzleClient,
-  type DrizzleDb,
-} from "../lib/adapters/drizzle/adapter.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 import { setup } from "../lib/core/setup.js";
+import { connect, startLatencyProxy, type BenchDriver } from "./connection.js";
 import type {
   SqlClient,
   TraceEvent,
@@ -78,7 +72,8 @@ const option = (name: string): string | undefined => {
 };
 const reps = Number(option("--reps") ?? 5);
 const rttOneWayMs = option("--rtt");
-const driver = option("--driver") ?? "postgres";
+const driver: BenchDriver =
+  option("--driver") === "bun-drizzle" ? "bun-drizzle" : "postgres";
 const pool = Number(process.env["POOL"] ?? 10);
 const dbUrl = new URL(
   process.env["TEST_DATABASE_URL"] ??
@@ -88,53 +83,6 @@ const dbUrl = new URL(
 // just-bash blocks globalThis.performance while a script runs (under Bun):
 // bind the clock once, before any command executes.
 const now = performance.now.bind(performance);
-
-async function startProxy(oneWayMs: string): Promise<{ url: URL; proc: ChildProcess }> {
-  const listenPort = 15435;
-  const proc = fork(new URL("./latency-proxy.js", import.meta.url), [
-    String(listenPort),
-    dbUrl.hostname,
-    dbUrl.port || "5432",
-    oneWayMs,
-  ]);
-  await new Promise<void>((resolve, reject) => {
-    proc.once("message", () => resolve());
-    proc.once("exit", (code) => reject(new Error(`latency proxy exited (${code})`)));
-  });
-  const url = new URL(dbUrl);
-  url.hostname = "127.0.0.1";
-  url.port = String(listenPort);
-  return { url, proc };
-}
-
-interface Connection {
-  client: SqlClient;
-  close: () => Promise<void>;
-}
-
-interface BunSqlModule {
-  SQL: new (url: string, options: { max: number }) => { close(): Promise<void> };
-}
-interface BunDrizzleModule {
-  drizzle: (client: unknown) => DrizzleDb;
-}
-
-async function connect(url: URL): Promise<Connection> {
-  if (driver === "bun-drizzle") {
-    // Variable specifiers keep tsc from resolving Bun-only modules.
-    const bunSpecifier = "bun";
-    const drizzleSpecifier = "drizzle-orm/bun-sql";
-    const { SQL } = (await import(bunSpecifier)) as BunSqlModule;
-    const { drizzle } = (await import(drizzleSpecifier)) as BunDrizzleModule;
-    const sql = new SQL(url.href, { max: pool });
-    return { client: createDrizzleClient(drizzle(sql)), close: () => sql.close() };
-  }
-  const sql = postgresLib(url.href, { onnotice: () => {}, max: pool });
-  return {
-    client: createPostgresClient(sql, { prepare: process.env["PREPARE"] === "1" }),
-    close: () => sql.end(),
-  };
-}
 
 async function seed(client: SqlClient): Promise<number> {
   await setup(client, {
@@ -210,8 +158,11 @@ function summarize(command: string, events: TimedEvent[], times: number[]): Row 
 type TimedEvent = TraceEvent & { end: number };
 
 async function main() {
-  const proxy = rttOneWayMs === undefined ? null : await startProxy(rttOneWayMs);
-  const conn = await connect(proxy?.url ?? dbUrl);
+  const proxy =
+    rttOneWayMs === undefined
+      ? null
+      : await startLatencyProxy(dbUrl, rttOneWayMs, 15435);
+  const conn = await connect(proxy?.url ?? dbUrl, driver, pool);
   try {
     if (flag("--seed")) {
       console.log(`seeded ${await seed(conn.client)} files into ${WORKSPACE}:/repo`);

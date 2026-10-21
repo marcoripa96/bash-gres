@@ -3,6 +3,22 @@ import { TEST_ADAPTERS, resetWorkspace } from "./helpers.js";
 import { ensureSetup } from "./global-setup.js";
 import { PgFileSystem } from "../lib/core/filesystem.js";
 import type { SqlClient } from "./helpers.js";
+import { SqlError, type TraceEvent } from "../lib/core/types.js";
+
+/** Simulate an old database migrated before fs_blob_chunks existed. */
+function missingChunkTableClient(real: SqlClient): SqlClient {
+  return {
+    query(text, params) {
+      if (text.includes("fs_blob_chunks")) {
+        throw new SqlError('relation "fs_blob_chunks" does not exist', "42P01");
+      }
+      return real.query(text, params);
+    },
+    transaction(fn) {
+      return real.transaction((tx) => fn(missingChunkTableClient(tx)));
+    },
+  };
+}
 
 const WS = "chunks-workspace";
 
@@ -130,6 +146,37 @@ describe.each(TEST_ADAPTERS)("fs_blob_chunks [%s]", (_name, factory) => {
     );
     await expect(fs.readFileChunks("/content")).rejects.toThrow(/EISDIR|directory/);
     await expect(fs.readFileChunks("/nope.md")).rejects.toThrow(/ENOENT|no such/);
+  });
+
+  it("reads a file's chunks in one statement, empty files as []", async () => {
+    await fs.writeFile("/content/about.md", PAGE);
+    await fs.writeFile("/empty.md", "");
+    const events: TraceEvent[] = [];
+    const traced = new PgFileSystem({
+      db: client,
+      workspaceId: WS,
+      trace: (e) => events.push(e),
+    });
+    await traced.exists("/"); // resolve and cache the version id first
+    events.length = 0;
+    expect(await traced.readFileChunks("/content/about.md")).toEqual(
+      await fs.readFileChunks("/content/about.md"),
+    );
+    expect(events.filter((e) => e.type === "query")).toHaveLength(1);
+    expect(await traced.readFileChunks("/empty.md")).toEqual([]);
+  });
+
+  it("keeps ENOENT/EISDIR ahead of the setup error when the table is missing", async () => {
+    await fs.writeFile("/content/about.md", PAGE);
+    const old = new PgFileSystem({
+      db: missingChunkTableClient(client),
+      workspaceId: WS,
+    });
+    await expect(old.readFileChunks("/nope.md")).rejects.toThrow(/ENOENT/);
+    await expect(old.readFileChunks("/content")).rejects.toThrow(/EISDIR/);
+    await expect(old.readFileChunks("/content/about.md")).rejects.toThrow(
+      /fs_blob_chunks table does not exist.*re-run setup\(\)/,
+    );
   });
 
   it("shares chunks across versions (fork sees the same blob's rows)", async () => {

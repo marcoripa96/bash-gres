@@ -37,7 +37,11 @@ import {
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
 import { Coalescer } from "./filesystem/internals/coalescer.js";
-import type { FileReadRow } from "./filesystem/internals/rows.js";
+import type {
+  ChunkRow,
+  EntryRow,
+  FileReadRow,
+} from "./filesystem/internals/rows.js";
 import { filesystemOpsContext } from "./filesystem/ops/context.js";
 import type { FilesystemOpsContext } from "./filesystem/ops/context.js";
 import {
@@ -154,6 +158,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   async init(): Promise<void> {
+    if (await this.isAlreadyInitialized()) return;
     await this.withWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
@@ -183,6 +188,55 @@ export class PgFileSystem extends FsWriteOpsBase {
       }
     });
   }
+  /**
+   * One read that tells whether init() would change nothing: the version
+   * root, the labeled version, and a root entry owned by that version all
+   * exist (the full path's root insert would hit ON CONFLICT DO NOTHING).
+   * Apps that init() on every request skip a write transaction with a
+   * no-op insert. Writable top-level instances with rootDir "/" only: a
+   * read-only init() must keep failing with EPERM, a rootDir also needs its
+   * directory created, and a fork that doesn't own a root row yet gets one.
+   * Any failure here falls through to the full path and its errors.
+   */
+  private async isAlreadyInitialized(): Promise<boolean> {
+    if (
+      !this.permissions.write ||
+      this.txClient ||
+      this.rootDir !== "/" ||
+      this.requestedVersionId !== null
+    ) {
+      return false;
+    }
+    try {
+      const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
+      const r = await this.withReadOnlyWorkspace((tx) =>
+        tx.query<{ root_id: number; version_id: number }>(
+          `SELECT r.id AS root_id, v.id AS version_id
+             FROM fs_version_roots r
+             JOIN fs_versions v
+               ON v.workspace_id = r.workspace_id
+              AND v.version_root_id = r.id
+              AND v.label = $3
+              AND v.deleted_at IS NULL
+             JOIN fs_entries e
+               ON e.workspace_id = r.workspace_id
+              AND e.version_id = v.id
+              AND e.path = $2::ltree
+            WHERE r.workspace_id = $1 AND r.path = $2::ltree
+            LIMIT 1`,
+          [this.workspaceId, rootLtree, this.versionLabel],
+        ),
+      );
+      const row = r.rows[0];
+      if (!row) return false;
+      this.cachedVersionRootId = Number(row.root_id);
+      this.cachedVersionId = Number(row.version_id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
 
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {
@@ -627,7 +681,7 @@ export class PgFileSystem extends FsWriteOpsBase {
     if (this.isHiddenFromReads(internal)) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
-    const entry = await this.resolveEntry(tx, internal);
+    const { entry, chunks } = await this.fetchEntryWithChunks(tx, internal);
     if (!entry) {
       throw new FsError("ENOENT", "no such file or directory", userPath);
     }
@@ -654,31 +708,103 @@ export class PgFileSystem extends FsWriteOpsBase {
       );
     }
     if (!entry.blob_hash) return [];
-    let r;
-    try {
-      r = await tx.query<{
-        chunk_index: number;
-        start_line: number;
-        end_line: number;
-        heading_path: string | null;
-        content: string;
-      }>(
-        `SELECT chunk_index, start_line, end_line, heading_path, content
-         FROM fs_blob_chunks
-         WHERE workspace_id = $1 AND blob_hash = $2
-         ORDER BY chunk_index`,
-        [this.workspaceId, entry.blob_hash],
-      );
-    } catch (e) {
-      this.rethrowMissingChunkTable(e);
+    let rows = chunks;
+    if (rows === null) {
+      try {
+        const r = await tx.query<ChunkRow>(
+          `SELECT chunk_index, start_line, end_line, heading_path, content
+           FROM fs_blob_chunks
+           WHERE workspace_id = $1 AND blob_hash = $2
+           ORDER BY chunk_index`,
+          [this.workspaceId, entry.blob_hash],
+        );
+        rows = r.rows;
+      } catch (e) {
+        this.rethrowMissingChunkTable(e);
+      }
     }
-    return r.rows.map((row) => ({
+    return rows.map((row) => ({
       chunkIndex: Number(row.chunk_index),
       startLine: Number(row.start_line),
       endLine: Number(row.end_line),
       headingPath: row.heading_path,
       content: row.content,
     }));
+  }
+
+  /**
+   * resolveEntry + the entry's chunk rows in one statement (chunks only for
+   * a file). `chunks` is null when they weren't fetched: a database without
+   * `fs_blob_chunks` takes resolveEntry alone here, so a missing path or a
+   * directory still fails with ENOENT/EISDIR before the chunk query raises
+   * the setup error, as it did when these were two statements.
+   */
+  private async fetchEntryWithChunks(
+    tx: SqlClient,
+    internal: string,
+  ): Promise<{
+    entry: Pick<EntryRow, "node_type" | "symlink_target" | "blob_hash"> | null;
+    chunks: ChunkRow[] | null;
+  }> {
+    const versionId = await this.getCurrentVersionId(tx);
+    let r;
+    try {
+      r = await tx.query<
+        Pick<EntryRow, "node_type" | "symlink_target" | "blob_hash"> & {
+          [K in keyof ChunkRow]: ChunkRow[K] | null;
+        }
+      >(
+        `WITH e AS MATERIALIZED (
+           SELECT version_id, node_type, symlink_target, blob_hash
+           FROM fs_entries
+           WHERE workspace_id = $1 AND path = $2::ltree
+         ),
+         picked AS (
+           SELECT e.node_type, e.symlink_target, e.blob_hash
+           FROM e
+           JOIN version_ancestors a
+             ON a.workspace_id = $1 AND a.ancestor_id = e.version_id
+           WHERE a.descendant_id = $3
+           ORDER BY a.depth ASC
+           LIMIT 1
+         )
+         SELECT p.node_type, p.symlink_target, p.blob_hash,
+                c.chunk_index, c.start_line, c.end_line, c.heading_path,
+                c.content
+         FROM picked p
+         LEFT JOIN fs_blob_chunks c
+           ON c.workspace_id = $1
+          AND c.blob_hash = p.blob_hash
+          AND p.node_type = 'file'
+         ORDER BY c.chunk_index`,
+        [this.workspaceId, pathToLtree(internal, this.workspaceId), versionId],
+      );
+    } catch (e) {
+      if (
+        e instanceof SqlError &&
+        e.code === "42P01" &&
+        /fs_blob_chunks/.test(e.message)
+      ) {
+        return { entry: await this.resolveEntry(tx, internal), chunks: null };
+      }
+      throw e;
+    }
+    const first = r.rows[0];
+    if (!first || first.node_type === "tombstone") {
+      return { entry: null, chunks: [] };
+    }
+    const chunks: ChunkRow[] = [];
+    for (const row of r.rows) {
+      if (row.chunk_index === null) continue;
+      chunks.push({
+        chunk_index: row.chunk_index,
+        start_line: row.start_line!,
+        end_line: row.end_line!,
+        heading_path: row.heading_path,
+        content: row.content!,
+      });
+    }
+    return { entry: first, chunks };
   }
 
   /**
@@ -1180,11 +1306,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   async walk(path: string): Promise<WalkEntry[]> {
     const internal = this.guardRead(path);
     return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      if (node.node_type !== "directory")
-        throw new FsError("ENOTDIR", "not a directory, scandir", path);
-      const realPath = ltreeToPath(node.path);
-      const rows = await this.listVisibleSubtree(tx, realPath, false);
+      const rows = await this.listDirectory(tx, internal, path, "subtree");
       return rows.map((r) => this.mapSubtreeToWalk(r));
     });
   }

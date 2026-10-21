@@ -398,6 +398,30 @@ describe.each(TEST_ADAPTERS)("PgFileSystem [%s]", (_name, factory) => {
         { path: "/parent/sub/b.txt", depth: 2, isFile: true },
       ]);
     });
+
+    it("walk rejects a missing path and a file like readdir does", async () => {
+      await fs.writeFile("/plain.txt", "x");
+      await expect(fs.walk("/nope")).rejects.toThrow("ENOENT");
+      await expect(fs.walk("/plain.txt")).rejects.toThrow("ENOTDIR");
+    });
+
+    it("walk follows a symlinked directory to its target", async () => {
+      await fs.mkdir("/real/sub", { recursive: true });
+      await fs.writeFile("/real/sub/f.txt", "f");
+      await fs.symlink("/real", "/alias");
+      expect(await fs.walk("/alias")).toEqual(await fs.walk("/real"));
+    });
+
+    it("walk of an empty directory, and of a directory removed in a fork", async () => {
+      await fs.mkdir("/empty");
+      expect(await fs.walk("/empty")).toEqual([]);
+      await fs.mkdir("/gone/deep", { recursive: true });
+      const child = await fs.fork("walk-tombstone");
+      await child.rm("/gone", { recursive: true });
+      await expect(child.walk("/gone")).rejects.toThrow("ENOENT");
+      expect((await child.walk("/")).map((e) => e.path)).not.toContain("/gone");
+      expect((await fs.walk("/gone")).map((e) => e.path)).toEqual(["/gone/deep"]);
+    });
   });
 
   describe("rm", () => {

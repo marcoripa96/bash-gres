@@ -172,6 +172,47 @@ export class FsVersionBase extends FsStateBase {
       this.versionLabel = row.label;
       return this.cachedVersionId;
     }
+    const id = await this.lookupLabeledVersionId(tx);
+    if (id === null) {
+      throw new Error(
+        `Version '${this.versionLabel}' does not exist in workspace '${this.workspaceId}'. Call init() or fork() first.`,
+      );
+    }
+    this.cachedVersionId = id;
+    return this.cachedVersionId;
+  }
+
+  /**
+   * The id of this instance's labeled version, or null when the label has no
+   * live version; caches the version root id on the way. A fresh instance
+   * resolves both with one join instead of a root lookup and then a label
+   * lookup. A missing root takes `getVersionRootId`'s path, which may create
+   * the `/` root record or throw ENOTVERSIONED.
+   */
+  private async lookupLabeledVersionId(tx: SqlClient): Promise<number | null> {
+    if (this.cachedVersionRootId === null) {
+      const r = await tx.query<{ root_id: number; version_id: number | null }>(
+        `SELECT r.id AS root_id, v.id AS version_id
+           FROM fs_version_roots r
+           LEFT JOIN fs_versions v
+             ON v.workspace_id = r.workspace_id
+            AND v.version_root_id = r.id
+            AND v.label = $3
+            AND v.deleted_at IS NULL
+          WHERE r.workspace_id = $1 AND r.path = $2::ltree
+          LIMIT 1`,
+        [
+          this.workspaceId,
+          pathToLtree(this.versionRootPath, this.workspaceId),
+          this.versionLabel,
+        ],
+      );
+      const row = r.rows[0];
+      if (row) {
+        this.cachedVersionRootId = Number(row.root_id);
+        return row.version_id === null ? null : Number(row.version_id);
+      }
+    }
     const versionRootId = await this.getVersionRootId(tx);
     const r = await tx.query<{ id: number }>(
       `SELECT id FROM fs_versions
@@ -180,13 +221,7 @@ export class FsVersionBase extends FsStateBase {
         LIMIT 1`,
       [this.workspaceId, versionRootId, this.versionLabel],
     );
-    if (r.rows.length === 0) {
-      throw new Error(
-        `Version '${this.versionLabel}' does not exist in workspace '${this.workspaceId}'. Call init() or fork() first.`,
-      );
-    }
-    this.cachedVersionId = Number(r.rows[0].id);
-    return this.cachedVersionId;
+    return r.rows.length > 0 ? Number(r.rows[0]!.id) : null;
   }
 
   protected async ensureVersion(tx: SqlClient): Promise<number> {
@@ -194,18 +229,12 @@ export class FsVersionBase extends FsStateBase {
     if (this.requestedVersionId !== null) {
       return this.getCurrentVersionId(tx);
     }
-    const versionRootId = await this.getVersionRootId(tx);
-    const existing = await tx.query<{ id: number }>(
-      `SELECT id FROM fs_versions
-        WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
-          AND deleted_at IS NULL
-        LIMIT 1`,
-      [this.workspaceId, versionRootId, this.versionLabel],
-    );
-    if (existing.rows.length > 0) {
-      this.cachedVersionId = Number(existing.rows[0].id);
+    const existing = await this.lookupLabeledVersionId(tx);
+    if (existing !== null) {
+      this.cachedVersionId = existing;
       return this.cachedVersionId;
     }
+    const versionRootId = await this.getVersionRootId(tx);
     const created = await tx.query<{ id: number }>(
       `INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
        VALUES ($1, $2, $3, NULL)
