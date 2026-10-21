@@ -154,6 +154,7 @@ export class PgFileSystem extends FsWriteOpsBase {
   }
 
   async init(): Promise<void> {
+    if (await this.isAlreadyInitialized()) return;
     await this.withWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
@@ -183,6 +184,55 @@ export class PgFileSystem extends FsWriteOpsBase {
       }
     });
   }
+  /**
+   * One read that tells whether init() would change nothing: the version
+   * root, the labeled version, and a root entry owned by that version all
+   * exist (the full path's root insert would hit ON CONFLICT DO NOTHING).
+   * Apps that init() on every request skip a write transaction with a
+   * no-op insert. Writable top-level instances with rootDir "/" only: a
+   * read-only init() must keep failing with EPERM, a rootDir also needs its
+   * directory created, and a fork that doesn't own a root row yet gets one.
+   * Any failure here falls through to the full path and its errors.
+   */
+  private async isAlreadyInitialized(): Promise<boolean> {
+    if (
+      !this.permissions.write ||
+      this.txClient ||
+      this.rootDir !== "/" ||
+      this.requestedVersionId !== null
+    ) {
+      return false;
+    }
+    try {
+      const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
+      const r = await this.withReadOnlyWorkspace((tx) =>
+        tx.query<{ root_id: number; version_id: number }>(
+          `SELECT r.id AS root_id, v.id AS version_id
+             FROM fs_version_roots r
+             JOIN fs_versions v
+               ON v.workspace_id = r.workspace_id
+              AND v.version_root_id = r.id
+              AND v.label = $3
+              AND v.deleted_at IS NULL
+             JOIN fs_entries e
+               ON e.workspace_id = r.workspace_id
+              AND e.version_id = v.id
+              AND e.path = $2::ltree
+            WHERE r.workspace_id = $1 AND r.path = $2::ltree
+            LIMIT 1`,
+          [this.workspaceId, rootLtree, this.versionLabel],
+        ),
+      );
+      const row = r.rows[0];
+      if (!row) return false;
+      this.cachedVersionRootId = Number(row.root_id);
+      this.cachedVersionId = Number(row.version_id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
 
   async dispose(): Promise<void> {
     await this.withWorkspace(async (tx) => {

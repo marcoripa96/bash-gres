@@ -73,4 +73,56 @@ describe.each(TEST_ADAPTERS)("version resolution [%s]", (_name, factory) => {
     expect(await main.exists("/b.txt")).toBe(false);
     expect(await fs.readFile("/b.txt")).toBe("beta");
   });
+
+  describe("init()", () => {
+    const ownRootRows = async (label: string) => {
+      const r = await client.query<{ n: number }>(
+        `SELECT count(*)::int AS n
+           FROM fs_entries e
+           JOIN fs_versions v ON v.workspace_id = e.workspace_id AND v.id = e.version_id
+          WHERE e.workspace_id = $1 AND v.label = $2 AND nlevel(e.path) = 1`,
+        [WS, label],
+      );
+      return r.rows[0]!.n;
+    };
+
+    it("is one read, no transaction, on an initialized workspace", async () => {
+      const fs = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        trace: (e) => events.push(e),
+      });
+      await fs.init();
+      const qs = events.filter((e) => e.type === "query");
+      expect(qs).toHaveLength(1);
+      expect(qs.every((q) => q.type === "query" && !q.transaction)).toBe(true);
+      // The cached ids are usable straight away.
+      events.length = 0;
+      await fs.writeFile("/c.txt", "gamma");
+      expect(await fs.readFile("/c.txt")).toBe("gamma");
+    });
+
+    it("still writes the root row for a fork that doesn't own one", async () => {
+      expect(await ownRootRows("other")).toBe(0);
+      await new PgFileSystem({ db: client, workspaceId: WS, version: "other" }).init();
+      expect(await ownRootRows("other")).toBe(1);
+    });
+
+    it("still fails with EPERM on a read-only instance", async () => {
+      const ro = new PgFileSystem({
+        db: client,
+        workspaceId: WS,
+        permissions: { read: true, write: false },
+      });
+      await expect(ro.init()).rejects.toThrow("EPERM");
+    });
+
+    it("keeps the full path inside a transaction and with a rootDir", async () => {
+      const fs = new PgFileSystem({ db: client, workspaceId: WS });
+      await fs.transaction((tx) => tx.init());
+      const scoped = new PgFileSystem({ db: client, workspaceId: WS, rootDir: "/scoped" });
+      await scoped.init();
+      expect(await fs.stat("/scoped").then((s) => s.isDirectory)).toBe(true);
+    });
+  });
 });
