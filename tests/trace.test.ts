@@ -82,8 +82,14 @@ describe.each(TEST_ADAPTERS)("trace [%s]", (_name, factory) => {
     for (const o of byId.values()) {
       const own = queries(events).filter((q) => q.op?.id === o.id);
       expect(own.length).toBe(o.queries);
-      expect(o.queries).toBeGreaterThan(0);
     }
+    // Every query belongs to exactly one op. stat and exists coalesce into
+    // one lookup, attributed to whichever enqueued first; readFile has its own.
+    const total = queries(events).length;
+    expect([...byId.values()].reduce((n, o) => n + o.queries, 0)).toBe(total);
+    expect(queries(events).every((q) => q.op && byId.has(q.op.id))).toBe(true);
+    const readFile = [...byId.values()].find((o) => o.name === "readFile")!;
+    expect(readFile.queries).toBeGreaterThan(0);
   });
 
   it("nests facade calls under transaction() and marks tx queries", async () => {

@@ -1005,33 +1005,45 @@ export class PgFileSystem extends FsWriteOpsBase {
 
   // -- Public API: Path queries -----------------------------------------------
 
+  // exists/stat/lstat go through `lookupEntry` before any `await`, so
+  // concurrent calls share one query (see FsVisibilityBase.lookupEntry).
+
   async exists(path: string): Promise<boolean> {
     const internal = this.guardRead(path);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntry(tx, internal);
-      return node !== null;
-    });
+    return (await this.lookupEntry(internal)) !== null;
   }
 
   async stat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntryFollowSymlink(tx, internal);
-      return {
-        ...this.statFromEntry(node),
-        isSymbolicLink: false,
-      };
-    });
+    let node = await this.lookupEntry(internal);
+    if (!node)
+      throw new FsError("ENOENT", "no such file or directory", internal);
+    if (node.node_type === "symlink" && node.symlink_target) {
+      // First hop came from the batch; follow the rest exactly as
+      // resolveEntryFollowSymlink would have from here.
+      if (this.maxSymlinkDepth <= 0)
+        throw new FsError(
+          "ELOOP",
+          "too many levels of symbolic links",
+          internal,
+        );
+      const target = this.resolveLinkTargetPath(internal, node.symlink_target);
+      node = await this.withReadOnlyWorkspace((tx) =>
+        this.resolveEntryFollowSymlink(tx, target, this.maxSymlinkDepth - 1),
+      );
+    }
+    return {
+      ...this.statFromEntry(node),
+      isSymbolicLink: false,
+    };
   }
 
   async lstat(path: string): Promise<FsStat> {
     const internal = this.guardRead(path);
-    return this.withReadOnlyWorkspace(async (tx) => {
-      const node = await this.resolveEntry(tx, internal);
-      if (!node)
-        throw new FsError("ENOENT", "no such file or directory, lstat", path);
-      return this.statFromEntry(node);
-    });
+    const node = await this.lookupEntry(internal);
+    if (!node)
+      throw new FsError("ENOENT", "no such file or directory, lstat", path);
+    return this.statFromEntry(node);
   }
 
   async realpath(path: string): Promise<string> {

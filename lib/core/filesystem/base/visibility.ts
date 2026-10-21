@@ -23,7 +23,60 @@ import type { InternalEntryShape } from "../internals/entry-shapes.js";
 import type { BlobRow, DirChildRow, EntryRow, SubtreeRow } from "../internals/rows.js";
 import { FsVersionBase } from "./version.js";
 
+interface LookupWaiter {
+  resolve: (row: EntryRow | null) => void;
+  reject: (error: unknown) => void;
+}
+
 export class FsVisibilityBase extends FsVersionBase {
+  /** Lookups queued for the next microtask flush; see `lookupEntry`. */
+  private pendingLookups: Map<string, LookupWaiter[]> | null = null;
+
+  /**
+   * `resolveEntry` for a public single-path read, with concurrent calls
+   * coalesced. Every lookup issued in the same synchronous run, which is how
+   * just-bash fans out (`Promise.all(names.map((n) => fs.stat(n)))` in
+   * `ls -la`, `du`, `find`), is answered by one `resolveEntries` query at the
+   * next microtask; a lone call still runs the single-path query. Callers
+   * must reach this before their first `await` for the coalescing to apply.
+   * Inside `transaction()` lookups run directly against the open transaction.
+   */
+  protected lookupEntry(posixPath: string): Promise<EntryRow | null> {
+    if (this.txClient) {
+      return this.withReadOnlyWorkspace((tx) =>
+        this.resolveEntry(tx, posixPath),
+      );
+    }
+    let batch = this.pendingLookups;
+    if (!batch) {
+      const fresh = new Map<string, LookupWaiter[]>();
+      this.pendingLookups = batch = fresh;
+      queueMicrotask(() => void this.flushLookups(fresh));
+    }
+    const waiters = batch.get(posixPath) ?? [];
+    batch.set(posixPath, waiters);
+    return new Promise((resolve, reject) => {
+      waiters.push({ resolve, reject });
+    });
+  }
+
+  private async flushLookups(batch: Map<string, LookupWaiter[]>): Promise<void> {
+    this.pendingLookups = null;
+    try {
+      const rows = await this.withReadOnlyWorkspace((tx) =>
+        this.resolveEntries(tx, [...batch.keys()]),
+      );
+      for (const [path, waiters] of batch) {
+        const row = rows.get(path) ?? null;
+        for (const w of waiters) w.resolve(row);
+      }
+    } catch (error) {
+      for (const waiters of batch.values()) {
+        for (const w of waiters) w.reject(error);
+      }
+    }
+  }
+
   protected async resolveEntry(
     tx: SqlClient,
     posixPath: string,
