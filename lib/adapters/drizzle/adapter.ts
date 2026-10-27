@@ -107,6 +107,7 @@ function normalizeResult<T>(result: unknown): QueryResult<T> {
 
 interface PgErrorShape extends Error {
   code: string;
+  errno?: unknown;
   detail?: string;
   constraint?: string;
 }
@@ -134,10 +135,25 @@ function findPgError(e: unknown): PgErrorShape | undefined {
   return isPgError(cause) ? cause : undefined;
 }
 
+/**
+ * `pg` and postgres.js carry the SQLSTATE in `code`. Bun SQL
+ * (`drizzle-orm/bun-sql`) puts its own error kind there
+ * (`ERR_POSTGRES_SERVER_ERROR`) and the SQLSTATE in `errno`.
+ */
+function sqlStateOf(pg: PgErrorShape): string {
+  return typeof pg.errno === "string" ? pg.errno : pg.code;
+}
+
 function wrapError(e: unknown): Error {
   const pg = findPgError(e);
   if (pg) {
-    return new SqlError(pg.message, pg.code, pg.detail, pg.constraint, pg);
+    return new SqlError(
+      pg.message,
+      sqlStateOf(pg),
+      pg.detail,
+      pg.constraint,
+      pg,
+    );
   }
   if (e instanceof Error) return e;
   return new Error(String(e));
