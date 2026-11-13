@@ -2,6 +2,7 @@ import type { VersionDiffEntry, VersionDiffOptions } from "../../types.js";
 import { pathToLtree, normalizePath } from "../../path-encoding.js";
 import { op } from "./context.js";
 import { fetchDiff } from "./fetch-diff.js";
+import { diffContentMode } from "../internals/entry-shapes.js";
 
 /**
  * Compare this version's visible tree to `other`'s visible tree at the same
@@ -39,7 +40,7 @@ export const diff = op(async (
         theirId,
         scopeLtree,
         null,
-        opts?.includeContent ?? false,
+        diffContentMode(opts),
       );
       return entries;
     });

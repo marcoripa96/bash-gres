@@ -1,9 +1,21 @@
-import type { ConflictEntry, MergeResult, MergeStrategy } from "../../types.js";
+import type {
+  ConflictEntry,
+  MergeOptions,
+  MergeResolution,
+  MergeResolver,
+  MergeResult,
+  MergeSide,
+  MergeStrategy,
+  SqlClient,
+} from "../../types.js";
 import { FsError } from "../../types.js";
+import { bytesKey, prepareBlob, type PreparedBlob } from "../internals/hashes.js";
 import { pathToLtree, normalizePath, parentPath } from "../../path-encoding.js";
 import {
+  blobText,
   entryShapeEqual,
   toPublicEntryShape,
+  type BlobColumns,
   type InternalEntryShape,
 } from "../internals/entry-shapes.js";
 import { op } from "./context.js";
@@ -34,6 +46,14 @@ import { op } from "./context.js";
  *   - `theirs`: apply source, conflicts still reported (so callers can see
  *     the override), path goes in `applied`.
  *
+ * Resolver: `resolve` is called for each conflict whose present sides are
+ * all regular files, with the three texts, before the strategy applies. A
+ * returned `{ content }` / `{ remove: true }` settles the path (listed in
+ * `resolved`, and in `applied` or `skipped`); `undefined` leaves it a
+ * conflict. `includeContent` adds the three texts to each `ConflictEntry`.
+ * Blob contents are fetched in one query, only for conflicting paths, and
+ * only when either option is set.
+ *
  * Filters: `paths` matches each entry as either an exact path or a path
  * prefix (so a directory entry pulls in its descendants visible in any of
  * base/ours/theirs); `pathScope` restricts to one subtree; supplying both
@@ -42,7 +62,25 @@ import { op } from "./context.js";
  *
  * Source and base are read-only. Only the current destination version
  * receives `fs_entries` writes; `parent_version_id` and `version_ancestors`
- * are never modified.
+ * are never modified. A frozen destination is refused with `EPERM` (a dry
+ * run is still answered: it writes nothing).
+ *
+ * Concurrency: a merge (not a dry run) locks the destination's version row
+ * before reading it, so a concurrent write to the destination waits for the
+ * merge to commit, whichever path it writes: every write takes the version
+ * row before any entry or blob row (`VERSION_LOCKED_CTE`), the same order
+ * as the merge, so the two cannot deadlock. The merge is never computed
+ * from a stale view of the destination. A write that was already running
+ * when the merge committed still applies what it read before waiting, as
+ * between two concurrent writes.
+ *
+ * Merge parents: a full merge (no `paths`/`pathScope`, not a dry run, not
+ * refused) of a frozen source records `(destination, source)` in
+ * `fs_version_merges`, so later merge bases account for it. As with a git
+ * merge commit, conflicts settled by `strategy: "ours" | "theirs"` count as
+ * merged: the destination chose its side. An unfrozen source is not
+ * recorded: it could change after the merge. Nor is a fast-forward
+ * (destination an ancestor of source), which would make a cycle.
  *
  * Implicit parent directories: when an applied non-null file or symlink
  * lands under a path whose ancestors are not visible in the destination,
@@ -52,12 +90,7 @@ import { op } from "./context.js";
 export const merge = op(async (
   ctx,
   source: string,
-  opts?: {
-    strategy?: MergeStrategy;
-    paths?: string[];
-    pathScope?: string;
-    dryRun?: boolean;
-  },
+  opts?: MergeOptions,
 ): Promise<MergeResult> => {
     if (!source || source.length === 0) {
       throw new Error("merge: source must be a non-empty version label");
@@ -86,6 +119,29 @@ export const merge = op(async (
       const ourId = await ctx.getCurrentVersionId(tx);
       const theirId = await ctx.requireVersionIdByLabel(tx, source);
       const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);
+      if (!dryRun) {
+        // Lock the destination before reading it. Every write bumps this
+        // row, so a concurrent write either commits before the reads below
+        // or waits for the merge to commit, instead of being overwritten by
+        // a merge computed from a stale view (the resolver may be slow).
+        await tx.query(
+          `SELECT id FROM fs_versions
+           WHERE workspace_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.workspaceId, ourId],
+        );
+        await ctx.lockVersions(tx, [ourId]);
+      }
+      const frozen = await tx.query<{ id: number | string }>(
+        `SELECT id FROM fs_versions
+         WHERE workspace_id = $1 AND id = ANY($2::bigint[])
+           AND frozen_at IS NOT NULL`,
+        [ctx.workspaceId, [ourId, theirId]],
+      );
+      const frozenIds = new Set(frozen.rows.map((r) => Number(r.id)));
+      if (frozenIds.has(ourId) && !dryRun) {
+        throw new FsError("EPERM", "merge: destination version is frozen", "/");
+      }
 
       // LCA & ancestor fast-path. If source is itself an ancestor of current,
       // current already includes it via the live overlay, so there is nothing
@@ -93,7 +149,7 @@ export const merge = op(async (
       // fast-forward, so we don't short-circuit on lcaId === ourId.)
       const lcaId = await ctx.findLCA(tx, ourId, theirId);
       if (lcaId === theirId) {
-        return { applied: [], conflicts: [], skipped: [] };
+        return { applied: [], conflicts: [], skipped: [], resolved: [] };
       }
 
       const oursMap = await ctx.fetchVisibleEntryMap(tx, ourId, scopeLtree);
@@ -143,7 +199,12 @@ export const merge = op(async (
 
       const applied: string[] = [];
       const skipped: string[] = [];
+      const resolved: string[] = [];
       const conflicts: ConflictEntry[] = [];
+      const rawConflicts: Array<{ internalPath: string } & ConflictSides> = [];
+      // Resolver output waiting for its blob to be stored (after the
+      // strategy check, so a refused merge stores nothing).
+      const pendingBlobs: Array<{ internalPath: string; blob: PreparedBlob }> = [];
       const writes: Array<{
         internalPath: string;
         shape: InternalEntryShape | null;
@@ -171,12 +232,51 @@ export const merge = op(async (
           continue;
         }
 
+        rawConflicts.push({ internalPath, base, ours, theirs });
+      }
+
+      const texts =
+        rawConflicts.length > 0 && (opts?.resolve || opts?.includeContent)
+          ? await fetchBlobTexts(
+              tx,
+              ctx.workspaceId,
+              rawConflicts.flatMap((c) => [c.base, c.ours, c.theirs]),
+            )
+          : null;
+      const textOf = (s: InternalEntryShape | null): string | null =>
+        texts === null ? null : sideText(s, texts);
+
+      for (const { internalPath, base, ours, theirs } of rawConflicts) {
+        const userPath = ctx.toUserPath(internalPath);
+
+        const settled =
+          opts?.resolve && resolvable({ base, ours, theirs })
+            ? await askResolver(opts.resolve, userPath, { base, ours, theirs }, textOf)
+            : null;
+        if (settled) {
+          resolved.push(userPath);
+          if (entryShapeEqual(ours, settled.shape)) {
+            skipped.push(userPath);
+          } else {
+            if (settled.blob) pendingBlobs.push({ internalPath, blob: settled.blob });
+            writes.push({ internalPath, shape: settled.shape });
+            writePathSet.add(internalPath);
+            applied.push(userPath);
+          }
+          continue;
+        }
+
         const conflict: ConflictEntry = {
           path: userPath,
           base: toPublicEntryShape(base),
           ours: toPublicEntryShape(ours),
           theirs: toPublicEntryShape(theirs),
         };
+        if (opts?.includeContent) {
+          conflict.baseContent = textOf(base);
+          conflict.oursContent = textOf(ours);
+          conflict.theirsContent = textOf(theirs);
+        }
 
         if (strategy === "fail") {
           conflicts.push(conflict);
@@ -192,7 +292,7 @@ export const merge = op(async (
       }
 
       if (strategy === "fail" && conflicts.length > 0) {
-        return { applied: [], conflicts, skipped: [] };
+        return { applied: [], conflicts, skipped: [], resolved: [] };
       }
 
       // Post-apply visible map (within scope) for parent expansion.
@@ -270,11 +370,28 @@ export const merge = op(async (
       applied.sort();
       skipped.sort();
 
-      if (dryRun || writes.length === 0) {
-        return { applied, conflicts, skipped };
+      if (
+        !dryRun &&
+        frozenIds.has(theirId) &&
+        lcaId !== ourId &&
+        pathFilters.length === 0 &&
+        scopeUser === "/"
+      ) {
+        await tx.query(
+          `INSERT INTO fs_version_merges (workspace_id, version_id, source_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [ctx.workspaceId, ourId, theirId],
+        );
       }
 
-      await ctx.lockVersions(tx, [ourId]);
+      if (dryRun || writes.length === 0) {
+        return { applied, conflicts, skipped, resolved };
+      }
+
+      for (const b of pendingBlobs) {
+        await ctx.storeBlob(tx, b.internalPath, b.blob);
+      }
       writes.sort((a, b) =>
         a.internalPath < b.internalPath ? -1
         : a.internalPath > b.internalPath ? 1
@@ -282,6 +399,102 @@ export const merge = op(async (
       );
       await ctx.writeEntryShapes(tx, ourId, writes);
 
-      return { applied, conflicts, skipped };
+      return { applied, conflicts, skipped, resolved };
     });
   });
+
+interface ConflictSides {
+  base: InternalEntryShape | null;
+  ours: InternalEntryShape | null;
+  theirs: InternalEntryShape | null;
+}
+
+/** A conflict goes to the resolver when every side present is a regular file. */
+function resolvable(sides: ConflictSides): boolean {
+  return [sides.base, sides.ours, sides.theirs].every(
+    (s) => s === null || s.type === "file",
+  );
+}
+
+/**
+ * Ask the resolver about one conflict. Returns the destination's new shape
+ * (`null` for a removal) and, for new content, its prepared blob; or `null`
+ * when the resolver leaves the path a conflict.
+ */
+async function askResolver(
+  resolve: MergeResolver,
+  path: string,
+  sides: ConflictSides,
+  textOf: (s: InternalEntryShape | null) => string | null,
+): Promise<{ shape: InternalEntryShape | null; blob: PreparedBlob | null } | null> {
+  const side = (s: InternalEntryShape | null): MergeSide | null => {
+    const pub = toPublicEntryShape(s);
+    return pub === null ? null : { ...pub, content: textOf(s) };
+  };
+  const resolution: MergeResolution | null | undefined = await resolve({
+    path,
+    base: side(sides.base),
+    ours: side(sides.ours),
+    theirs: side(sides.theirs),
+  });
+  if (resolution === null || resolution === undefined) return null;
+  if ("remove" in resolution && resolution.remove === true) {
+    return { shape: null, blob: null };
+  }
+  if (
+    !("content" in resolution) ||
+    !(typeof resolution.content === "string" || resolution.content instanceof Uint8Array)
+  ) {
+    throw new Error(
+      `merge: resolver for '${path}' must return { content: string | Uint8Array }, { remove: true }, or undefined`,
+    );
+  }
+  const blob = prepareBlob(resolution.content);
+  const { base, ours, theirs } = sides;
+  return {
+    blob,
+    shape: {
+      type: "file",
+      blobHash: blob.hash,
+      symlinkTarget: null,
+      mode: ours?.mode ?? theirs?.mode ?? base?.mode ?? 0o644,
+      sizeBytes: blob.sizeBytes,
+      mtime: new Date(),
+    },
+  };
+}
+
+/** Contents of the blobs behind `sides`, keyed by hex hash, in one query. */
+async function fetchBlobTexts(
+  tx: SqlClient,
+  workspaceId: string,
+  sides: Array<InternalEntryShape | null>,
+): Promise<Map<string, BlobColumns>> {
+  const hashes = new Map<string, Uint8Array>();
+  for (const s of sides) {
+    if (s?.type === "file" && s.blobHash) hashes.set(bytesKey(s.blobHash), s.blobHash);
+  }
+  const out = new Map<string, BlobColumns>();
+  if (hashes.size === 0) return out;
+  const r = await tx.query<{ hash: Uint8Array; content: string | null; binary_data: Uint8Array | null }>(
+    `SELECT hash, content, binary_data FROM fs_blobs
+     WHERE workspace_id = $1
+       AND hash = ANY(ARRAY(SELECT decode(h, 'hex') FROM unnest($2::text[]) AS h))`,
+    [workspaceId, [...hashes.keys()]],
+  );
+  for (const row of r.rows) {
+    out.set(bytesKey(row.hash), { content: row.content, binary: row.binary_data });
+  }
+  return out;
+}
+
+/** A file side's text: `null` for non-files and blobs that are not UTF-8. */
+function sideText(
+  s: InternalEntryShape | null,
+  texts: Map<string, BlobColumns>,
+): string | null {
+  if (s === null || s.type !== "file") return null;
+  if (!s.blobHash) return "";
+  const blob = texts.get(bytesKey(s.blobHash));
+  return blob ? blobText(blob) : null;
+}

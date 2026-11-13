@@ -51,3 +51,24 @@ export function bumpLastWriteAtCte(opts: {
     RETURNING 1
   )`;
 }
+
+/**
+ * Lock order for single-statement writes: the version row before any
+ * `fs_entries` or `fs_blobs` row.
+ *
+ * Place this CTE right after `version_bump` and have every INSERT in the
+ * statement read from it (`FROM version_locked`, or `CROSS JOIN
+ * version_locked`). It is one row, always (the count is 0 when the bump
+ * was gated off), so it changes no result; but the INSERT cannot produce
+ * its first row until the count is known, which means the `UPDATE
+ * fs_versions` has run and holds the row lock (or has waited for it).
+ *
+ * Without it Postgres runs a data-modifying CTE the main statement does
+ * not read after everything else, so a write locked its entry rows first
+ * and the version row last. Ops that lock the version row first and write
+ * entries afterwards (`merge`, `detach`, `materialize`, `sweepHistory`)
+ * then deadlocked with any write to a path they also wrote.
+ */
+export const VERSION_LOCKED_CTE = `version_locked AS MATERIALIZED (
+    SELECT count(*) AS bumped FROM version_bump
+  )`;

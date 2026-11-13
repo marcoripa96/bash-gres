@@ -36,6 +36,7 @@ import {
   type ChunkSearchOpts,
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
+import { VERSION_LOCKED_CTE } from "./filesystem/internals/bump-version.js";
 import { Coalescer } from "./filesystem/internals/coalescer.js";
 import type {
   ChunkRow,
@@ -125,7 +126,9 @@ export class PgFileSystem extends FsWriteOpsBase {
         self.writeEntryShape(tx, versionId, posixPath, shape),
       writeEntryShapes: (tx, versionId, writes) =>
         self.writeEntryShapes(tx, versionId, writes),
-      createVersionedFilesystem: (internalPath, version, versionRootId) => {
+      storeBlob: (tx, internalPath, blob) =>
+        self.storeBlob(tx, internalPath, blob),
+      createVersionedFilesystem: (internalPath, version, versionRootId, versionId) => {
         const Ctor = self.constructor as new (
           opts: PgFileSystemOptions,
         ) => this;
@@ -136,8 +139,14 @@ export class PgFileSystem extends FsWriteOpsBase {
           db: self.rawDb as SqlClient,
           rootDir: internalPath,
           versionRoot: internalPath,
-          version,
-          versionId: undefined,
+          // An exact version is read-only, like `new PgFileSystem({ versionId })`.
+          ...(versionId === undefined
+            ? { version, versionId: undefined }
+            : {
+                version: undefined,
+                versionId,
+                permissions: { ...self.baseOptions.permissions, write: false },
+              }),
           // A versioned sub-fs re-roots at `internalPath`; the parent's mount
           // paths live in a different path space, so don't carry them over.
           mount: undefined,
@@ -1558,11 +1567,13 @@ export class PgFileSystem extends FsWriteOpsBase {
            UPDATE fs_versions SET last_write_at = now()
            WHERE workspace_id = $1 AND id = $2
            RETURNING 1
-         )
+         ),
+         ${VERSION_LOCKED_CTE}
          INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
             symlink_target, mode, size_bytes, mtime)
-         VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, $9)
+         SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, $9
+         FROM version_locked
          ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
            blob_hash = EXCLUDED.blob_hash,
            node_type = EXCLUDED.node_type,

@@ -2,8 +2,11 @@ import type { SqlClient, SqlParam, VersionDiffEntry } from "../../types.js";
 import { ltreeToPath } from "../../path-encoding.js";
 import {
   classifyDiffChange,
-  decodeBlobContent,
+  fillDiffContent,
   mapDiffSide,
+  needsBlobContent,
+  NO_DIFF_CONTENT,
+  type DiffContentMode,
 } from "../internals/entry-shapes.js";
 import type { DiffRow } from "../internals/rows.js";
 import { op } from "./context.js";
@@ -30,8 +33,8 @@ const FULL_T_CONTENT_COLS = `
  * plus the encoded-ltree path of the last row, suitable as the next
  * keyset-pagination cursor.
  *
- * When `includeContent` is true, LEFT JOINs `fs_blobs` on both sides and
- * populates `beforeContent` / `afterContent` on each entry. The join is
+ * When `contentMode` asks for content or a unified diff, LEFT JOINs `fs_blobs` on both sides and
+ * populates `beforeContent` / `afterContent` and/or `unifiedDiff`. The join is
  * restricted to changed paths (already filtered by the equal-row WHERE
  * clause) so identical files never touch the blob table.
  */
@@ -42,8 +45,9 @@ export const fetchDiff = op(async (
   theirId: number,
   scopeLtree: string,
   page: { cursor: string | null; limit: number } | null,
-  includeContent: boolean = false,
+  contentMode: DiffContentMode = NO_DIFF_CONTENT,
 ): Promise<{ entries: VersionDiffEntry[]; lastLtree: string | null }> => {
+    const includeContent = needsBlobContent(contentMode);
     const params: SqlParam[] = [ctx.workspaceId, ourId, theirId, scopeLtree];
     let cursorClause = "";
     let limitClause = "";
@@ -169,8 +173,12 @@ export const fetchDiff = op(async (
         after,
       };
       if (includeContent) {
-        entry.beforeContent = decodeBlobContent(before, row.o_content, row.o_binary);
-        entry.afterContent = decodeBlobContent(after, row.t_content, row.t_binary);
+        fillDiffContent(
+          entry,
+          contentMode,
+          { content: row.o_content, binary: row.o_binary },
+          { content: row.t_content, binary: row.t_binary },
+        );
       }
       entries.push(entry);
     }

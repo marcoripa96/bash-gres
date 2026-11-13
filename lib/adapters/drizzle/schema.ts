@@ -35,6 +35,7 @@ export interface BashGresSchema {
   fsVersionRoots: ReturnType<typeof buildVersionRoots>;
   fsVersions: ReturnType<typeof buildVersions>;
   versionAncestors: ReturnType<typeof buildAncestors>;
+  fsVersionMerges: ReturnType<typeof buildVersionMerges>;
   fsBlobs: ReturnType<typeof buildBlobs>;
   fsEntries: ReturnType<typeof buildEntries>;
   fsBlobChunks: ReturnType<typeof buildBlobChunks>;
@@ -86,6 +87,7 @@ function buildVersions() {
       lastWriteAt: timestamp("last_write_at", { withTimezone: true })
         .notNull()
         .defaultNow(),
+      frozenAt: timestamp("frozen_at", { withTimezone: true }),
     },
     (table) => [
       uniqueIndex("unique_workspace_version_root_label")
@@ -122,6 +124,29 @@ function buildAncestors() {
       index("idx_version_ancestors_reverse").on(
         table.workspaceId,
         table.ancestorId,
+      ),
+    ],
+  );
+}
+
+function buildVersionMerges() {
+  return pgTable(
+    "fs_version_merges",
+    {
+      workspaceId: text("workspace_id").notNull(),
+      versionId: bigint("version_id", { mode: "number" }).notNull(),
+      sourceId: bigint("source_id", { mode: "number" }).notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
+    },
+    (table) => [
+      primaryKey({
+        columns: [table.workspaceId, table.versionId, table.sourceId],
+      }),
+      index("idx_fs_version_merges_source").on(
+        table.workspaceId,
+        table.sourceId,
       ),
     ],
   );
@@ -265,6 +290,7 @@ export function createSchema(
     fsVersionRoots: buildVersionRoots(),
     fsVersions: buildVersions(),
     versionAncestors: buildAncestors(),
+    fsVersionMerges: buildVersionMerges(),
     fsBlobs: buildBlobs(),
     fsEntries: buildEntries(),
     fsBlobChunks: buildBlobChunks(options),

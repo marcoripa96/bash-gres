@@ -302,30 +302,58 @@ export class FsVersionBase extends FsStateBase {
   }
 
   /**
-   * Find the lowest common ancestor (in the version graph) of `idA` and `idB`,
-   * or `null` if they have no common ancestor. "Lowest" = smallest sum of
-   * depths across the two ancestor chains, which is the version closest to
-   * both endpoints. Used by `merge()` for three-way classification.
+   * Find the merge base of `idA` and `idB`, or `null` if they share no
+   * ancestor. The history graph is `parent_version_id` plus recorded merge
+   * parents (`fs_version_merges`), so it survives `materialize()` (which cuts
+   * the ancestor closure but keeps parent links). As in git: of the common
+   * ancestors, the best are those that are not a parent or merge source of
+   * another common ancestor; on a plain chain that is the nearest one (the
+   * same answer the closure gave). Ancestor sets are collected without
+   * depth, so cost is linear in the ancestors visited even when merges join
+   * paths. Ties (criss-cross merges) go to the newest version.
    */
   protected async findLCA(
     tx: SqlClient,
     idA: number,
     idB: number,
   ): Promise<number | null> {
-    const r = await tx.query<{ ancestor_id: number }>(
-      `SELECT a1.ancestor_id
-       FROM version_ancestors a1
-       JOIN version_ancestors a2
-         ON a2.workspace_id = a1.workspace_id
-        AND a2.ancestor_id = a1.ancestor_id
-       WHERE a1.workspace_id = $1
-         AND a1.descendant_id = $2
-         AND a2.descendant_id = $3
-       ORDER BY a1.depth + a2.depth ASC
+    const r = await tx.query<{ id: number }>(
+      `WITH RECURSIVE up(side, id) AS (
+         SELECT side, id FROM (VALUES (1, $2::bigint), (2, $3::bigint)) AS s(side, id)
+         UNION
+         SELECT up.side, p.id
+         FROM up
+         CROSS JOIN LATERAL (
+           SELECT v.parent_version_id AS id
+           FROM fs_versions v
+           WHERE v.workspace_id = $1 AND v.id = up.id
+             AND v.parent_version_id IS NOT NULL
+           UNION ALL
+           SELECT m.source_id
+           FROM fs_version_merges m
+           WHERE m.workspace_id = $1 AND m.version_id = up.id
+         ) p
+       ),
+       common AS MATERIALIZED (
+         SELECT id FROM up GROUP BY id HAVING COUNT(DISTINCT side) = 2
+       ),
+       dominated AS (
+         SELECT v.parent_version_id AS id
+         FROM common c
+         JOIN fs_versions v ON v.workspace_id = $1 AND v.id = c.id
+         WHERE v.parent_version_id IS NOT NULL
+         UNION
+         SELECT m.source_id
+         FROM common c
+         JOIN fs_version_merges m ON m.workspace_id = $1 AND m.version_id = c.id
+       )
+       SELECT id FROM common
+       WHERE id NOT IN (SELECT id FROM dominated)
+       ORDER BY id DESC
        LIMIT 1`,
       [this.workspaceId, idA, idB],
     );
-    return r.rows.length > 0 ? Number(r.rows[0]!.ancestor_id) : null;
+    return r.rows.length > 0 ? Number(r.rows[0]!.id) : null;
   }
 
   /**

@@ -1,6 +1,8 @@
-import type { PromoteResult } from "../../types.js";
+import type { PromoteOptions, PromoteResult } from "../../types.js";
 import { op } from "./context.js";
 import { deleteVersionById } from "./delete-version-by-id.js";
+import { freezeVersion } from "./freeze.js";
+import { materializeVersion } from "./materialize.js";
 import { renameVersionInTransaction } from "./rename-version.js";
 
 /**
@@ -8,18 +10,40 @@ import { renameVersionInTransaction } from "./rename-version.js";
  * moving a git branch: the displaced label is hidden, but its version row,
  * entries, and ancestor links are retained so the promoted version can still
  * expose history through its parent chain.
+ *
+ * `freeze` and `materialize` apply to the promoted version inside the same
+ * transaction: a publish that must never change again and must not read
+ * through (or pay for) the chain behind it.
  */
 export const promoteTo = op(async (
   ctx,
   label: string,
-  opts?: { dropPrevious?: boolean },
+  opts?: PromoteOptions,
 ): Promise<PromoteResult> => {
     if (!label || label.length === 0) {
       throw new Error("promoteTo: label must be a non-empty string");
     }
     const dropPrevious = opts?.dropPrevious ?? false;
-    if (dropPrevious && ctx.historyRetention === "retain") {
+    if (opts?.materialize && ctx.historyRetention !== "retain") {
+      throw new Error(
+        'promoteTo: materialize requires historyRetention "retain" (under "discard" promotion detaches)',
+      );
+    }
+    // Retained history without detaching: dropPrevious keeps the displaced
+    // version as history; materialize replaces the detach outright.
+    if (ctx.historyRetention === "retain" && (dropPrevious || opts?.materialize)) {
       const result = await ctx.withWorkspace(async (sqlTx) => {
+        const currentId = await ctx.getCurrentVersionId(sqlTx);
+        if (opts?.materialize) await materializeVersion(ctx, sqlTx, currentId);
+        if (!dropPrevious) {
+          const renamed = await renameVersionInTransaction(ctx, sqlTx, label, true);
+          if (opts?.freeze) await freezeVersion(ctx, sqlTx, currentId);
+          return {
+            label: renamed.label,
+            displacedLabel: renamed.displacedLabel,
+            droppedPrevious: false,
+          };
+        }
         const renamed = await renameVersionInTransaction(ctx, sqlTx, label, true);
         if (renamed.displacedLabel) {
           const previous = await sqlTx.query<{ id: number }>(
@@ -33,6 +57,7 @@ export const promoteTo = op(async (
             await deleteVersionById(ctx, sqlTx, Number(previous.rows[0]!.id), "retain");
           }
         }
+        if (opts?.freeze) await freezeVersion(ctx, sqlTx, currentId);
         return {
           label: renamed.label,
           droppedPrevious: Boolean(renamed.displacedLabel),
@@ -48,6 +73,7 @@ export const promoteTo = op(async (
       if (dropPrevious && renamed.displacedLabel) {
         await tx.deleteVersion(renamed.displacedLabel);
       }
+      if (opts?.freeze) await tx.freeze();
       return {
         label: renamed.label,
         displacedLabel: dropPrevious ? undefined : renamed.displacedLabel,

@@ -144,7 +144,7 @@ Each `PgFileSystem` instance is bound to a `version` (default `"main"`) inside a
 
 Versions are copy-on-write overlays: the same path can hold different contents, and `fork()` is O(1) because it links the new version to its parent through a closure table without copying entry rows. Reads walk that closure to the nearest ancestor with a row at the requested path.
 
-This is a **live ancestor overlay**, not a historical snapshot. A write to a parent version after a child has been forked can still affect the child's visible view at any path the child has not shadowed. Once the child writes (or deletes) a path, that path is shielded from later parent writes. To freeze a checkpoint independent of its parents, fork and then `detach()`.
+This is a **live ancestor overlay**, not a historical snapshot. A write to a parent version after a child has been forked can still affect the child's visible view at any path the child has not shadowed. Once the child writes (or deletes) a path, that path is shielded from later parent writes. To make a version immutable, `freeze()` it: every later content write to it fails with `EPERM`, from any handle, so its forks and the merges based on it stay stable. To stop a version reading through its ancestors, `materialize()` it (history kept) or `detach()` it (history cut).
 
 ```ts
 const v1 = new PgFileSystem({ db: sql, workspaceId: "app", version: "v1" })
@@ -192,13 +192,14 @@ await fs.rm("/database", { recursive: true, deleteVersionRoot: true })
 Versioning primitives include:
 
 - `diff(other, { path? })`, `diffCount(other, { path?, nodeType? })`, and `diffStream(other, { path?, batchSize? })` to compare visible trees.
-- `merge(source, { strategy?, paths?, pathScope?, dryRun? })` for LCA-based three-way merges.
+- `merge(source, { strategy?, paths?, pathScope?, dryRun?, resolve?, includeContent? })` for LCA-based three-way merges. `resolve` settles conflicting files from their base/ours/theirs text (`textMergeResolver` is a ready line-based merge with git's rules); see [Merge resolvers](#merge-resolvers-and-text-diffs).
 - `cherryPick(source, paths)` to source-win copy selected paths without LCA conflict checks.
 - `revert(target, { paths?, pathScope? })` to restore selected paths to another version.
-- `detach()` to materialize a version into a standalone snapshot independent of ancestors.
-- `renameVersion(label, { swap? })` and `promoteTo(label, { dropPrevious? })` for deploy labels.
+- `detach()` to materialize a version into a standalone snapshot independent of ancestors (cuts its history).
+- `freeze()` to make the current version refuse all further content writes; `materialize()` to stop it reading through its ancestors while keeping its history; `compactHistory()` to do that for every frozen or retained version of the root at once.
+- `renameVersion(label, { swap? })` and `promoteTo(label, { dropPrevious?, freeze?, materialize? })` for deploy labels.
 - `listHistory({ limit?, cursor?, includeChanges?, includeRoot?, path? })` to walk ancestor history with keyset pagination, plus `versionDiff(versionId, { path? })` and `versionDiffStream(versionId, { path?, batchSize? })` to fetch the diff for a single history entry.
-- `diffVersions(from, to, { path?, includeContent? })` to compare any two versions of the root by numeric `versionId` — both sides bypass the label resolver, so deleted-but-retained versions compare fine.
+- `diffVersions(from, to, { path?, includeContent?, unifiedDiff? })` to compare any two versions of the root by numeric `versionId` — both sides bypass the label resolver, so deleted-but-retained versions compare fine.
 - `sweepHistory()` to physically flatten retained history into self-contained snapshots and GC orphan blobs.
 
 The "live" version is caller-side: BashGres exposes versions as data, your app decides which one the runtime reads from. A typical deploy flow is `fork()` a draft, edit it, optionally `merge()` or `revert()` changes, then `promoteTo("live")`. See [bashgres.com/docs/versioning](https://bashgres.com/docs/versioning) for the full versioning guide.
@@ -226,9 +227,81 @@ await snapshot.readFile("/config.json")
 `version` and `versionId` are mutually exclusive. An ID is also checked against
 the requested workspace and version root before any content is read.
 
+For a versioned directory, pass the id to `versioned()`; the handle is read-only:
+
+```ts
+const pinned = await fs.versioned("/artifacts/a1", { versionId })
+```
+
+### Publishing: freeze and materialize
+
+With retained history, a chain of publishes stays cheap and fully browsable
+when each publish is frozen and materialized:
+
+```ts
+const fs = new PgFileSystem({ db: sql, workspaceId: "app", historyRetention: "retain" })
+const chat = await (await fs.versioned("/artifacts/a1")).fork("chat-42")
+// ... edits ...
+await chat.transaction(async (tx) => {
+  const r = await tx.merge("main", { resolve: textMergeResolver }) // main may have moved
+  if (r.conflicts.length > 0) throw new Error("conflicts")
+  await tx.promoteTo("main", { dropPrevious: true, freeze: true, materialize: true })
+})
+```
+
+- `freeze` stops every further write to the published version, including
+  writes through a handle that cached its id before the label moved.
+- `materialize` copies the inherited entries into the version and drops its
+  ancestor-closure rows, keeping `parent_version_id`. Each published version
+  costs one closure row and one entry row per file, so the chain grows
+  linearly, while `listHistory`, `versionDiff`, `diffVersions` and
+  `versioned(path, { versionId })` keep working across all of it.
+- A full `merge()` of a frozen source records it as a merge parent
+  (`mergedFrom` in `listHistory()`); merge bases follow parent links and
+  merge parents, so a fork that already merged main is not re-conflicted
+  against an older ancestor. As with a git merge commit, conflicts settled
+  by `strategy: "ours" | "theirs"` count as merged.
+- `compactHistory()` applies the same trimming to roots built before 3.2,
+  removing nothing. It materializes a version only when it and every
+  ancestor it reads through are frozen or deleted, so a live, unfrozen
+  version's writes keep showing through in its forks.
+
+### Merge resolvers and text diffs
+
+`merge()` compares whole files against the common ancestor. A `resolve`
+callback gets each conflicting file's text at the base and on both sides
+(modify/modify, add/add, modify/delete; directory and symlink conflicts are
+not offered) and returns `{ content }`, `{ remove: true }`, or `undefined` to
+leave the conflict to `strategy`. It runs in path order inside the merge
+transaction, also under `dryRun`; settled paths are listed in `resolved`.
+The merge locks the destination first, so a concurrent write to it waits
+for the merge to commit, and the merge is never computed from a stale view
+of the destination. A write already in flight when the merge commits applies
+what it read before waiting, as between any two concurrent writes.
+
+Line diffs are exact for ordinary edits (up to about 2,000 changed lines per
+file); past that budget the remaining differing range is treated as wholly
+replaced, so time and memory stay bounded on very different large files.
+
+```ts
+import { mergeText, textMergeResolver, createUnifiedDiff } from "bash-gres"
+
+await chat.merge("main", {
+  resolve: (c) => (c.path.endsWith(".md") ? myDocMerge(c) : textMergeResolver(c)),
+})
+
+mergeText(base, ours, theirs)   // { clean: true, content } | { clean: false, content /* <<<<<<< markers */, conflicts }
+createUnifiedDiff(before, after, { path: "/q.sql" })  // git-style patch
+```
+
+Diff APIs (`diff`, `diffStream`, `diffVersions`, `versionDiff`,
+`versionDiffStream`) take `unifiedDiff: true | { context }` and return a
+patch per changed text file in `unifiedDiff` (`null` for binary files,
+directories, symlinks and mode-only changes).
+
 ### Browsing history
 
-`listHistory()` returns ancestor versions paginated by depth from the current version backwards. `includeChanges` controls how much per-entry detail comes back: `false` (default, just metadata), `"paths"` (cheap path + change-kind summary), or `true` (full `before`/`after` shapes). All three modes share a single batched query, so paths-mode and full-changes mode are within ~5% of each other on large pages.
+`listHistory()` returns ancestor versions (following `parent_version_id`) paginated from the current version backwards; entries carry `frozenAt` and `mergedFrom`. `includeChanges` controls how much per-entry detail comes back: `false` (default, just metadata), `"paths"` (cheap path + change-kind summary), or `true` (full `before`/`after` shapes). All three modes share a single batched query, so paths-mode and full-changes mode are within ~5% of each other on large pages.
 
 ```ts
 const fs = new PgFileSystem({

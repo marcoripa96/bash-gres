@@ -1,5 +1,6 @@
 import type { RenameVersionResult, SqlClient, SqlParam } from "../../types.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
+import type { PreparedBlob } from "../internals/hashes.js";
 
 export const filesystemOpsContext: unique symbol = Symbol(
   "filesystemOpsContext",
@@ -11,6 +12,7 @@ export interface FilesystemOpsHost<TFs> {
 
 export interface FilesystemTransactionOps {
   detach(): Promise<void>;
+  freeze(): Promise<void>;
   renameVersion(
     newLabel: string,
     opts?: { swap?: boolean },
@@ -66,11 +68,17 @@ export interface FilesystemOpsContext<TFs> {
     versionId: number,
     writes: Array<{ internalPath: string; shape: InternalEntryShape | null }>,
   ): Promise<void>;
+  storeBlob(
+    tx: SqlClient,
+    internalPath: string,
+    blob: PreparedBlob,
+  ): Promise<void>;
 
   createVersionedFilesystem(
     internalPath: string,
     version: string,
     versionRootId: number,
+    versionId?: number,
   ): TFs;
   createForkedFilesystem(newVersion: string): TFs;
   setVersionLabelAfterRename(label: string): void;

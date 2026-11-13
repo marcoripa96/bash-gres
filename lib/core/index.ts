@@ -36,8 +36,15 @@ export {
   type MergeStrategy,
   type ConflictEntry,
   type MergeResult,
+  type MergeOptions,
+  type MergeSide,
+  type MergeConflictInput,
+  type MergeResolution,
+  type MergeResolver,
   type RenameVersionResult,
   type PromoteResult,
+  type PromoteOptions,
+  type CompactHistoryResult,
   type WorkspaceUsage,
   type WorkspaceUsageOptions,
   type BlobChunk,
@@ -49,6 +56,16 @@ export {
   type TraceOpEvent,
   type TraceOpRef,
 } from "./types.js";
+export {
+  createUnifiedDiff,
+  type UnifiedDiffOptions,
+} from "./text-diff.js";
+export {
+  mergeText,
+  textMergeResolver,
+  type TextMergeOptions,
+  type TextMergeResult,
+} from "./text-merge.js";
 export {
   chunkMarkdown,
   type MarkdownChunk,

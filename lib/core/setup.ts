@@ -1,4 +1,5 @@
 import type { SqlClient, SetupOptions } from "./types.js";
+import { FROZEN_VERSION_DETAIL } from "./filesystem/internals/constants.js";
 
 const TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS fs_version_roots (
@@ -17,7 +18,18 @@ CREATE TABLE IF NOT EXISTS fs_versions (
     parent_version_id  bigint REFERENCES fs_versions(id) ON DELETE RESTRICT,
     created_at         timestamptz NOT NULL DEFAULT now(),
     deleted_at         timestamptz,
-    last_write_at      timestamptz NOT NULL DEFAULT now()
+    last_write_at      timestamptz NOT NULL DEFAULT now(),
+    frozen_at          timestamptz
+);
+
+-- Merge parents: version_id incorporates source_id (a frozen version) through
+-- a full merge(). Read with parent_version_id when finding a merge base.
+CREATE TABLE IF NOT EXISTS fs_version_merges (
+    workspace_id  text NOT NULL CHECK (length(workspace_id) > 0),
+    version_id    bigint NOT NULL,
+    source_id     bigint NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, version_id, source_id)
 );
 
 CREATE TABLE IF NOT EXISTS version_ancestors (
@@ -141,6 +153,50 @@ WHERE last_write_at IS NULL;
 
 ALTER TABLE fs_versions ALTER COLUMN last_write_at SET DEFAULT now();
 ALTER TABLE fs_versions ALTER COLUMN last_write_at SET NOT NULL;
+
+ALTER TABLE fs_versions ADD COLUMN IF NOT EXISTS frozen_at timestamptz;
+`;
+
+/**
+ * Frozen versions refuse content writes. Every write path bumps
+ * fs_versions.last_write_at in the statement or transaction that writes
+ * fs_entries, so refusing that bump on a frozen row rolls the write back,
+ * whichever handle (or bash-gres version) issued it. SQLSTATE 25006
+ * (read_only_sql_transaction) surfaces as FsError EPERM. Unfrozen rows pay
+ * only the WHEN test.
+ */
+const FROZEN_GUARD_BODY = `
+BEGIN
+  RAISE EXCEPTION 'version % is frozen', OLD.id
+    USING ERRCODE = '25006', DETAIL = '${FROZEN_VERSION_DETAIL}';
+END
+`;
+
+export const FREEZE_TRIGGER_DDL = `
+-- Replace the function only when it is missing or differs, so concurrent
+-- setup() runs don't race on CREATE OR REPLACE ("tuple concurrently updated").
+DO $do$ BEGIN
+  IF (
+    SELECT prosrc FROM pg_proc
+    WHERE oid = to_regprocedure('fs_versions_refuse_frozen_write()')
+  ) IS DISTINCT FROM $src$${FROZEN_GUARD_BODY}$src$ THEN
+    CREATE OR REPLACE FUNCTION fs_versions_refuse_frozen_write() RETURNS trigger
+    LANGUAGE plpgsql AS $fn$${FROZEN_GUARD_BODY}$fn$;
+  END IF;
+END $do$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'fs_versions_frozen_guard'
+      AND tgrelid = 'fs_versions'::regclass
+  ) THEN
+    CREATE TRIGGER fs_versions_frozen_guard
+      BEFORE UPDATE OF last_write_at ON fs_versions
+      FOR EACH ROW WHEN (OLD.frozen_at IS NOT NULL)
+      EXECUTE FUNCTION fs_versions_refuse_frozen_write();
+  END IF;
+END $$;
 `;
 
 const INDEXES_DDL = `
@@ -172,6 +228,10 @@ CREATE INDEX IF NOT EXISTS idx_version_ancestors_depth_cover
 -- Closure reverse: descendants of a version (refusal checks, subtree delete)
 CREATE INDEX IF NOT EXISTS idx_version_ancestors_reverse
   ON version_ancestors (workspace_id, ancestor_id);
+
+-- Merge records by source (cleanup when a source version is removed)
+CREATE INDEX IF NOT EXISTS idx_fs_version_merges_source
+  ON fs_version_merges (workspace_id, source_id);
 
 -- Versions by parent (descendant-existence checks)
 CREATE INDEX IF NOT EXISTS idx_fs_versions_parent
@@ -224,6 +284,26 @@ CREATE INDEX IF NOT EXISTS idx_fs_chunk_embeddings_hnsw ON fs_chunk_embeddings
 `;
 }
 
+/**
+ * `setup()` may run from several connections at once (every process of a
+ * deployment calling it at boot). Its batches take table locks one after
+ * another (a backfill UPDATE, then ALTER TABLE on the same table), so two
+ * sessions inside the same batch can each hold the weaker lock and wait for
+ * the stronger one: a deadlock. Every batch therefore starts by taking this
+ * transaction-level advisory lock, which lets one session through at a
+ * time. A batch sent without parameters is one implicit transaction, so the
+ * lock is held for that batch and released with it; inside a caller's own
+ * transaction it is held until that transaction ends. The single-bigint key
+ * is a different lock space from the (hashtext(workspace), id) pairs the
+ * filesystem takes.
+ */
+const SETUP_LOCK_KEY = "4847322071985493";
+const SETUP_LOCK = `DO $$ BEGIN PERFORM pg_advisory_xact_lock(${SETUP_LOCK_KEY}); END $$;\n`;
+
+async function ddl(client: SqlClient, text: string): Promise<void> {
+  await client.query(SETUP_LOCK + text);
+}
+
 export async function setup(
   db: SqlClient,
   options: SetupOptions = {},
@@ -244,35 +324,36 @@ export async function setup(
   }
 
   if (!skipExtensions) {
-    await client.query("CREATE EXTENSION IF NOT EXISTS ltree");
+    await ddl(client, "CREATE EXTENSION IF NOT EXISTS ltree");
     if (enableFullTextSearch) {
-      await client.query("CREATE EXTENSION IF NOT EXISTS pg_textsearch");
+      await ddl(client, "CREATE EXTENSION IF NOT EXISTS pg_textsearch");
     }
     if (enableVectorSearch) {
-      await client.query("CREATE EXTENSION IF NOT EXISTS vector");
+      await ddl(client, "CREATE EXTENSION IF NOT EXISTS vector");
     }
   }
 
-  await client.query(TABLE_DDL);
-  await client.query(MIGRATIONS_DDL);
-  await client.query(INDEXES_DDL);
+  await ddl(client, TABLE_DDL);
+  await ddl(client, MIGRATIONS_DDL);
+  await ddl(client, FREEZE_TRIGGER_DDL);
+  await ddl(client, INDEXES_DDL);
 
   if (enableFullTextSearch) {
-    await client.query(FTS_INDEX_DDL);
+    await ddl(client, FTS_INDEX_DDL);
   }
 
   if (enableRLS) {
-    for (const table of ["fs_version_roots", "fs_versions", "version_ancestors", "fs_entries", "fs_blobs", "fs_blob_chunks"]) {
-      await client.query(rlsDdl(table));
+    for (const table of ["fs_version_roots", "fs_versions", "version_ancestors", "fs_version_merges", "fs_entries", "fs_blobs", "fs_blob_chunks"]) {
+      await ddl(client, rlsDdl(table));
     }
   }
 
   if (enableVectorSearch && embeddingDimensions) {
-    await client.query(vectorDDL(embeddingDimensions));
+    await ddl(client, vectorDDL(embeddingDimensions));
     if (enableRLS) {
       // fs_chunk_embeddings only exists under vector search, so its RLS
       // rides here instead of the main table loop.
-      await client.query(rlsDdl("fs_chunk_embeddings"));
+      await ddl(client, rlsDdl("fs_chunk_embeddings"));
     }
   }
 }

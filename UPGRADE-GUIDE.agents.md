@@ -1,4 +1,79 @@
-# bash-gres Upgrade Guide: 2.x → 3.0 (for coding agents)
+# bash-gres Upgrade Guide (for coding agents)
+
+Sections are newest first. Apply every section between the installed
+version and the target, oldest first.
+
+---
+
+# 3.1 → 3.2
+
+3.2 is additive: no API or default changes, no data backfill. It adds a
+database migration (one column, one table, one trigger) and new opt-in APIs
+(merge resolvers, text merge, unified diffs, freeze, materialize,
+`compactHistory`, `versioned(path, { versionId })`).
+
+## Step 1 — database migration (additive, idempotent)
+
+3.2 adds:
+
+- `fs_versions.frozen_at timestamptz` (nullable);
+- the `fs_version_merges` table (merge parents) with RLS;
+- the `fs_versions_frozen_guard` trigger, which refuses writes to frozen
+  versions (it fires only on rows with `frozen_at` set).
+
+Apply it:
+
+- **Native**: re-run `setup(client, { ...the same options })` once.
+- **Drizzle**, in this order:
+  1. If your schema file destructures specific tables from `createSchema()`,
+     add `fsVersionMerges` to the exports, otherwise `drizzle-kit generate`
+     misses the table.
+  2. Run `drizzle-kit generate`: it adds the `frozen_at` column and the
+     `fs_version_merges` table.
+  3. Paste the **entire** output of `generateMigrationSQL()` into a new
+     custom migration (`drizzle-kit generate --custom`), ordered after the
+     one from step 2. It now carries the trigger and the RLS policy for
+     `fs_version_merges`; every statement is idempotent, so the statements
+     already applied no-op.
+
+bash-gres 3.1 keeps working against a migrated database. It cannot freeze
+anything, and it is refused (`EPERM`) when it writes to a version that 3.2
+froze.
+
+## Step 2 — upgrade every process before using the new history APIs
+
+`materialize()`, `promoteTo(..., { materialize: true })` and
+`compactHistory()` trim the ancestor closure. 3.2 reads history and merge
+bases from parent links, so nothing is lost, but 3.1 reads them from the
+closure. A 3.1 process still running after a version is materialized sees
+`listHistory()` end at that version, and its `merge()` picks an older base.
+Roll out 3.2 everywhere first.
+
+## Step 3 — optional: adopt the new APIs
+
+Ask the user before changing behaviour. None of these are needed to upgrade.
+
+- Publishing flows with `historyRetention: "retain"` can pass
+  `promoteTo(label, { dropPrevious: true, freeze: true, materialize: true })`.
+  This keeps the published version immutable and the closure linear.
+- Roots built before 3.2 with long publish chains: run
+  `await (await fs.versioned(root)).compactHistory()` once per root (or on
+  the `/` handle). It removes nothing and keeps every version id readable.
+  Do **not** use `sweepHistory()` for this: it deletes retained versions.
+- `merge(source, { resolve: textMergeResolver })` merges non-overlapping
+  line edits in the same file instead of reporting a conflict.
+
+## Step 4 — verify
+
+- Typecheck. `MergeResult` gained `resolved: string[]`, and
+  `VersionHistoryEntry` gained `frozenAt` and `mergedFrom`. Only code that
+  builds these objects by hand (test doubles) needs the new fields.
+- Check that `SELECT frozen_at FROM fs_versions LIMIT 1` runs, and that
+  `fs_version_merges` exists.
+
+---
+
+# 2.x → 3.0
 
 This guide tells you, the agent, how to upgrade a host project from
 **bash-gres 2.x to 3.0**. The release replaces file-level search with
