@@ -193,7 +193,8 @@ const page = await fs.listHistory({
 
 for (const entry of page.entries) {
   // entry.versionId, entry.version, entry.parentVersion,
-  // entry.createdAt, entry.deletedAt, entry.changes
+  // entry.createdAt, entry.deletedAt, entry.frozenAt,
+  // entry.mergedFrom, entry.changes
   console.log(entry.version, entry.changes.length, "changes")
 }
 
@@ -298,6 +299,84 @@ await draft.cherryPick("feature", ["/src/router.ts", "/docs"])
 // Restore selected paths to match another version.
 await draft.revert("live", { paths: ["/config.json"] })`}
         />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Conflicts compare whole files. Pass a{" "}
+          <code className="font-mono text-foreground/80">resolve</code> callback to settle a conflicting file from its text
+          at the base and on both sides before the strategy applies; return{" "}
+          <code className="font-mono text-foreground/80">undefined</code> to leave it a conflict. The built-in{" "}
+          <code className="font-mono text-foreground/80">textMergeResolver</code> is a line-based three-way merge with
+          git&apos;s rules: changes to different lines merge, overlapping or
+          adjacent changes stay conflicts.{" "}
+          <code className="font-mono text-foreground/80">mergeText</code> and{" "}
+          <code className="font-mono text-foreground/80">createUnifiedDiff</code> are the same functions as plain
+          imports, usable without a database.
+        </p>
+        <CodeBlock
+          code={`import { textMergeResolver } from "bash-gres"
+
+const result = await chat.merge("main", {
+  // Called per conflicting file, inside the merge transaction.
+  resolve: (c) =>
+    c.path.endsWith(".md")
+      ? { content: myMarkdownMerge(c.base?.content, c.ours?.content, c.theirs?.content) }
+      : textMergeResolver(c),
+  includeContent: true, // remaining conflicts carry baseContent / oursContent / theirsContent
+})
+// result.resolved: paths the resolver settled (also in applied or skipped)`}
+        />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Every diff API (<code className="font-mono text-foreground/80">diff</code>,{" "}
+          <code className="font-mono text-foreground/80">diffVersions</code>, <code className="font-mono text-foreground/80">versionDiff</code> and their streams)
+          takes <code className="font-mono text-foreground/80">unifiedDiff</code> to return a git-style patch per changed
+          text file.
+        </p>
+        <CodeBlock
+          code={`const changes = await fs.diffVersions(fromId, toId, { unifiedDiff: { context: 3 } })
+// changes[0].unifiedDiff:
+// --- a/app.jsx
+// +++ b/app.jsx
+// @@ -1,3 +1,3 @@ ...`}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          Publishing: Freeze & Materialize
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          A fork reads through its parent, so an unfrozen parent&apos;s later
+          writes show through in its forks and move the base of later merges.{" "}
+          <code className="font-mono text-foreground/80">freeze()</code> makes the current version refuse every content
+          write with <code className="font-mono text-foreground/80">EPERM</code>, from any handle. Forks, label moves,
+          soft deletes and removing the version root still work.{" "}
+          <code className="font-mono text-foreground/80">materialize()</code> copies inherited entries into the version
+          and cuts its ancestor rows but keeps its parent link, so history and
+          merge bases still pass through it. A chain of materialized publishes
+          costs one ancestor row per version instead of growing with the square
+          of its length.
+        </p>
+        <CodeBlock
+          code={`const fs = new PgFileSystem({ db, workspaceId, historyRetention: "retain" })
+const main = await fs.versioned("/artifacts/a1")
+const chat = await main.fork("chat-42")
+// ... edits ...
+await chat.transaction(async (tx) => {
+  const r = await tx.merge("main", { resolve: textMergeResolver }) // if main moved
+  if (r.conflicts.length > 0) throw new Error("conflicts")
+  await tx.promoteTo("main", { dropPrevious: true, freeze: true, materialize: true })
+})
+
+// Read a pinned version later, read-only:
+const pinned = await fs.versioned("/artifacts/a1", { versionId })
+
+// Roots built before 3.2: trim the closure once, keeping every version.
+await main.compactHistory()`}
+        />
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          A full merge of a frozen source records it as a merge parent
+          (<code className="font-mono text-foreground/80">mergedFrom</code> in <code className="font-mono text-foreground/80">listHistory()</code>), so a later
+          merge uses the right common ancestor instead of an older one.
+        </p>
       </section>
 
       <section className="space-y-4">
@@ -383,7 +462,7 @@ await draft.promoteTo("live")`}
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">versioned(path, opts?)</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;PgFileSystem&gt;</td>
-                <td className="py-2">Open a scoped facade for a versioned directory. Throws <code className="font-mono">ENOTVERSIONED</code> for normal directories.</td>
+                <td className="py-2">Open a scoped facade for a versioned directory, by <code className="font-mono">version</code> label or, read-only, by exact <code className="font-mono">versionId</code>. Throws <code className="font-mono">ENOTVERSIONED</code> for normal directories.</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">fork(name)</td>
@@ -403,7 +482,7 @@ await draft.promoteTo("live")`}
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">merge(source, opts?)</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;MergeResult&gt;</td>
-                <td className="py-2">Three-way merge from a source version into the current version.</td>
+                <td className="py-2">Three-way merge from a source version into the current version. <code className="font-mono">resolve</code> settles conflicting files from their text; <code className="font-mono">includeContent</code> adds the three texts to conflicts.</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">cherryPick(source, paths)</td>
@@ -421,6 +500,21 @@ await draft.promoteTo("live")`}
                 <td className="py-2">Materialize visible entries and sever ancestor dependencies.</td>
               </tr>
               <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">freeze()</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;void&gt;</td>
+                <td className="py-2">Refuse every further content write to this version (<code className="font-mono">EPERM</code>), from any handle. Idempotent, permanent.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">materialize()</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;void&gt;</td>
+                <td className="py-2">Copy inherited entries into this version and cut its ancestor rows, keeping its parent link and history.</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">compactHistory()</td>
+                <td className="py-2 pr-4 font-mono">Promise&lt;CompactHistoryResult&gt;</td>
+                <td className="py-2">Materialize every frozen or deleted-but-retained version of the root and trim the closure. Removes nothing.</td>
+              </tr>
+              <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">renameVersion(label, opts?)</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;RenameVersionResult&gt;</td>
                 <td className="py-2">Rename this version label, optionally displacing an existing label with <code className="font-mono">swap</code>.</td>
@@ -428,7 +522,7 @@ await draft.promoteTo("live")`}
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">promoteTo(label, opts?)</td>
                 <td className="py-2 pr-4 font-mono">Promise&lt;PromoteResult&gt;</td>
-                <td className="py-2">Detach, swap this version onto a label, and optionally drop the previous holder.</td>
+                <td className="py-2">Detach, swap this version onto a label, and optionally drop the previous holder. <code className="font-mono">freeze</code> and <code className="font-mono">materialize</code> (retain only, replaces the detach) apply in the same transaction.</td>
               </tr>
               <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">listVersions()</td>
