@@ -6,6 +6,7 @@ import type {
 import { pathToLtree, normalizePath } from "../../path-encoding.js";
 import { op, type FilesystemOpsContext } from "./context.js";
 import { fetchVersionChanges } from "./fetch-version-changes.js";
+import { diffContentMode } from "../internals/entry-shapes.js";
 
 interface VersionRow {
   parent_version_id: number | string | null;
@@ -46,7 +47,7 @@ export const versionDiff = op(async (
       scopeLtree,
       null,
       false,
-      opts?.includeContent ?? false,
+      diffContentMode(opts),
     );
     return entries;
   });

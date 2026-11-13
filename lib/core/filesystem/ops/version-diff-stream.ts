@@ -7,6 +7,7 @@ import {
 import { op } from "./context.js";
 import { fetchVersionChanges } from "./fetch-version-changes.js";
 import { resolveParentVersionId } from "./version-diff.js";
+import { diffContentMode } from "../internals/entry-shapes.js";
 
 /**
  * Streaming variant of `versionDiff`. Pages by encoded ltree path with
@@ -38,7 +39,7 @@ export const versionDiffStream = op(async function* (
       return fetchVersionChanges(ctx, tx, versionId, parentVersionId, scopeLtree, {
         cursor,
         limit: batchSize,
-      }, false, opts?.includeContent ?? false);
+      }, false, diffContentMode(opts));
     });
     for (const entry of entries) yield entry;
     if (entries.length < batchSize) return;

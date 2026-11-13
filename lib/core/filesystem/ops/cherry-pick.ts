@@ -108,7 +108,7 @@ export const cherryPick = op(async (
       skipped.sort();
 
       if (writes.length === 0) {
-        return { applied, conflicts: [], skipped };
+        return { applied, conflicts: [], skipped, resolved: [] };
       }
 
       await ctx.lockVersions(tx, [ourId]);
@@ -119,6 +119,6 @@ export const cherryPick = op(async (
       );
       await ctx.writeEntryShapes(tx, ourId, writes);
 
-      return { applied, conflicts: [], skipped };
+      return { applied, conflicts: [], skipped, resolved: [] };
     });
   });

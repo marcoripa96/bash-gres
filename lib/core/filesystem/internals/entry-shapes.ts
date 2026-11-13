@@ -1,4 +1,10 @@
-import type { EntryShape, NodeType } from "../../types.js";
+import type {
+  EntryShape,
+  NodeType,
+  VersionDiffEntry,
+  VersionDiffOptions,
+} from "../../types.js";
+import { createUnifiedDiff } from "../../text-diff.js";
 import { blobHashEqual } from "./hashes.js";
 
 /**
@@ -100,4 +106,81 @@ export function decodeBlobContent(
   if (content !== null) return content;
   if (binary !== null) return new TextDecoder().decode(binary);
   return "";
+}
+
+/** What a diff fetch adds to each entry beyond its shapes. */
+export interface DiffContentMode {
+  /** Populate `beforeContent` / `afterContent`. */
+  content: boolean;
+  /** Populate `unifiedDiff` with this many context lines; `null` = off. */
+  unified: { context: number } | null;
+}
+
+export const NO_DIFF_CONTENT: DiffContentMode = { content: false, unified: null };
+
+export function diffContentMode(opts?: VersionDiffOptions): DiffContentMode {
+  const u = opts?.unifiedDiff;
+  return {
+    content: opts?.includeContent ?? false,
+    unified:
+      u === undefined || u === false
+        ? null
+        : { context: u === true ? 3 : (u.context ?? 3) },
+  };
+}
+
+/** True when the fetch must join `fs_blobs` for either side's content. */
+export function needsBlobContent(mode: DiffContentMode): boolean {
+  return mode.content || mode.unified !== null;
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** A file side's text for a patch: `null` for non-files, `undefined` for non-UTF-8 blobs. */
+function patchText(
+  side: EntryShape | null,
+  content: string | null,
+  binary: Uint8Array | null,
+): string | null | undefined {
+  if (side === null || side.type !== "file") return null;
+  if (content !== null) return content;
+  if (binary === null) return "";
+  try {
+    return strictUtf8.decode(binary);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fill the content fields `mode` asks for on a diff entry, from the raw blob
+ * columns of both sides.
+ */
+export function fillDiffContent(
+  entry: VersionDiffEntry,
+  mode: DiffContentMode,
+  beforeBlob: { content: string | null; binary: Uint8Array | null },
+  afterBlob: { content: string | null; binary: Uint8Array | null },
+): void {
+  const { before, after } = entry;
+  if (mode.content) {
+    entry.beforeContent = decodeBlobContent(before, beforeBlob.content, beforeBlob.binary);
+    entry.afterContent = decodeBlobContent(after, afterBlob.content, afterBlob.binary);
+  }
+  if (mode.unified === null) return;
+  const nonFile = (s: EntryShape | null) => s !== null && s.type !== "file";
+  if (nonFile(before) || nonFile(after)) {
+    entry.unifiedDiff = null;
+    return;
+  }
+  const a = patchText(before, beforeBlob.content, beforeBlob.binary);
+  const b = patchText(after, afterBlob.content, afterBlob.binary);
+  if (a === undefined || b === undefined || a === b) {
+    entry.unifiedDiff = null;
+    return;
+  }
+  entry.unifiedDiff = createUnifiedDiff(a, b, {
+    path: entry.path,
+    context: mode.unified.context,
+  });
 }

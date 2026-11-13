@@ -10,6 +10,15 @@ export const versioned = op(async (
   options?: VersionedDirectoryOptions,
 ) => {
     const internal = ctx.guardRead(path);
+    const versionId = options?.versionId;
+    if (versionId !== undefined) {
+      if (options?.version !== undefined) {
+        throw new Error("versioned: version and versionId are mutually exclusive");
+      }
+      if (!Number.isSafeInteger(versionId) || versionId <= 0) {
+        throw new Error("versioned: versionId must be a positive safe integer");
+      }
+    }
     const version = options?.version ?? DEFAULT_VERSION;
     if (version.length === 0) {
       throw new Error("versioned: version must be a non-empty string");
@@ -34,5 +43,5 @@ export const versioned = op(async (
       versionRootId = Number(r.rows[0]!.id);
     });
 
-    return ctx.createVersionedFilesystem(internal, version, versionRootId!);
+    return ctx.createVersionedFilesystem(internal, version, versionRootId!, versionId);
   });

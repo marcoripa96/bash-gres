@@ -104,7 +104,14 @@ export interface MkdirOptions {
 }
 
 export interface VersionedDirectoryOptions {
+  /** Open an active version by label. Default `"main"`. Mutually exclusive with `versionId`. */
   version?: string;
+  /**
+   * Open one exact version of this version root by its numeric id (as
+   * returned by `listHistory()`), including retained versions whose label was
+   * deleted. The handle is read-only. Mutually exclusive with `version`.
+   */
+  versionId?: number;
 }
 
 export interface RmOptions {
@@ -181,6 +188,13 @@ export interface VersionDiffEntry {
   beforeContent?: string | null;
   /** File content on the version side. See `beforeContent`. */
   afterContent?: string | null;
+  /**
+   * Git-style unified diff of the file, populated only when the caller passes
+   * `unifiedDiff`. `null` when there is no textual change to show: either
+   * side a directory or symlink, a binary (non-UTF-8) blob, or a mode-only
+   * change. Added and removed files diff against `/dev/null`.
+   */
+  unifiedDiff?: string | null;
 }
 
 export interface VersionDiffOptions {
@@ -191,6 +205,13 @@ export interface VersionDiffOptions {
    * symlinks return `null` on the corresponding side.
    */
   includeContent?: boolean;
+  /**
+   * Populate `unifiedDiff` on each entry: a git-style patch per changed text
+   * file (`--- a/path`, `+++ b/path`, `@@` hunks). `true` uses 3 context
+   * lines; `{ context }` sets them. Independent of `includeContent`. Not
+   * supported by `listHistory()`.
+   */
+  unifiedDiff?: boolean | { context?: number };
 }
 
 export interface VersionDiffStreamOptions extends VersionDiffOptions {
@@ -249,12 +270,78 @@ export interface ConflictEntry {
   base: EntryShape | null;
   ours: EntryShape | null;
   theirs: EntryShape | null;
+  /**
+   * File text on each side, populated only with `merge(..., { includeContent:
+   * true })`. `null` for an absent side, a directory or symlink, or a blob
+   * that is not valid UTF-8.
+   */
+  baseContent?: string | null;
+  oursContent?: string | null;
+  theirsContent?: string | null;
 }
 
 export interface MergeResult {
   applied: string[];
   conflicts: ConflictEntry[];
   skipped: string[];
+  /**
+   * Conflicting paths settled by the `resolve` callback. Each also appears in
+   * `applied` (the destination changed) or `skipped` (the resolution equals
+   * the destination). Empty when nothing was written because conflicts
+   * remained under `strategy: "fail"`.
+   */
+  resolved: string[];
+}
+
+/** One side of a merge conflict as passed to a `MergeResolver`. */
+export interface MergeSide extends EntryShape {
+  /** The file's text; `null` for directories, symlinks and non-UTF-8 blobs. */
+  content: string | null;
+}
+
+export interface MergeConflictInput {
+  path: string;
+  /** The side at the lowest common ancestor; `null` when absent there. */
+  base: MergeSide | null;
+  /** The destination (the version being merged into); `null` when absent. */
+  ours: MergeSide | null;
+  /** The merge source; `null` when absent. */
+  theirs: MergeSide | null;
+}
+
+/**
+ * How a resolver settles a conflict: `{ content }` writes that content as a
+ * regular file (mode from ours, else theirs); `{ remove: true }` deletes the
+ * path.
+ */
+export type MergeResolution =
+  | { content: string | Uint8Array }
+  | { remove: true };
+
+/**
+ * Called by `merge()` once per conflicting path whose present sides are all
+ * regular files (modify/modify, add/add, modify/delete), in path order,
+ * inside the merge transaction. Return a resolution, or `undefined`/`null`
+ * to leave the path a conflict for `strategy` to handle. A throw aborts the
+ * merge.
+ */
+export type MergeResolver = (
+  conflict: MergeConflictInput,
+) =>
+  | MergeResolution
+  | null
+  | undefined
+  | Promise<MergeResolution | null | undefined>;
+
+export interface MergeOptions {
+  strategy?: MergeStrategy;
+  paths?: string[];
+  pathScope?: string;
+  dryRun?: boolean;
+  /** Settle conflicting files before `strategy` applies. See `MergeResolver`. */
+  resolve?: MergeResolver;
+  /** Populate `baseContent` / `oursContent` / `theirsContent` on each conflict. */
+  includeContent?: boolean;
 }
 
 export interface RenameVersionResult {

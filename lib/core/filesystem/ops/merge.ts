@@ -1,5 +1,14 @@
-import type { ConflictEntry, MergeResult, MergeStrategy } from "../../types.js";
+import type {
+  ConflictEntry,
+  MergeOptions,
+  MergeResolution,
+  MergeResult,
+  MergeSide,
+  MergeStrategy,
+  SqlClient,
+} from "../../types.js";
 import { FsError } from "../../types.js";
+import { bytesKey, sha256 } from "../internals/hashes.js";
 import { pathToLtree, normalizePath, parentPath } from "../../path-encoding.js";
 import {
   entryShapeEqual,
@@ -34,6 +43,14 @@ import { op } from "./context.js";
  *   - `theirs`: apply source, conflicts still reported (so callers can see
  *     the override), path goes in `applied`.
  *
+ * Resolver: `resolve` is called for each conflict whose present sides are
+ * all regular files, with the three texts, before the strategy applies. A
+ * returned `{ content }` / `{ remove: true }` settles the path (listed in
+ * `resolved`, and in `applied` or `skipped`); `undefined` leaves it a
+ * conflict. `includeContent` adds the three texts to each `ConflictEntry`.
+ * Blob contents are fetched in one query, only for conflicting paths, and
+ * only when either option is set.
+ *
  * Filters: `paths` matches each entry as either an exact path or a path
  * prefix (so a directory entry pulls in its descendants visible in any of
  * base/ours/theirs); `pathScope` restricts to one subtree; supplying both
@@ -52,12 +69,7 @@ import { op } from "./context.js";
 export const merge = op(async (
   ctx,
   source: string,
-  opts?: {
-    strategy?: MergeStrategy;
-    paths?: string[];
-    pathScope?: string;
-    dryRun?: boolean;
-  },
+  opts?: MergeOptions,
 ): Promise<MergeResult> => {
     if (!source || source.length === 0) {
       throw new Error("merge: source must be a non-empty version label");
@@ -93,7 +105,7 @@ export const merge = op(async (
       // fast-forward, so we don't short-circuit on lcaId === ourId.)
       const lcaId = await ctx.findLCA(tx, ourId, theirId);
       if (lcaId === theirId) {
-        return { applied: [], conflicts: [], skipped: [] };
+        return { applied: [], conflicts: [], skipped: [], resolved: [] };
       }
 
       const oursMap = await ctx.fetchVisibleEntryMap(tx, ourId, scopeLtree);
@@ -143,7 +155,17 @@ export const merge = op(async (
 
       const applied: string[] = [];
       const skipped: string[] = [];
+      const resolved: string[] = [];
       const conflicts: ConflictEntry[] = [];
+      const rawConflicts: Array<{
+        internalPath: string;
+        base: InternalEntryShape | null;
+        ours: InternalEntryShape | null;
+        theirs: InternalEntryShape | null;
+      }> = [];
+      // Resolver output waiting for its blob to be stored (after the
+      // strategy check, so a refused merge stores nothing).
+      const pendingBlobs: Array<{ internalPath: string; content: string | Uint8Array }> = [];
       const writes: Array<{
         internalPath: string;
         shape: InternalEntryShape | null;
@@ -171,12 +193,77 @@ export const merge = op(async (
           continue;
         }
 
+        rawConflicts.push({ internalPath, base, ours, theirs });
+      }
+
+      const texts =
+        rawConflicts.length > 0 && (opts?.resolve || opts?.includeContent)
+          ? await fetchBlobTexts(
+              tx,
+              ctx.workspaceId,
+              rawConflicts.flatMap((c) => [c.base, c.ours, c.theirs]),
+            )
+          : null;
+      const textOf = (s: InternalEntryShape | null): string | null =>
+        texts === null ? null : sideText(s, texts);
+
+      for (const { internalPath, base, ours, theirs } of rawConflicts) {
+        const userPath = ctx.toUserPath(internalPath);
+
+        if (opts?.resolve && resolvable(base, ours, theirs)) {
+          const side = (s: InternalEntryShape | null): MergeSide | null => {
+            const pub = toPublicEntryShape(s);
+            return pub === null ? null : { ...pub, content: textOf(s) };
+          };
+          const resolution: MergeResolution | null | undefined =
+            await opts.resolve({
+              path: userPath,
+              base: side(base),
+              ours: side(ours),
+              theirs: side(theirs),
+            });
+          if (resolution) {
+            let shape: InternalEntryShape | null = null;
+            if ("content" in resolution) {
+              const bytes =
+                typeof resolution.content === "string"
+                  ? new TextEncoder().encode(resolution.content)
+                  : resolution.content;
+              shape = {
+                type: "file",
+                blobHash: sha256(bytes),
+                symlinkTarget: null,
+                mode: ours?.mode ?? theirs?.mode ?? base?.mode ?? 0o644,
+                sizeBytes: bytes.byteLength,
+                mtime: new Date(),
+              };
+            }
+            resolved.push(userPath);
+            if (entryShapeEqual(ours, shape)) {
+              skipped.push(userPath);
+            } else {
+              if ("content" in resolution) {
+                pendingBlobs.push({ internalPath, content: resolution.content });
+              }
+              writes.push({ internalPath, shape });
+              writePathSet.add(internalPath);
+              applied.push(userPath);
+            }
+            continue;
+          }
+        }
+
         const conflict: ConflictEntry = {
           path: userPath,
           base: toPublicEntryShape(base),
           ours: toPublicEntryShape(ours),
           theirs: toPublicEntryShape(theirs),
         };
+        if (opts?.includeContent) {
+          conflict.baseContent = textOf(base);
+          conflict.oursContent = textOf(ours);
+          conflict.theirsContent = textOf(theirs);
+        }
 
         if (strategy === "fail") {
           conflicts.push(conflict);
@@ -192,7 +279,7 @@ export const merge = op(async (
       }
 
       if (strategy === "fail" && conflicts.length > 0) {
-        return { applied: [], conflicts, skipped: [] };
+        return { applied: [], conflicts, skipped: [], resolved: [] };
       }
 
       // Post-apply visible map (within scope) for parent expansion.
@@ -271,10 +358,13 @@ export const merge = op(async (
       skipped.sort();
 
       if (dryRun || writes.length === 0) {
-        return { applied, conflicts, skipped };
+        return { applied, conflicts, skipped, resolved };
       }
 
       await ctx.lockVersions(tx, [ourId]);
+      for (const b of pendingBlobs) {
+        await ctx.storeBlob(tx, b.internalPath, b.content);
+      }
       writes.sort((a, b) =>
         a.internalPath < b.internalPath ? -1
         : a.internalPath > b.internalPath ? 1
@@ -282,6 +372,62 @@ export const merge = op(async (
       );
       await ctx.writeEntryShapes(tx, ourId, writes);
 
-      return { applied, conflicts, skipped };
+      return { applied, conflicts, skipped, resolved };
     });
   });
+
+/** A conflict goes to the resolver when every side present is a regular file. */
+function resolvable(
+  ...sides: Array<InternalEntryShape | null>
+): boolean {
+  return sides.every((s) => s === null || s.type === "file");
+}
+
+interface BlobText {
+  content: string | null;
+  binary: Uint8Array | null;
+}
+
+/** Contents of the blobs behind `sides`, keyed by hex hash, in one query. */
+async function fetchBlobTexts(
+  tx: SqlClient,
+  workspaceId: string,
+  sides: Array<InternalEntryShape | null>,
+): Promise<Map<string, BlobText>> {
+  const hashes = new Map<string, Uint8Array>();
+  for (const s of sides) {
+    if (s?.type === "file" && s.blobHash) hashes.set(bytesKey(s.blobHash), s.blobHash);
+  }
+  const out = new Map<string, BlobText>();
+  if (hashes.size === 0) return out;
+  const r = await tx.query<{ hash: Uint8Array; content: string | null; binary_data: Uint8Array | null }>(
+    `SELECT hash, content, binary_data FROM fs_blobs
+     WHERE workspace_id = $1
+       AND hash = ANY(ARRAY(SELECT decode(h, 'hex') FROM unnest($2::text[]) AS h))`,
+    [workspaceId, [...hashes.keys()]],
+  );
+  for (const row of r.rows) {
+    out.set(bytesKey(row.hash), { content: row.content, binary: row.binary_data });
+  }
+  return out;
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** A file side's text: `null` for non-files and blobs that are not UTF-8. */
+function sideText(
+  s: InternalEntryShape | null,
+  texts: Map<string, BlobText>,
+): string | null {
+  if (s === null || s.type !== "file") return null;
+  if (!s.blobHash) return "";
+  const blob = texts.get(bytesKey(s.blobHash));
+  if (!blob) return null;
+  if (blob.content !== null) return blob.content;
+  if (blob.binary === null) return "";
+  try {
+    return strictUtf8.decode(blob.binary);
+  } catch {
+    return null;
+  }
+}

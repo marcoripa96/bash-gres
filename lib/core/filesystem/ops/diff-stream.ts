@@ -6,6 +6,7 @@ import {
 } from "../internals/constants.js";
 import { op } from "./context.js";
 import { fetchDiff } from "./fetch-diff.js";
+import { diffContentMode } from "../internals/entry-shapes.js";
 
 /**
  * Streaming diff with keyset pagination by encoded ltree path. Each batch is
@@ -26,7 +27,7 @@ export const diffStream = op(async function* (
     const requested = opts?.batchSize ?? DIFF_DEFAULT_BATCH_SIZE;
     const batchSize = Math.max(1, Math.min(requested, DIFF_MAX_BATCH_SIZE));
 
-    const includeContent = opts?.includeContent ?? false;
+    const contentMode = diffContentMode(opts);
     let cursor: string | null = null;
     while (true) {
       const { entries, lastLtree } = await ctx.withReadOnlyWorkspace(async (tx) => {
@@ -40,7 +41,7 @@ export const diffStream = op(async function* (
           theirId,
           scopeLtree,
           { cursor, limit: batchSize },
-          includeContent,
+          contentMode,
         );
       });
       for (const entry of entries) yield entry;

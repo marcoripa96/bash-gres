@@ -125,7 +125,9 @@ export class PgFileSystem extends FsWriteOpsBase {
         self.writeEntryShape(tx, versionId, posixPath, shape),
       writeEntryShapes: (tx, versionId, writes) =>
         self.writeEntryShapes(tx, versionId, writes),
-      createVersionedFilesystem: (internalPath, version, versionRootId) => {
+      storeBlob: (tx, internalPath, content) =>
+        self.storeBlob(tx, internalPath, content),
+      createVersionedFilesystem: (internalPath, version, versionRootId, versionId) => {
         const Ctor = self.constructor as new (
           opts: PgFileSystemOptions,
         ) => this;
@@ -136,8 +138,14 @@ export class PgFileSystem extends FsWriteOpsBase {
           db: self.rawDb as SqlClient,
           rootDir: internalPath,
           versionRoot: internalPath,
-          version,
-          versionId: undefined,
+          // An exact version is read-only, like `new PgFileSystem({ versionId })`.
+          ...(versionId === undefined
+            ? { version, versionId: undefined }
+            : {
+                version: undefined,
+                versionId,
+                permissions: { ...self.baseOptions.permissions, write: false },
+              }),
           // A versioned sub-fs re-roots at `internalPath`; the parent's mount
           // paths live in a different path space, so don't carry them over.
           mount: undefined,

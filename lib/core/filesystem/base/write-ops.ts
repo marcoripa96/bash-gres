@@ -521,6 +521,32 @@ export class FsWriteOpsBase extends FsVisibilityBase {
   }
 
   /**
+   * Store `content` as a blob (size limit, workspace byte quota, chunk index)
+   * without writing any entry, for batch writers such as `merge()` that
+   * place the entry themselves through `writeEntryShapes`.
+   */
+  protected async storeBlob(
+    tx: SqlClient,
+    path: string,
+    content: string | Uint8Array,
+  ): Promise<{ hash: Uint8Array; sizeBytes: number }> {
+    this.validateFileSize(content);
+    const isText = typeof content === "string";
+    const bytes = isText ? new TextEncoder().encode(content) : content;
+    const sizeBytes = bytes.byteLength;
+    const hash = sha256(bytes);
+    await this.validateWorkspaceBytes(tx, hash, sizeBytes, path);
+    await tx.query(
+      `INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (workspace_id, hash) DO NOTHING`,
+      [this.workspaceId, hash, isText ? content : null, isText ? null : content, sizeBytes],
+    );
+    await this.maybeChunk(tx, hash, content);
+    return { hash, sizeBytes };
+  }
+
+  /**
    * Maintain the chunk-level index for a just-written blob. Chunks key off
    * the blob hash, so an unchanged rewrite (or the same content at another
    * path) costs a single existence probe. Runs in the write's transaction:

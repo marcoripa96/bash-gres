@@ -1,6 +1,12 @@
 import type { SqlClient, SqlParam, VersionDiffEntry } from "../../types.js";
 import { ltreeToPath } from "../../path-encoding.js";
-import { decodeBlobContent, mapDiffSide } from "../internals/entry-shapes.js";
+import {
+  fillDiffContent,
+  mapDiffSide,
+  needsBlobContent,
+  NO_DIFF_CONTENT,
+  type DiffContentMode,
+} from "../internals/entry-shapes.js";
 import { op, type FilesystemOpsContext } from "./context.js";
 
 interface ChangeRow {
@@ -88,9 +94,9 @@ export const fetchVersionChanges = op(async <TFs>(
   scopeLtree: string,
   page: { cursor: string | null; limit: number } | null,
   pathsOnly: boolean,
-  includeContent: boolean = false,
+  contentMode: DiffContentMode = NO_DIFF_CONTENT,
 ): Promise<{ entries: VersionDiffEntry[]; lastLtree: string | null }> => {
-  const withContent = includeContent && !pathsOnly;
+  const withContent = needsBlobContent(contentMode) && !pathsOnly;
   const params: SqlParam[] = [ctx.workspaceId, versionId, scopeLtree];
   let parentClause = "";
   if (parentVersionId !== null) {
@@ -221,8 +227,12 @@ export const fetchVersionChanges = op(async <TFs>(
       after,
     };
     if (withContent) {
-      entry.beforeContent = decodeBlobContent(before, row.p_content, row.p_binary);
-      entry.afterContent = decodeBlobContent(after, row.o_content, row.o_binary);
+      fillDiffContent(
+        entry,
+        contentMode,
+        { content: row.p_content, binary: row.p_binary },
+        { content: row.o_content, binary: row.o_binary },
+      );
     }
     return entry;
   });

@@ -66,11 +66,17 @@ export interface FilesystemOpsContext<TFs> {
     versionId: number,
     writes: Array<{ internalPath: string; shape: InternalEntryShape | null }>,
   ): Promise<void>;
+  storeBlob(
+    tx: SqlClient,
+    internalPath: string,
+    content: string | Uint8Array,
+  ): Promise<{ hash: Uint8Array; sizeBytes: number }>;
 
   createVersionedFilesystem(
     internalPath: string,
     version: string,
     versionRootId: number,
+    versionId?: number,
   ): TFs;
   createForkedFilesystem(newVersion: string): TFs;
   setVersionLabelAfterRename(label: string): void;
