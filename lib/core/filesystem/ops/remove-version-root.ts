@@ -71,6 +71,16 @@ export const removeVersionRoot = op(async (
     );
 
     await tx.query(
+      `DELETE FROM fs_version_merges
+       WHERE workspace_id = $1
+         AND version_id IN (
+           SELECT id FROM fs_versions
+           WHERE workspace_id = $1 AND version_root_id = $2
+         )`,
+      [ctx.workspaceId, versionRootId],
+    );
+
+    await tx.query(
       `DELETE FROM version_ancestors
        WHERE workspace_id = $1
          AND (

@@ -88,6 +88,14 @@ export const sweepHistory = op(async (
          AND (descendant_id = ANY($2::bigint[]) OR ancestor_id = ANY($2::bigint[]))`,
       [ctx.workspaceId, allIds],
     );
+    // Sweeping flattens history (active parents are cleared below), so
+    // merge records in this root go too.
+    await tx.query(
+      `DELETE FROM fs_version_merges
+       WHERE workspace_id = $1
+         AND (version_id = ANY($2::bigint[]) OR source_id = ANY($2::bigint[]))`,
+      [ctx.workspaceId, allIds],
+    );
 
     if (inactiveIds.length > 0) {
       const deletedVersions = await tx.query<CountRow>(
@@ -153,6 +161,8 @@ async function materializeVersionsBatch<TFs>(
     `WITH version_bump AS (
        UPDATE fs_versions SET last_write_at = now()
        WHERE workspace_id = $1 AND id = ANY($2::bigint[])
+         -- content is unchanged; frozen versions keep their timestamp
+         AND frozen_at IS NULL
        RETURNING 1
      )
      INSERT INTO fs_entries (

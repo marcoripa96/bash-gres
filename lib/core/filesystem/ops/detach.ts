@@ -69,6 +69,8 @@ export const detach = op(async (ctx): Promise<void> => {
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
+           -- content is unchanged; a frozen version keeps its timestamp
+           AND frozen_at IS NULL
          RETURNING 1
        )
        INSERT INTO fs_entries (

@@ -1,3 +1,5 @@
+import { FREEZE_TRIGGER_DDL } from "../../core/setup.js";
+
 export interface MigrationOptions {
   enableRLS?: boolean;
   enableFullTextSearch?: boolean;
@@ -8,6 +10,7 @@ const RLS_TABLES = [
   "fs_version_roots",
   "fs_versions",
   "version_ancestors",
+  "fs_version_merges",
   "fs_entries",
   "fs_blobs",
   "fs_blob_chunks",
@@ -46,6 +49,9 @@ export function generateMigrationSQL(options: MigrationOptions = {}): string {
   if (enableVectorSearch) {
     parts.push("CREATE EXTENSION IF NOT EXISTS vector;");
   }
+
+  // Frozen versions refuse content writes (trigger on fs_versions).
+  parts.push(FREEZE_TRIGGER_DDL.trim());
 
   // createSchema() declares no foreign keys, so the chunk-cleanup cascade
   // (fs_blob_chunks rows die with their blob) rides the custom migration.

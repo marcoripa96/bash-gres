@@ -67,6 +67,12 @@ async function hardDeleteVersionById<TFs>(
      WHERE workspace_id = $1 AND (descendant_id = $2 OR ancestor_id = $2)`,
     [ctx.workspaceId, versionId],
   );
+  // Discarded history: merge records to or from the version go with it.
+  await tx.query(
+    `DELETE FROM fs_version_merges
+     WHERE workspace_id = $1 AND (version_id = $2 OR source_id = $2)`,
+    [ctx.workspaceId, versionId],
+  );
   await tx.query(
     `DELETE FROM fs_versions
      WHERE workspace_id = $1 AND id = $2`,

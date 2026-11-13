@@ -59,7 +59,14 @@ import { op } from "./context.js";
  *
  * Source and base are read-only. Only the current destination version
  * receives `fs_entries` writes; `parent_version_id` and `version_ancestors`
- * are never modified.
+ * are never modified. A frozen destination is refused with `EPERM`.
+ *
+ * Merge parents: a full merge (no `paths`/`pathScope`, not a dry run, not
+ * refused) of a frozen source records `(destination, source)` in
+ * `fs_version_merges`, so later merge bases account for it. An unfrozen
+ * source is not recorded: it could change after the merge. Nor is a
+ * fast-forward (destination an ancestor of source), which would make a
+ * cycle.
  *
  * Implicit parent directories: when an applied non-null file or symlink
  * lands under a path whose ancestors are not visible in the destination,
@@ -98,6 +105,16 @@ export const merge = op(async (
       const ourId = await ctx.getCurrentVersionId(tx);
       const theirId = await ctx.requireVersionIdByLabel(tx, source);
       const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);
+      const frozen = await tx.query<{ id: number | string }>(
+        `SELECT id FROM fs_versions
+         WHERE workspace_id = $1 AND id = ANY($2::bigint[])
+           AND frozen_at IS NOT NULL`,
+        [ctx.workspaceId, [ourId, theirId]],
+      );
+      const frozenIds = new Set(frozen.rows.map((r) => Number(r.id)));
+      if (frozenIds.has(ourId)) {
+        throw new FsError("EPERM", "merge: destination version is frozen", "/");
+      }
 
       // LCA & ancestor fast-path. If source is itself an ancestor of current,
       // current already includes it via the live overlay, so there is nothing
@@ -356,6 +373,21 @@ export const merge = op(async (
 
       applied.sort();
       skipped.sort();
+
+      if (
+        !dryRun &&
+        frozenIds.has(theirId) &&
+        lcaId !== ourId &&
+        pathFilters.length === 0 &&
+        scopeUser === "/"
+      ) {
+        await tx.query(
+          `INSERT INTO fs_version_merges (workspace_id, version_id, source_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [ctx.workspaceId, ourId, theirId],
+        );
+      }
 
       if (dryRun || writes.length === 0) {
         return { applied, conflicts, skipped, resolved };

@@ -43,6 +43,8 @@ export {
   type MergeResolver,
   type RenameVersionResult,
   type PromoteResult,
+  type PromoteOptions,
+  type CompactHistoryResult,
   type WorkspaceUsage,
   type WorkspaceUsageOptions,
   type BlobChunk,

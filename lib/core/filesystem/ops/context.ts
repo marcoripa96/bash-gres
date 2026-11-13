@@ -11,6 +11,7 @@ export interface FilesystemOpsHost<TFs> {
 
 export interface FilesystemTransactionOps {
   detach(): Promise<void>;
+  freeze(): Promise<void>;
   renameVersion(
     newLabel: string,
     opts?: { swap?: boolean },

@@ -231,7 +231,7 @@ export class FsStateBase {
       return await this.runInWorkspace(this.client, fn);
     } catch (e) {
       if (e instanceof SqlError && e.code === "25006") {
-        throw new FsError("EPERM", "read-only file system", "/");
+        throw readOnlyError(e);
       }
       throw e;
     }
@@ -256,7 +256,7 @@ export class FsStateBase {
       return await fn(this.getReadOnlyClient());
     } catch (e) {
       if (e instanceof SqlError && e.code === "25006") {
-        throw new FsError("EPERM", "read-only file system", "/");
+        throw readOnlyError(e);
       }
       throw e;
     }
@@ -331,7 +331,7 @@ export class FsStateBase {
       return value;
     } catch (e) {
       if (e instanceof SqlError && e.code === "25006") {
-        throw new FsError("EPERM", "read-only file system", "/");
+        throw readOnlyError(e);
       }
       throw e;
     }
@@ -468,4 +468,14 @@ export class FsStateBase {
       );
     }
   }
+}
+
+/**
+ * EPERM for a refused write: a read-only transaction, or a frozen version
+ * (the `fs_versions_frozen_guard` trigger raises the same SQLSTATE).
+ */
+function readOnlyError(e: SqlError): FsError {
+  return /version \d+ is frozen/.test(e.message)
+    ? new FsError("EPERM", "version is frozen", "/")
+    : new FsError("EPERM", "read-only file system", "/");
 }

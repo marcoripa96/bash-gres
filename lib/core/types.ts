@@ -251,7 +251,20 @@ export interface VersionHistoryEntry {
   createdAt: Date;
   /** Set when the branch/ref label was deleted but history was retained. */
   deletedAt: Date | null;
+  /** When the version was frozen (`freeze()`), or `null`. */
+  frozenAt: Date | null;
+  /** Versions recorded as merged into this one by a full `merge()` of a frozen source. */
+  mergedFrom: number[];
   changes: VersionDiffEntry[];
+}
+
+export interface CompactHistoryResult {
+  /** Frozen or deleted-but-retained versions materialized. */
+  materializedVersions: number;
+  /** Inherited entries copied into those versions. */
+  copiedEntries: number;
+  /** `version_ancestors` rows trimmed. */
+  removedAncestorRows: number;
 }
 
 export interface SweepHistoryResult {
@@ -347,6 +360,20 @@ export interface MergeOptions {
 export interface RenameVersionResult {
   label: string;
   displacedLabel?: string;
+}
+
+export interface PromoteOptions {
+  /** Delete the version the label is taken from (retained or discarded per `historyRetention`). */
+  dropPrevious?: boolean;
+  /** Freeze the promoted version in the same transaction. See `freeze()`. */
+  freeze?: boolean;
+  /**
+   * Materialize the promoted version (see `materialize()`) instead of
+   * leaving it reading through its ancestors. Requires
+   * `historyRetention: "retain"`; under `"discard"` promotion already
+   * detaches the version.
+   */
+  materialize?: boolean;
 }
 
 export interface PromoteResult {

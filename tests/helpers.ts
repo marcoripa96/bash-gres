@@ -55,7 +55,7 @@ export function createTestClient(): { sql: postgres.Sql; client: SqlClient } {
 }
 
 export async function resetDb(client: SqlClient): Promise<void> {
-  await client.query("TRUNCATE fs_entries, version_ancestors, fs_versions, fs_version_roots, fs_blobs CASCADE");
+  await client.query("TRUNCATE fs_entries, version_ancestors, fs_version_merges, fs_versions, fs_version_roots, fs_blobs CASCADE");
 }
 
 export async function resetWorkspace(
@@ -68,6 +68,10 @@ export async function resetWorkspace(
   );
   await client.query(
     "DELETE FROM version_ancestors WHERE workspace_id = $1",
+    [workspaceId],
+  );
+  await client.query(
+    "DELETE FROM fs_version_merges WHERE workspace_id = $1",
     [workspaceId],
   );
   await client.query(
