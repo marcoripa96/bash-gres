@@ -125,8 +125,8 @@ export class PgFileSystem extends FsWriteOpsBase {
         self.writeEntryShape(tx, versionId, posixPath, shape),
       writeEntryShapes: (tx, versionId, writes) =>
         self.writeEntryShapes(tx, versionId, writes),
-      storeBlob: (tx, internalPath, content) =>
-        self.storeBlob(tx, internalPath, content),
+      storeBlob: (tx, internalPath, blob) =>
+        self.storeBlob(tx, internalPath, blob),
       createVersionedFilesystem: (internalPath, version, versionRootId, versionId) => {
         const Ctor = self.constructor as new (
           opts: PgFileSystemOptions,

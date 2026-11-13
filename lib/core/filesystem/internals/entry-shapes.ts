@@ -134,21 +134,27 @@ export function needsBlobContent(mode: DiffContentMode): boolean {
   return mode.content || mode.unified !== null;
 }
 
+/** An `fs_blobs` row's two content columns. */
+export interface BlobColumns {
+  content: string | null;
+  binary: Uint8Array | null;
+}
+
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
-/** A file side's text for a patch: `null` for non-files, `undefined` for non-UTF-8 blobs. */
-function patchText(
-  side: EntryShape | null,
-  content: string | null,
-  binary: Uint8Array | null,
-): string | null | undefined {
-  if (side === null || side.type !== "file") return null;
-  if (content !== null) return content;
-  if (binary === null) return "";
+/**
+ * A blob's text, strictly: the `content` column, else `binary_data` when it
+ * is valid UTF-8, else `null` (binary). Both columns null (a file with no
+ * blob) is `""`. Unlike `decodeBlobContent`, never decodes lossily, so the
+ * text is safe to merge or diff.
+ */
+export function blobText(blob: BlobColumns): string | null {
+  if (blob.content !== null) return blob.content;
+  if (blob.binary === null) return "";
   try {
-    return strictUtf8.decode(binary);
+    return strictUtf8.decode(blob.binary);
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -159,8 +165,8 @@ function patchText(
 export function fillDiffContent(
   entry: VersionDiffEntry,
   mode: DiffContentMode,
-  beforeBlob: { content: string | null; binary: Uint8Array | null },
-  afterBlob: { content: string | null; binary: Uint8Array | null },
+  beforeBlob: BlobColumns,
+  afterBlob: BlobColumns,
 ): void {
   const { before, after } = entry;
   if (mode.content) {
@@ -173,9 +179,12 @@ export function fillDiffContent(
     entry.unifiedDiff = null;
     return;
   }
-  const a = patchText(before, beforeBlob.content, beforeBlob.binary);
-  const b = patchText(after, afterBlob.content, afterBlob.binary);
-  if (a === undefined || b === undefined || a === b) {
+  // Both sides are files or absent here; absent diffs against /dev/null.
+  const a = before === null ? null : blobText(beforeBlob);
+  const b = after === null ? null : blobText(afterBlob);
+  const binary = (side: EntryShape | null, text: string | null) =>
+    side !== null && text === null;
+  if (binary(before, a) || binary(after, b) || a === b) {
     entry.unifiedDiff = null;
     return;
   }

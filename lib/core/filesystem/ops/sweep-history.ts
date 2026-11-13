@@ -1,5 +1,6 @@
-import type { SqlClient, SweepHistoryResult } from "../../types.js";
-import { op, type FilesystemOpsContext } from "./context.js";
+import type { SweepHistoryResult } from "../../types.js";
+import { op } from "./context.js";
+import { copyInheritedEntries } from "./inherited-entries.js";
 
 interface VersionIdRow {
   id: number | string;
@@ -45,7 +46,7 @@ export const sweepHistory = op(async (
     await ctx.lockVersions(tx, allIds);
 
     if (activeIds.length > 0) {
-      await materializeVersionsBatch(ctx, tx, activeIds);
+      await copyInheritedEntries(ctx, tx, activeIds, { bumpLastWrite: true });
     }
 
     if (activeIds.length > 0) {
@@ -143,56 +144,3 @@ export const sweepHistory = op(async (
     };
   });
 });
-
-/**
- * Materialize all `activeIds` in a single SQL statement: for each
- * (descendant_id, path) pair across the active set, pick the deepest
- * ancestor's row (`ROW_NUMBER() ... ORDER BY depth ASC`), skip the cases
- * where the deepest source is the descendant itself (already physically
- * present) or a tombstone, and insert the rest under the descendant's
- * version_id. Replaces N round-trips × N full-tree scans.
- */
-async function materializeVersionsBatch<TFs>(
-  ctx: FilesystemOpsContext<TFs>,
-  tx: SqlClient,
-  activeIds: number[],
-): Promise<void> {
-  await tx.query(
-    `WITH version_bump AS (
-       UPDATE fs_versions SET last_write_at = now()
-       WHERE workspace_id = $1 AND id = ANY($2::bigint[])
-         -- content is unchanged; frozen versions keep their timestamp
-         AND frozen_at IS NULL
-       RETURNING 1
-     )
-     INSERT INTO fs_entries (
-       workspace_id, version_id, path, blob_hash, node_type,
-       symlink_target, mode, size_bytes, mtime, created_at
-     )
-     SELECT
-       $1, src.descendant_id,
-       src.path, src.blob_hash, src.node_type,
-       src.symlink_target, src.mode, src.size_bytes, src.mtime, now()
-     FROM (
-       SELECT
-         a.descendant_id,
-         e.path, e.blob_hash, e.node_type, e.symlink_target,
-         e.mode, e.size_bytes, e.mtime, e.version_id AS source_version_id,
-         ROW_NUMBER() OVER (
-           PARTITION BY a.descendant_id, e.path
-           ORDER BY a.depth ASC
-         ) AS rn
-       FROM version_ancestors a
-       JOIN fs_entries e
-         ON e.workspace_id = a.workspace_id
-        AND e.version_id = a.ancestor_id
-       WHERE a.workspace_id = $1
-         AND a.descendant_id = ANY($2::bigint[])
-     ) src
-     WHERE src.rn = 1
-       AND src.source_version_id <> src.descendant_id
-       AND src.node_type <> 'tombstone'
-     ON CONFLICT (workspace_id, version_id, path) DO NOTHING`,
-    [ctx.workspaceId, activeIds],
-  );
-}

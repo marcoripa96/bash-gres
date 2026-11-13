@@ -10,7 +10,7 @@ import { validateEmbedding } from "../../search.js";
 import { chunkMarkdown, type MarkdownChunk } from "../../chunking.js";
 import { TOMBSTONE } from "../internals/constants.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
-import { sha256 } from "../internals/hashes.js";
+import { prepareBlob, sha256, type PreparedBlob } from "../internals/hashes.js";
 import { FsVisibilityBase } from "./visibility.js";
 
 export class FsWriteOpsBase extends FsVisibilityBase {
@@ -452,12 +452,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     this.validateFileSize(content);
     this.validatePathDepth(path);
 
-    const isText = typeof content === "string";
-    const bytes = isText
-      ? new TextEncoder().encode(content)
-      : (content as Uint8Array);
-    const sizeBytes = bytes.byteLength;
-    const hash = sha256(bytes);
+    const {
+      hash,
+      sizeBytes,
+      text: textContent,
+      binary: binaryData,
+    } = prepareBlob(content);
 
     // Workspace-byte quota check (no-op when maxWorkspaceBytes is unset).
     // Runs before the fused query so a quota refusal never persists either
@@ -465,8 +465,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     await this.validateWorkspaceBytes(tx, hash, sizeBytes, path);
 
     const parentPosix = parentPath(path);
-    const textContent = isText ? content : null;
-    const binaryData = isText ? null : (content as Uint8Array);
 
     // First attempt: skip mkdir entirely. The fused query validates the
     // parent itself and reports 'enoent' if missing — at which point we
@@ -521,29 +519,25 @@ export class FsWriteOpsBase extends FsVisibilityBase {
   }
 
   /**
-   * Store `content` as a blob (size limit, workspace byte quota, chunk index)
+   * Store a prepared blob (size limit, workspace byte quota, chunk index)
    * without writing any entry, for batch writers such as `merge()` that
    * place the entry themselves through `writeEntryShapes`.
    */
   protected async storeBlob(
     tx: SqlClient,
     path: string,
-    content: string | Uint8Array,
-  ): Promise<{ hash: Uint8Array; sizeBytes: number }> {
+    blob: PreparedBlob,
+  ): Promise<void> {
+    const content = blob.text ?? blob.binary!;
     this.validateFileSize(content);
-    const isText = typeof content === "string";
-    const bytes = isText ? new TextEncoder().encode(content) : content;
-    const sizeBytes = bytes.byteLength;
-    const hash = sha256(bytes);
-    await this.validateWorkspaceBytes(tx, hash, sizeBytes, path);
+    await this.validateWorkspaceBytes(tx, blob.hash, blob.sizeBytes, path);
     await tx.query(
       `INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (workspace_id, hash) DO NOTHING`,
-      [this.workspaceId, hash, isText ? content : null, isText ? null : content, sizeBytes],
+      [this.workspaceId, blob.hash, blob.text, blob.binary, blob.sizeBytes],
     );
-    await this.maybeChunk(tx, hash, content);
-    return { hash, sizeBytes };
+    await this.maybeChunk(tx, blob.hash, content);
   }
 
   /**

@@ -290,6 +290,32 @@ describe.each(TEST_ADAPTERS)("freeze, materialize, history [%s]", (_name, factor
       expect(g.mergedFrom).toHaveLength(1);
     });
 
+    it("answers a dry run into a frozen version, refuses the real merge", async () => {
+      const main = open();
+      await main.init();
+      const y = await main.fork("y");
+      await y.writeFile("/b", "b");
+      const x = await main.fork("x");
+      await x.freeze();
+      const dry = await x.merge("y", { dryRun: true });
+      expect(dry.applied).toEqual(["/b"]);
+      await expect(x.merge("y")).rejects.toMatchObject({ code: "EPERM" });
+    });
+
+    it("records a merge settled by strategy, as git records a merge commit", async () => {
+      const main = open();
+      await main.init();
+      await main.writeFile("/f", "base");
+      const x = await main.fork("x");
+      const y = await main.fork("y");
+      await x.writeFile("/f", "x");
+      await y.writeFile("/f", "y");
+      await y.freeze();
+      const r = await x.merge("y", { strategy: "ours" });
+      expect(r.conflicts.map((c) => c.path)).toEqual(["/f"]);
+      expect((await x.listHistory({ limit: 1 })).entries[0]!.mergedFrom).toHaveLength(1);
+    });
+
     it("does not record unfrozen sources, partial merges or dry runs", async () => {
       const main = open();
       await main.init();
@@ -313,6 +339,21 @@ describe.each(TEST_ADAPTERS)("freeze, materialize, history [%s]", (_name, factor
   });
 
   describe("compactHistory", () => {
+    it("leaves a frozen version under a live, unfrozen parent reading through it", async () => {
+      const main = open();
+      await main.init();
+      await main.writeFile("/a", "a1");
+      const s1 = await main.fork("s");
+      await s1.freeze();
+      const u = await s1.fork("u");
+      const result = await open().compactHistory();
+      expect(result.materializedVersions).toBe(0);
+      // The live overlay is intact: main's later write shows through.
+      await main.writeFile("/b", "b1");
+      expect(await s1.readFile("/b")).toBe("b1");
+      expect(await u.readFile("/b")).toBe("b1");
+    });
+
     it("trims an old-style chain without changing any version", async () => {
       const main = open();
       await main.init();

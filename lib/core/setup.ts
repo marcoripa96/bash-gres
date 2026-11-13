@@ -1,4 +1,5 @@
 import type { SqlClient, SetupOptions } from "./types.js";
+import { FROZEN_VERSION_DETAIL } from "./filesystem/internals/constants.js";
 
 const TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS fs_version_roots (
@@ -168,7 +169,8 @@ export const FREEZE_TRIGGER_DDL = `
 CREATE OR REPLACE FUNCTION fs_versions_refuse_frozen_write() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'version % is frozen', OLD.id USING ERRCODE = '25006';
+  RAISE EXCEPTION 'version % is frozen', OLD.id
+    USING ERRCODE = '25006', DETAIL = '${FROZEN_VERSION_DETAIL}';
 END $$;
 
 DO $$ BEGIN

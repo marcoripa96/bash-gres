@@ -1,5 +1,6 @@
 import type { RenameVersionResult, SqlClient, SqlParam } from "../../types.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
+import type { PreparedBlob } from "../internals/hashes.js";
 
 export const filesystemOpsContext: unique symbol = Symbol(
   "filesystemOpsContext",
@@ -70,8 +71,8 @@ export interface FilesystemOpsContext<TFs> {
   storeBlob(
     tx: SqlClient,
     internalPath: string,
-    content: string | Uint8Array,
-  ): Promise<{ hash: Uint8Array; sizeBytes: number }>;
+    blob: PreparedBlob,
+  ): Promise<void>;
 
   createVersionedFilesystem(
     internalPath: string,

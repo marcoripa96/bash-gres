@@ -26,6 +26,7 @@ import {
   DEFAULT_MAX_SYMLINK_DEPTH,
   DEFAULT_STATEMENT_TIMEOUT_MS,
   DEFAULT_VERSION,
+  FROZEN_VERSION_DETAIL,
 } from "../internals/constants.js";
 
 export class FsStateBase {
@@ -472,10 +473,11 @@ export class FsStateBase {
 
 /**
  * EPERM for a refused write: a read-only transaction, or a frozen version
- * (the `fs_versions_frozen_guard` trigger raises the same SQLSTATE).
+ * (the `fs_versions_frozen_guard` trigger raises the same SQLSTATE and
+ * marks its DETAIL).
  */
 function readOnlyError(e: SqlError): FsError {
-  return /version \d+ is frozen/.test(e.message)
+  return e.detail === FROZEN_VERSION_DETAIL
     ? new FsError("EPERM", "version is frozen", "/")
     : new FsError("EPERM", "read-only file system", "/");
 }

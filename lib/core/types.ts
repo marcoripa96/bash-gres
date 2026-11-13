@@ -259,7 +259,7 @@ export interface VersionHistoryEntry {
 }
 
 export interface CompactHistoryResult {
-  /** Frozen or deleted-but-retained versions materialized. */
+  /** Settled versions materialized (they and every ancestor they read through are frozen or deleted-but-retained). */
   materializedVersions: number;
   /** Inherited entries copied into those versions. */
   copiedEntries: number;

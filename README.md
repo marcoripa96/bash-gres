@@ -259,9 +259,12 @@ await chat.transaction(async (tx) => {
 - A full `merge()` of a frozen source records it as a merge parent
   (`mergedFrom` in `listHistory()`); merge bases follow parent links and
   merge parents, so a fork that already merged main is not re-conflicted
-  against an older ancestor.
+  against an older ancestor. As with a git merge commit, conflicts settled
+  by `strategy: "ours" | "theirs"` count as merged.
 - `compactHistory()` applies the same trimming to roots built before 3.2,
-  removing nothing.
+  removing nothing. It materializes a version only when it and every
+  ancestor it reads through are frozen or deleted, so a live, unfrozen
+  version's writes keep showing through in its forks.
 
 ### Merge resolvers and text diffs
 
