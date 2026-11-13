@@ -65,6 +65,12 @@ import { op } from "./context.js";
  * are never modified. A frozen destination is refused with `EPERM` (a dry
  * run is still answered: it writes nothing).
  *
+ * Concurrency: a merge (not a dry run) locks the destination's version row
+ * before reading it, so a concurrent write to the destination waits for the
+ * merge to commit. A write that touches a path the merge also writes can
+ * instead deadlock with it, and Postgres aborts one of the two; neither is
+ * lost silently.
+ *
  * Merge parents: a full merge (no `paths`/`pathScope`, not a dry run, not
  * refused) of a frozen source records `(destination, source)` in
  * `fs_version_merges`, so later merge bases account for it. As with a git
@@ -110,6 +116,19 @@ export const merge = op(async (
       const ourId = await ctx.getCurrentVersionId(tx);
       const theirId = await ctx.requireVersionIdByLabel(tx, source);
       const scopeLtree = pathToLtree(internalScope, ctx.workspaceId);
+      if (!dryRun) {
+        // Lock the destination before reading it. Every write bumps this
+        // row, so a concurrent write either commits before the reads below
+        // or waits for the merge to commit, instead of being overwritten by
+        // a merge computed from a stale view (the resolver may be slow).
+        await tx.query(
+          `SELECT id FROM fs_versions
+           WHERE workspace_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.workspaceId, ourId],
+        );
+        await ctx.lockVersions(tx, [ourId]);
+      }
       const frozen = await tx.query<{ id: number | string }>(
         `SELECT id FROM fs_versions
          WHERE workspace_id = $1 AND id = ANY($2::bigint[])
@@ -367,7 +386,6 @@ export const merge = op(async (
         return { applied, conflicts, skipped, resolved };
       }
 
-      await ctx.lockVersions(tx, [ourId]);
       for (const b of pendingBlobs) {
         await ctx.storeBlob(tx, b.internalPath, b.blob);
       }
@@ -416,8 +434,18 @@ async function askResolver(
     ours: side(sides.ours),
     theirs: side(sides.theirs),
   });
-  if (!resolution) return null;
-  if (!("content" in resolution)) return { shape: null, blob: null };
+  if (resolution === null || resolution === undefined) return null;
+  if ("remove" in resolution && resolution.remove === true) {
+    return { shape: null, blob: null };
+  }
+  if (
+    !("content" in resolution) ||
+    !(typeof resolution.content === "string" || resolution.content instanceof Uint8Array)
+  ) {
+    throw new Error(
+      `merge: resolver for '${path}' must return { content: string | Uint8Array }, { remove: true }, or undefined`,
+    );
+  }
   const blob = prepareBlob(resolution.content);
   const { base, ours, theirs } = sides;
   return {

@@ -165,13 +165,25 @@ ALTER TABLE fs_versions ADD COLUMN IF NOT EXISTS frozen_at timestamptz;
  * (read_only_sql_transaction) surfaces as FsError EPERM. Unfrozen rows pay
  * only the WHEN test.
  */
-export const FREEZE_TRIGGER_DDL = `
-CREATE OR REPLACE FUNCTION fs_versions_refuse_frozen_write() RETURNS trigger
-LANGUAGE plpgsql AS $$
+const FROZEN_GUARD_BODY = `
 BEGIN
   RAISE EXCEPTION 'version % is frozen', OLD.id
     USING ERRCODE = '25006', DETAIL = '${FROZEN_VERSION_DETAIL}';
-END $$;
+END
+`;
+
+export const FREEZE_TRIGGER_DDL = `
+-- Replace the function only when it is missing or differs, so concurrent
+-- setup() runs don't race on CREATE OR REPLACE ("tuple concurrently updated").
+DO $do$ BEGIN
+  IF (
+    SELECT prosrc FROM pg_proc
+    WHERE oid = to_regprocedure('fs_versions_refuse_frozen_write()')
+  ) IS DISTINCT FROM $src$${FROZEN_GUARD_BODY}$src$ THEN
+    CREATE OR REPLACE FUNCTION fs_versions_refuse_frozen_write() RETURNS trigger
+    LANGUAGE plpgsql AS $fn$${FROZEN_GUARD_BODY}$fn$;
+  END IF;
+END $do$;
 
 DO $$ BEGIN
   IF NOT EXISTS (

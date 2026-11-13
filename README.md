@@ -274,6 +274,13 @@ callback gets each conflicting file's text at the base and on both sides
 not offered) and returns `{ content }`, `{ remove: true }`, or `undefined` to
 leave the conflict to `strategy`. It runs in path order inside the merge
 transaction, also under `dryRun`; settled paths are listed in `resolved`.
+The merge locks the destination first, so a concurrent write to it waits
+for the merge to commit (or, on a path the merge also writes, one of the two
+fails with a deadlock error); nothing is overwritten silently.
+
+Line diffs are exact for ordinary edits (up to about 2,000 changed lines per
+file); past that budget the remaining differing range is treated as wholly
+replaced, so time and memory stay bounded on very different large files.
 
 ```ts
 import { mergeText, textMergeResolver, createUnifiedDiff } from "bash-gres"

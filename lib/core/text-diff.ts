@@ -24,12 +24,24 @@ export function splitLines(text: string): string[] {
 }
 
 /**
- * Pairs `[i, j]` of equal lines `a[i] === b[j]` forming a longest common
- * subsequence (Myers' O((N+M)·D) algorithm after trimming the common prefix
- * and suffix), in increasing order of both indices.
+ * Work budget for one `matchLines` call, in diagonal steps of the Myers
+ * search (roughly 30 ms of CPU per million). Edits of up to about 2,000
+ * changed lines stay exact. Past it the remaining unmatched
+ * ranges count as wholly replaced: a diff shows them removed and added, a
+ * merge treats them as changed (more conflicts, never a wrong merge). Keeps
+ * a pathological pair (two large, entirely different files) bounded in time;
+ * memory is linear in the line count regardless.
+ */
+const MATCH_BUDGET = 5_000_000;
+
+/**
+ * Pairs `[i, j]` of equal lines `a[i] === b[j]` forming a common
+ * subsequence, in increasing order of both indices: a longest one (Myers'
+ * O((N+M)·D) algorithm, linear-space bisection form, after trimming the
+ * common prefix and suffix) unless the work budget runs out first.
  */
 export function matchLines(a: string[], b: string[]): Array<[number, number]> {
-  // Intern lines so the inner loop compares integers.
+  // Intern lines so the inner loops compare integers.
   const ids = new Map<string, number>();
   const intern = (line: string): number => {
     let id = ids.get(line);
@@ -39,88 +51,137 @@ export function matchLines(a: string[], b: string[]): Array<[number, number]> {
     }
     return id;
   };
-  const ai = a.map(intern);
-  const bi = b.map(intern);
-
   const pairs: Array<[number, number]> = [];
-  let prefix = 0;
-  while (prefix < ai.length && prefix < bi.length && ai[prefix] === bi[prefix]) {
-    pairs.push([prefix, prefix]);
-    prefix++;
-  }
-  let suffix = 0;
-  while (
-    suffix < ai.length - prefix &&
-    suffix < bi.length - prefix &&
-    ai[ai.length - 1 - suffix] === bi[bi.length - 1 - suffix]
-  ) {
-    suffix++;
-  }
-
-  const midA = ai.slice(prefix, ai.length - suffix);
-  const midB = bi.slice(prefix, bi.length - suffix);
-  for (const [i, j] of myers(midA, midB)) pairs.push([i + prefix, j + prefix]);
-  for (let s = suffix; s > 0; s--) pairs.push([ai.length - s, bi.length - s]);
+  matchRange(
+    { a: a.map(intern), b: b.map(intern), budget: MATCH_BUDGET },
+    0,
+    a.length,
+    0,
+    b.length,
+    pairs,
+  );
   return pairs;
 }
 
-function myers(a: number[], b: number[]): Array<[number, number]> {
-  const n = a.length;
-  const m = b.length;
-  if (n === 0 || m === 0) return [];
-  const max = n + m;
-  const off = max + 1;
-  const v = new Int32Array(2 * max + 3);
-  // trace[d] holds v[-d..d] after step d (index k + d).
-  const trace: Int32Array[] = [];
-  let done = false;
-  for (let d = 0; d <= max && !done; d++) {
-    for (let k = -d; k <= d; k += 2) {
-      let x =
-        k === -d || (k !== d && v[off + k - 1]! < v[off + k + 1]!)
-          ? v[off + k + 1]!
-          : v[off + k - 1]! + 1;
-      let y = x - k;
-      while (x < n && y < m && a[x] === b[y]) {
-        x++;
-        y++;
-      }
-      v[off + k] = x;
-      if (x >= n && y >= m) {
-        done = true;
-        break;
-      }
-    }
-    trace.push(v.slice(off - d, off + d + 1));
-  }
+interface MatchState {
+  a: number[];
+  b: number[];
+  budget: number;
+}
 
-  const out: Array<[number, number]> = [];
-  let x = n;
-  let y = m;
-  for (let d = trace.length - 1; d > 0; d--) {
-    const prev = trace[d - 1]!;
-    const k = x - y;
-    const at = (kk: number): number => prev[kk + d - 1]!;
-    const down = k === -d || (k !== d && at(k - 1) < at(k + 1));
-    const prevK = down ? k + 1 : k - 1;
-    const prevX = at(prevK);
-    const prevY = prevX - prevK;
-    const startX = down ? prevX : prevX + 1;
-    while (x > startX) {
-      x--;
-      y--;
-      out.push([x, y]);
+/** Append the matches of `a[aLo..aHi)` against `b[bLo..bHi)` to `out`, in order. */
+function matchRange(
+  st: MatchState,
+  aLo: number,
+  aHi: number,
+  bLo: number,
+  bHi: number,
+  out: Array<[number, number]>,
+): void {
+  const { a, b } = st;
+  while (aLo < aHi && bLo < bHi && a[aLo] === b[bLo]) out.push([aLo++, bLo++]);
+  let tail = 0;
+  while (aLo < aHi - tail && bLo < bHi - tail && a[aHi - 1 - tail] === b[bHi - 1 - tail]) {
+    tail++;
+  }
+  aHi -= tail;
+  bHi -= tail;
+  if (aLo < aHi && bLo < bHi) {
+    const split = bisect(st, aLo, aHi, bLo, bHi);
+    // No split: nothing in common, or the budget ran out (wholly replaced).
+    if (split !== null) {
+      matchRange(st, aLo, split[0], bLo, split[1], out);
+      matchRange(st, split[0], aHi, split[1], bHi, out);
     }
-    x = prevX;
-    y = prevY;
   }
-  while (x > 0 && y > 0) {
-    x--;
-    y--;
-    out.push([x, y]);
+  for (let t = 0; t < tail; t++) out.push([aHi + t, bHi + t]);
+}
+
+/**
+ * Find a point on an optimal edit path through the range by running the
+ * Myers search from both ends until the paths meet (the "middle snake"), in
+ * O(N+M) memory. Returns absolute `[x, y]` strictly inside the range (both
+ * halves smaller than the whole), or `null` when the sides share nothing or
+ * the budget runs out. The range must not start or end with equal lines.
+ */
+function bisect(
+  st: MatchState,
+  aLo: number,
+  aHi: number,
+  bLo: number,
+  bHi: number,
+): [number, number] | null {
+  const { a, b } = st;
+  const n = aHi - aLo;
+  const m = bHi - bLo;
+  const maxD = Math.ceil((n + m) / 2);
+  const off = maxD;
+  const len = 2 * maxD;
+  // v1: furthest x per diagonal from the start; v2: the same from the end,
+  // in reversed coordinates. -1 = not reached yet.
+  const v1 = new Int32Array(len).fill(-1);
+  const v2 = new Int32Array(len).fill(-1);
+  v1[off + 1] = 0;
+  v2[off + 1] = 0;
+  const delta = n - m;
+  const front = delta % 2 !== 0;
+  // Diagonals that ran off the grid are trimmed from later steps.
+  let k1start = 0;
+  let k1end = 0;
+  let k2start = 0;
+  let k2end = 0;
+  const split = (x: number, y: number): [number, number] | null =>
+    (x === 0 && y === 0) || (x === n && y === m) ? null : [aLo + x, bLo + y];
+
+  for (let d = 0; d < maxD; d++) {
+    st.budget -= 2 * d + 1;
+    if (st.budget < 0) return null;
+    for (let k1 = -d + k1start; k1 <= d - k1end; k1 += 2) {
+      const k1o = off + k1;
+      let x1 =
+        k1 === -d || (k1 !== d && v1[k1o - 1]! < v1[k1o + 1]!)
+          ? v1[k1o + 1]!
+          : v1[k1o - 1]! + 1;
+      let y1 = x1 - k1;
+      while (x1 < n && y1 < m && a[aLo + x1] === b[bLo + y1]) {
+        x1++;
+        y1++;
+      }
+      v1[k1o] = x1;
+      if (x1 > n) k1end += 2;
+      else if (y1 > m) k1start += 2;
+      else if (front) {
+        const k2o = off + delta - k1;
+        if (k2o >= 0 && k2o < len && v2[k2o] !== -1 && x1 >= n - v2[k2o]!) {
+          return split(x1, y1);
+        }
+      }
+    }
+    for (let k2 = -d + k2start; k2 <= d - k2end; k2 += 2) {
+      const k2o = off + k2;
+      let x2 =
+        k2 === -d || (k2 !== d && v2[k2o - 1]! < v2[k2o + 1]!)
+          ? v2[k2o + 1]!
+          : v2[k2o - 1]! + 1;
+      let y2 = x2 - k2;
+      while (x2 < n && y2 < m && a[aHi - 1 - x2] === b[bHi - 1 - y2]) {
+        x2++;
+        y2++;
+      }
+      v2[k2o] = x2;
+      if (x2 > n) k2end += 2;
+      else if (y2 > m) k2start += 2;
+      else if (!front) {
+        const k1o = off + delta - k2;
+        if (k1o >= 0 && k1o < len && v1[k1o] !== -1) {
+          const x1 = v1[k1o]!;
+          const y1 = off + x1 - k1o;
+          if (x1 >= n - x2) return split(x1, y1);
+        }
+      }
+    }
   }
-  out.reverse();
-  return out;
+  return null;
 }
 
 type Op = { kind: " " | "-" | "+"; line: string; oldNo: number; newNo: number };

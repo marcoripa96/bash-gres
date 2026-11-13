@@ -338,6 +338,26 @@ describe.each(TEST_ADAPTERS)("freeze, materialize, history [%s]", (_name, factor
     });
   });
 
+  describe("setup", () => {
+    it("leaves an unchanged trigger function alone and its DDL runs concurrently", async () => {
+      const { setup, FREEZE_TRIGGER_DDL } = await import("../lib/core/setup.js");
+      const xmin = async () =>
+        (
+          await client.query<{ xmin: string }>(
+            `SELECT xmin::text AS xmin FROM pg_proc
+             WHERE oid = to_regprocedure('fs_versions_refuse_frozen_write()')`,
+          )
+        ).rows[0]!.xmin;
+      const before = await xmin();
+      await setup(client, { enableFullTextSearch: false });
+      expect(await xmin()).toBe(before);
+      await Promise.all(
+        Array.from({ length: 6 }, () => client.query(FREEZE_TRIGGER_DDL)),
+      );
+      expect(await xmin()).toBe(before);
+    });
+  });
+
   describe("compactHistory", () => {
     it("leaves a frozen version under a live, unfrozen parent reading through it", async () => {
       const main = open();

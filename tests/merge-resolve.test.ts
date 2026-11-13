@@ -171,6 +171,44 @@ describe.each(TEST_ADAPTERS)("merge resolver, unified diff [%s]", (_name, factor
     expect(plain.conflicts[0]).not.toHaveProperty("baseContent");
   });
 
+  it("rejects a malformed resolution instead of guessing", async () => {
+    for (const bad of [{}, { content: undefined }, { remove: false }]) {
+      const { chat } = await diverged();
+      await expect(
+        chat.merge("main", { resolve: () => bad as never }),
+      ).rejects.toThrow(/must return \{ content: string \| Uint8Array \}/);
+      expect(await chat.readFile("/doc.md")).toBe("# Chat title\n\nbody\n");
+      await resetWorkspace(client, WS);
+    }
+  });
+
+  it("holds concurrent writes to the destination until the merge commits", async () => {
+    const { chat } = await diverged();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let resolverCalled!: () => void;
+    const called = new Promise<void>((r) => (resolverCalled = r));
+    const order: string[] = [];
+    const merging = chat
+      .merge("main", {
+        resolve: async (c) => {
+          resolverCalled();
+          await gate;
+          return textMergeResolver(c) ?? { content: "merged\n" };
+        },
+      })
+      .then(() => order.push("merge"));
+    await called;
+    const writer = new PgFileSystem({ db: client, workspaceId: WS, version: "chat" });
+    const writing = writer.writeFile("/other.txt", "w").then(() => order.push("write"));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(order).toEqual([]);
+    release();
+    await Promise.all([merging, writing]);
+    expect(order).toEqual(["merge", "write"]);
+    expect(await chat.readFile("/other.txt")).toBe("w");
+  });
+
   it("rolls back when the resolver throws", async () => {
     const { chat } = await diverged();
     await expect(
