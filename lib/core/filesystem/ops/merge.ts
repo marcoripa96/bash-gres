@@ -67,9 +67,12 @@ import { op } from "./context.js";
  *
  * Concurrency: a merge (not a dry run) locks the destination's version row
  * before reading it, so a concurrent write to the destination waits for the
- * merge to commit. A write that touches a path the merge also writes can
- * instead deadlock with it, and Postgres aborts one of the two; neither is
- * lost silently.
+ * merge to commit, whichever path it writes: every write takes the version
+ * row before any entry or blob row (`VERSION_LOCKED_CTE`), the same order
+ * as the merge, so the two cannot deadlock. The merge is never computed
+ * from a stale view of the destination. A write that was already running
+ * when the merge committed still applies what it read before waiting, as
+ * between two concurrent writes.
  *
  * Merge parents: a full merge (no `paths`/`pathScope`, not a dry run, not
  * refused) of a frozen source records `(destination, source)` in

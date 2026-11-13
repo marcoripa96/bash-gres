@@ -36,6 +36,7 @@ import {
   type ChunkSearchOpts,
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
+import { VERSION_LOCKED_CTE } from "./filesystem/internals/bump-version.js";
 import { Coalescer } from "./filesystem/internals/coalescer.js";
 import type {
   ChunkRow,
@@ -1566,11 +1567,13 @@ export class PgFileSystem extends FsWriteOpsBase {
            UPDATE fs_versions SET last_write_at = now()
            WHERE workspace_id = $1 AND id = $2
            RETURNING 1
-         )
+         ),
+         ${VERSION_LOCKED_CTE}
          INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
             symlink_target, mode, size_bytes, mtime)
-         VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, $9)
+         SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, $9
+         FROM version_locked
          ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
            blob_hash = EXCLUDED.blob_hash,
            node_type = EXCLUDED.node_type,

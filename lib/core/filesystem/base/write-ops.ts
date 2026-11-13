@@ -9,6 +9,7 @@ import {
 import { validateEmbedding } from "../../search.js";
 import { chunkMarkdown, type MarkdownChunk } from "../../chunking.js";
 import { TOMBSTONE } from "../internals/constants.js";
+import { VERSION_LOCKED_CTE } from "../internals/bump-version.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
 import { prepareBlob, sha256, type PreparedBlob } from "../internals/hashes.js";
 import { FsVisibilityBase } from "./visibility.js";
@@ -134,11 +135,13 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
-       )
+       ),
+       ${VERSION_LOCKED_CTE}
        INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type,
           symlink_target, mode, size_bytes, mtime)
-       VALUES ($1, $2, $3::ltree, $4, $5, $6, $7, $8, now())
+       SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, now()
+       FROM version_locked
        ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
          blob_hash = EXCLUDED.blob_hash,
          node_type = EXCLUDED.node_type,
@@ -170,10 +173,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
-       )
+       ),
+       ${VERSION_LOCKED_CTE}
        INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
-       VALUES ($1, $2, $3::ltree, NULL, $4, 0, 0, now())
+       SELECT $1, $2, $3::ltree, NULL, $4, 0, 0, now()
+       FROM version_locked
        ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
          blob_hash = NULL,
          node_type = $4,
@@ -209,7 +214,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
-       )
+       ),
+       ${VERSION_LOCKED_CTE}
        INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
        SELECT $1, $2, visible.path, NULL, $4, 0, 0, now()
@@ -228,6 +234,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
             AND ${mnt.sql}
           ORDER BY e.path, a.depth ASC
         ) visible
+       CROSS JOIN version_locked
        WHERE visible.node_type != $4
        ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
          blob_hash = NULL,
@@ -267,7 +274,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
-       )
+       ),
+       ${VERSION_LOCKED_CTE}
        INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type,
           symlink_target, mode, size_bytes, mtime)
@@ -302,6 +310,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
             AND ${mnt.sql}
            ORDER BY e.path, a.depth ASC
          ) visible
+        CROSS JOIN version_locked
         WHERE visible.node_type != $5
           ${rootFilter}
         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
@@ -424,12 +433,13 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            UPDATE fs_versions SET last_write_at = now()
            WHERE workspace_id = $1 AND id = $2
            RETURNING 1
-         )
+         ),
+         ${VERSION_LOCKED_CTE}
          INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
             symlink_target, mode, size_bytes, mtime)
          SELECT $1, $2, path, blob_hash, node_type, symlink_target, mode, size_bytes, now()
-         FROM input
+         FROM input CROSS JOIN version_locked
          ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
            blob_hash = EXCLUDED.blob_hash,
            node_type = EXCLUDED.node_type,
@@ -706,10 +716,17 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              END AS status
            FROM _ws
          ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $6
+             AND EXISTS (SELECT 1 FROM validation WHERE status = 'ok')
+           RETURNING 1
+         ),
+         ${VERSION_LOCKED_CTE},
          blob_upsert AS (
            INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
            SELECT $1, $2, $3, $4, $5
-           FROM validation WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
            ON CONFLICT (workspace_id, hash) DO NOTHING
            RETURNING 1
          ),
@@ -718,7 +735,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              (workspace_id, version_id, path, blob_hash, node_type,
               symlink_target, mode, size_bytes, mtime)
            SELECT $1, $6, $8::ltree, $2, 'file', NULL, $9, $5, now()
-           FROM validation WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
            ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
              blob_hash = EXCLUDED.blob_hash,
              node_type = EXCLUDED.node_type,
@@ -727,12 +744,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              size_bytes = EXCLUDED.size_bytes,
              mtime = now()
            RETURNING (xmax = 0) AS inserted
-         ),
-         version_bump AS (
-           UPDATE fs_versions SET last_write_at = now()
-           WHERE workspace_id = $1 AND id = $6
-             AND EXISTS (SELECT 1 FROM validation WHERE status = 'ok')
-           RETURNING 1
          )
          SELECT validation.status,
                 (SELECT inserted FROM entry_upsert) AS inserted
@@ -825,10 +836,17 @@ export class FsWriteOpsBase extends FsVisibilityBase {
                ELSE 'ok'
              END AS status
          ),
+         version_bump AS (
+           UPDATE fs_versions SET last_write_at = now()
+           WHERE workspace_id = $1 AND id = $6
+             AND EXISTS (SELECT 1 FROM validation WHERE status = 'ok')
+           RETURNING 1
+         ),
+         ${VERSION_LOCKED_CTE},
          blob_upsert AS (
            INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
            SELECT $1, $2, $3, $4, $5
-           FROM validation WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
            ON CONFLICT (workspace_id, hash) DO NOTHING
            RETURNING 1
          ),
@@ -837,7 +855,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              (workspace_id, version_id, path, blob_hash, node_type,
               symlink_target, mode, size_bytes, mtime)
            SELECT $1, $6, $8::ltree, $2, 'file', NULL, $9, $5, now()
-           FROM validation WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
            ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
              blob_hash = EXCLUDED.blob_hash,
              node_type = EXCLUDED.node_type,
@@ -846,12 +864,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              size_bytes = EXCLUDED.size_bytes,
              mtime = now()
            RETURNING (xmax = 0) AS inserted
-         ),
-         version_bump AS (
-           UPDATE fs_versions SET last_write_at = now()
-           WHERE workspace_id = $1 AND id = $6
-             AND EXISTS (SELECT 1 FROM validation WHERE status = 'ok')
-           RETURNING 1
          )
          SELECT validation.status,
                 (SELECT inserted FROM entry_upsert) AS inserted
@@ -930,12 +942,20 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          ORDER BY ord
          LIMIT 1
        ),
+       version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+           AND NOT EXISTS (SELECT 1 FROM invalid)
+         RETURNING 1
+       ),
+       ${VERSION_LOCKED_CTE},
        inserted AS (
          INSERT INTO fs_entries
            (workspace_id, version_id, path, blob_hash, node_type,
             symlink_target, mode, size_bytes, mtime)
          SELECT $1, $2, w.path, NULL, 'directory', NULL, $${params.length + 1}, 0, now()
          FROM wanted w
+         CROSS JOIN version_locked
          LEFT JOIN visible v ON v.path = w.path
          WHERE NOT EXISTS (SELECT 1 FROM invalid)
            AND COALESCE(v.node_type, 'missing') != 'directory'
@@ -946,12 +966,6 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            mode = EXCLUDED.mode,
            size_bytes = 0,
            mtime = now()
-         RETURNING 1
-       ),
-       version_bump AS (
-         UPDATE fs_versions SET last_write_at = now()
-         WHERE workspace_id = $1 AND id = $2
-           AND NOT EXISTS (SELECT 1 FROM invalid)
          RETURNING 1
        )
        SELECT
