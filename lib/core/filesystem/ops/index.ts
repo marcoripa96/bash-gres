@@ -25,3 +25,5 @@ export { sweepHistory } from "./sweep-history.js";
 export { versioned } from "./versioned.js";
 export { versionDiff } from "./version-diff.js";
 export { versionDiffStream } from "./version-diff-stream.js";
+export { writeFileWithBase } from "./write-file-with-base.js";
+export { collectOrphanBlobs } from "./collect-orphan-blobs.js";

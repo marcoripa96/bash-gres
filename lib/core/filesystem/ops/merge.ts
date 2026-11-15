@@ -14,11 +14,13 @@ import { pathToLtree, normalizePath, parentPath } from "../../path-encoding.js";
 import {
   blobText,
   entryShapeEqual,
+  toMergeSide,
   toPublicEntryShape,
   type BlobColumns,
   type InternalEntryShape,
 } from "../internals/entry-shapes.js";
 import { op } from "./context.js";
+import { checkResolution } from "./resolution.js";
 
 /**
  * Apply path-level changes from `source` into the current version using a
@@ -427,29 +429,18 @@ async function askResolver(
   sides: ConflictSides,
   textOf: (s: InternalEntryShape | null) => string | null,
 ): Promise<{ shape: InternalEntryShape | null; blob: PreparedBlob | null } | null> {
-  const side = (s: InternalEntryShape | null): MergeSide | null => {
-    const pub = toPublicEntryShape(s);
-    return pub === null ? null : { ...pub, content: textOf(s) };
-  };
+  const side = (s: InternalEntryShape | null): MergeSide | null =>
+    toMergeSide(s, textOf(s));
   const resolution: MergeResolution | null | undefined = await resolve({
     path,
     base: side(sides.base),
     ours: side(sides.ours),
     theirs: side(sides.theirs),
   });
-  if (resolution === null || resolution === undefined) return null;
-  if ("remove" in resolution && resolution.remove === true) {
-    return { shape: null, blob: null };
-  }
-  if (
-    !("content" in resolution) ||
-    !(typeof resolution.content === "string" || resolution.content instanceof Uint8Array)
-  ) {
-    throw new Error(
-      `merge: resolver for '${path}' must return { content: string | Uint8Array }, { remove: true }, or undefined`,
-    );
-  }
-  const blob = prepareBlob(resolution.content);
+  const checked = checkResolution(resolution, "merge", path);
+  if (checked === null) return null;
+  if ("remove" in checked) return { shape: null, blob: null };
+  const blob = prepareBlob(checked.content);
   const { base, ours, theirs } = sides;
   return {
     blob,

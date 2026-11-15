@@ -6,6 +6,13 @@ export const filesystemOpsContext: unique symbol = Symbol(
   "filesystemOpsContext",
 );
 
+/** Where a one-statement write runs: see `fastWriteTarget()`. */
+export interface FastWriteTarget {
+  client: SqlClient;
+  versionId: number;
+  statementTimeoutMs: number;
+}
+
 export interface FilesystemOpsHost<TFs> {
   [filesystemOpsContext](): FilesystemOpsContext<TFs>;
 }
@@ -29,6 +36,17 @@ export interface FilesystemOpsContext<TFs> {
   readonly historyRetention: "retain" | "discard";
 
   guardRead(userPath: string): string;
+  /** writeFile's guards (mounts, rootDir, excludes); returns the internal path. */
+  guardWrite(userPath: string): string;
+  /** writeFile's size and depth limits. */
+  validateWrite(internalPath: string, content: string | Uint8Array): void;
+  /**
+   * The client and version for a one-statement write, or `null` when this
+   * handle must take the transactional path: read-only, version id not yet
+   * known, a workspace byte quota, or chunking. On an fs.transaction()
+   * facade the client is the facade's transaction.
+   */
+  fastWriteTarget(): FastWriteTarget | null;
   toInternalPath(userPath: string): string;
   toUserPath(internalPath: string): string;
   buildExcludeClause(
@@ -41,6 +59,10 @@ export interface FilesystemOpsContext<TFs> {
   ): { sql: string; params: SqlParam[] };
 
   withWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
+  /** A workspace transaction without the shared blob guard (collector only). */
+  withWorkspaceUnguarded<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
+  /** `true` on an fs.transaction() facade. */
+  readonly inTransaction: boolean;
   withReadOnlyWorkspace<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
   transaction<T>(
     fn: (tx: TFs & FilesystemTransactionOps) => Promise<T>,
@@ -72,6 +94,24 @@ export interface FilesystemOpsContext<TFs> {
     tx: SqlClient,
     internalPath: string,
     blob: PreparedBlob,
+  ): Promise<void>;
+  /**
+   * Overwrite or shadow the file at `internalPath` with `blob`, keeping
+   * `mode`, in one statement (plus quota and chunk upkeep when enabled).
+   */
+  overwriteFile(
+    tx: SqlClient,
+    versionId: number,
+    internalPath: string,
+    blob: PreparedBlob,
+    mode: number,
+  ): Promise<void>;
+  /** writeFile's transactional path: parents, node count, quota, chunks. */
+  writeNewFile(
+    tx: SqlClient,
+    versionId: number,
+    internalPath: string,
+    content: string | Uint8Array,
   ): Promise<void>;
 
   createVersionedFilesystem(

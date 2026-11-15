@@ -3,6 +3,8 @@ export { setup } from "./setup.js";
 export {
   FsError,
   FsQuotaError,
+  FsWriteConflictError,
+  FsBaseUnavailableError,
   SqlError,
   type SqlClient,
   type SqlParam,
@@ -41,6 +43,11 @@ export {
   type MergeConflictInput,
   type MergeResolution,
   type MergeResolver,
+  type WriteBase,
+  type WriteFileWithBaseOptions,
+  type WriteFileWithBaseResult,
+  type CollectOrphanBlobsOptions,
+  type CollectOrphanBlobsResult,
   type RenameVersionResult,
   type PromoteResult,
   type PromoteOptions,
@@ -56,6 +63,7 @@ export {
   type TraceOpEvent,
   type TraceOpRef,
 } from "./types.js";
+export { contentHash } from "./filesystem/internals/hashes.js";
 export {
   createUnifiedDiff,
   type UnifiedDiffOptions,

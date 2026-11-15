@@ -1,5 +1,6 @@
 import type {
   EntryShape,
+  MergeSide,
   NodeType,
   VersionDiffEntry,
   VersionDiffOptions,
@@ -135,6 +136,19 @@ export function needsBlobContent(mode: DiffContentMode): boolean {
 }
 
 /** An `fs_blobs` row's two content columns. */
+/**
+ * One side of a conflict as a `MergeResolver` receives it: the public shape
+ * plus its text (`null` for non-files and non-UTF-8 blobs). Shared by
+ * `merge()` and `writeFileWithBase()` so both hand resolvers the same shape.
+ */
+export function toMergeSide(
+  s: InternalEntryShape | null,
+  content: string | null,
+): MergeSide | null {
+  const pub = toPublicEntryShape(s);
+  return pub === null ? null : { ...pub, content };
+}
+
 export interface BlobColumns {
   content: string | null;
   binary: Uint8Array | null;

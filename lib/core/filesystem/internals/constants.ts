@@ -16,3 +16,4 @@ export const DIFF_MAX_BATCH_SIZE = 5000;
  * from a read-only transaction.
  */
 export const FROZEN_VERSION_DETAIL = "bash-gres: frozen version";
+

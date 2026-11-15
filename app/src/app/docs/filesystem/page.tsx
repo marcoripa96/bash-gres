@@ -112,6 +112,78 @@ const buffer = await fs.readFileBuffer("/docs/image.png")`}
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
+          Writing From a Base
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          When two writers edit the same file (a person in an editor and an
+          agent, say), each reads it, changes it and saves. With{" "}
+          <code className="font-mono text-foreground/80">writeFile</code> the second save overwrites the first.{" "}
+          <code className="font-mono text-foreground/80">writeFileWithBase</code> takes the content the writer
+          started from and compares it with what is stored, in one atomic
+          step. If they match, the content is written. If the file changed
+          meanwhile, a <code className="font-mono text-foreground/80">resolve</code> callback gets base, ours (what
+          is stored) and theirs (the incoming content), and its result is
+          stored. With no resolver, or one that returns{" "}
+          <code className="font-mono text-foreground/80">undefined</code>, nothing is written and it throws{" "}
+          <code className="font-mono text-foreground/80">FsWriteConflictError</code>.
+        </p>
+        <CodeBlock
+          code={`import { contentHash, textMergeResolver } from "bash-gres"
+
+const base = await fs.readFile("/report/document.md")
+// ... the user edits ...
+const r = await fs.writeFileWithBase("/report/document.md", edited, {
+  base: { content: base },    // or { hash: contentHash(base) }, or null: "did not exist"
+  resolve: textMergeResolver, // optional; the same type as merge()'s resolver
+})
+r.outcome // "written" | "unchanged" | "merged" | "removed"
+r.hash    // hex sha256 of what is stored now (null after a removal)
+r.content // the stored content, only when "merged"`}
+        />
+        <ul className="list-disc pl-5 space-y-1 text-sm text-muted-foreground leading-relaxed">
+          <li>
+            The base can be its hash (<code className="font-mono text-foreground/80">EntryShape.blobHash</code>, or{" "}
+            <code className="font-mono text-foreground/80">contentHash(text)</code> without a read), its text, or{" "}
+            <code className="font-mono text-foreground/80">null</code>. A hash is looked up in the stored blobs when
+            the resolver needs the base text; if that blob is gone it throws{" "}
+            <code className="font-mono text-foreground/80">FsBaseUnavailableError</code>, and you retry with the
+            text.
+          </li>
+          <li>
+            Stored content equal to the incoming content is{" "}
+            <code className="font-mono text-foreground/80">&quot;unchanged&quot;</code>, without calling the resolver.
+            A directory or symlink at the path is a conflict (
+            <code className="font-mono text-foreground/80">reason: &quot;not-a-file&quot;</code>), never an
+            overwrite. A frozen version is <code className="font-mono text-foreground/80">EPERM</code> &quot;version
+            is frozen&quot;.
+          </li>
+          <li>
+            The resolver runs inside the write&apos;s transaction with the
+            version row locked: keep it quick, and do not write through another
+            handle from it (that write would wait on this one). Its sides are
+            the <code className="font-mono text-foreground/80">MergeSide</code> objects <code className="font-mono text-foreground/80">merge()</code>{" "}
+            passes, with <code className="font-mono text-foreground/80">content: null</code> for non-UTF-8 files.
+            Return <code className="font-mono text-foreground/80">{"{ content }"}</code>,{" "}
+            <code className="font-mono text-foreground/80">{"{ remove: true }"}</code> or <code className="font-mono text-foreground/80">undefined</code>.
+          </li>
+          <li>
+            Parents, size limit, node count and workspace quota behave as{" "}
+            <code className="font-mono text-foreground/80">writeFile</code>&apos;s do for the same path and content;
+            an overwrite keeps the file&apos;s mode.
+          </li>
+          <li>
+            A matching base on a file the version owns costs one statement, as{" "}
+            <code className="font-mono text-foreground/80">writeFile</code>&apos;s fast path does. Otherwise it locks
+            the version (and any unfrozen ancestor it reads through), reads,
+            resolves and writes. It works inside{" "}
+            <code className="font-mono text-foreground/80">fs.transaction()</code>, on handles built from a Drizzle
+            transaction, and on <code className="font-mono text-foreground/80">versioned(path)</code> handles.
+          </li>
+        </ul>
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
           Directories
         </h2>
         <CodeBlock
@@ -274,6 +346,81 @@ try {
   }
 }`}
         />
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          Collecting Unreferenced Blobs
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Overwriting a file or deleting a folder leaves its old content in{" "}
+          <code className="font-mono text-foreground/80">fs_blobs</code> with no entry pointing at it.{" "}
+          <code className="font-mono text-foreground/80">collectOrphanBlobs()</code> deletes, within the
+          handle&apos;s workspace, the blobs no entry of any version
+          references whose <code className="font-mono text-foreground/80">created_at</code> is older than{" "}
+          <code className="font-mono text-foreground/80">minAgeMs</code>, with their chunk rows. The{" "}
+          <code className="font-mono text-foreground/80">fs_chunk_embeddings</code> cache is left alone. Nothing runs
+          it unless you call it.
+        </p>
+        <CodeBlock
+          code={`const r = await fs.collectOrphanBlobs({
+  minAgeMs: 60 * 60 * 1000, // only blobs first stored more than an hour ago
+  batchSize: 1000,          // default 1000, max 10000
+  lockTimeoutMs: 5000,      // default 5000
+})
+r.blobs    // deleted blobs
+r.bytes    // their size_bytes
+r.batches  // locked batches that ran
+r.complete // false: open write transactions kept the lock; run it again later
+r.pending  // unreferenced, old-enough blobs left when complete is false`}
+        />
+        <ul className="list-disc pl-5 space-y-1 text-sm text-muted-foreground leading-relaxed">
+          <li>
+            <code className="font-mono text-foreground/80">created_at</code> is when that exact content was first
+            stored in the workspace; writing the same content again does not
+            refresh it. So <code className="font-mono text-foreground/80">minAgeMs</code> protects recently created
+            content, not content that stopped being referenced recently: a
+            blob first stored long ago can go as soon as nothing references
+            it. A <code className="font-mono text-foreground/80">writeFileWithBase</code> base named by hash can then
+            be gone; retry with its text.
+          </li>
+          <li>
+            Safe beside concurrent writes. Every write transaction holds a
+            per-workspace advisory lock, shared, from its first statement to
+            commit. Each batch takes it exclusive with a try-lock, which
+            succeeds only while no write transaction in the workspace is open,
+            then deletes in a new statement that sees every committed write.
+            Writers never queue behind a collector that is waiting; one that
+            arrives during a batch&apos;s DELETE waits for that DELETE. This
+            assumes write transactions run at READ COMMITTED, the PostgreSQL
+            default.
+          </li>
+          <li>
+            Retries back off from 10 ms, doubling up to 250 ms, until{" "}
+            <code className="font-mono text-foreground/80">lockTimeoutMs</code>. Any open write transaction blocks
+            it, including one a host keeps open across slow work (a merge with
+            a slow resolver, a batch import).{" "}
+            <code className="font-mono text-foreground/80">{"{ blobs: 0, complete: true }"}</code> means nothing to
+            collect; <code className="font-mono text-foreground/80">complete: false</code> with{" "}
+            <code className="font-mono text-foreground/80">batches: 0</code> means it never got the lock, and with{" "}
+            <code className="font-mono text-foreground/80">batches &gt; 0</code> it collected some, then could not
+            get it again.
+          </li>
+          <li>
+            Writers on bash-gres 3.2 or earlier do not take the lock: upgrade
+            every process that writes to the workspace before the first call.
+            It refuses to run inside a transaction (<code className="font-mono text-foreground/80">fs.transaction()</code>, or a
+            handle built on a Drizzle transaction), and a
+            read-only handle gets <code className="font-mono text-foreground/80">EPERM</code>.
+          </li>
+          <li>
+            <code className="font-mono text-foreground/80">rm(path, {"{ deleteVersionRoot: true }"})</code>,{" "}
+            <code className="font-mono text-foreground/80">deleteVersion()</code> and <code className="font-mono text-foreground/80">sweepHistory()</code>{" "}
+            free their blobs themselves only when no other write transaction
+            in the workspace is open; otherwise they leave them for the
+            collector.
+          </li>
+        </ul>
       </section>
 
       <section className="space-y-4">

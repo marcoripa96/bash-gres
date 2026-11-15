@@ -1,4 +1,5 @@
 import type { SqlClient } from "../../types.js";
+import { tryExclusiveBlobGuard } from "../internals/blob-guard.js";
 import { bytesKey } from "../internals/hashes.js";
 import { op, type FilesystemOpsContext } from "./context.js";
 
@@ -80,6 +81,9 @@ async function hardDeleteVersionById<TFs>(
   );
 
   if (candidates.size === 0) return;
+  // Another open write transaction in the workspace may be about to
+  // reference one of these blobs: leave them for collectOrphanBlobs().
+  if (!(await tryExclusiveBlobGuard(tx, ctx.workspaceId))) return;
   // Map keys are the hashes' hex encoding (`bytesKey`).
   const hexHashes = [...candidates.keys()];
   const CHUNK_SIZE = 8000;

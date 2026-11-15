@@ -5,6 +5,65 @@ version and the target, oldest first.
 
 ---
 
+# 3.2 → 3.3
+
+3.3 is additive: no schema change, no migration, no breaking API or default
+changes.
+It adds two opt-in calls, `writeFileWithBase` and `collectOrphanBlobs`, and
+one internal change every write now makes: each write transaction takes a
+per-workspace advisory lock in shared mode (in a statement it already sends,
+so no extra round trip). Shared holders never wait on each other; a write
+waits only while a `collectOrphanBlobs` batch is deleting.
+
+One behaviour changes under concurrency: `rm(path, { deleteVersionRoot: true })`,
+`deleteVersion()` and `sweepHistory()` delete the blobs they free only when no
+other write transaction in the workspace is open at that moment; otherwise
+they leave them (`sweepHistory()` then reports `removedBlobs: 0`) for
+`collectOrphanBlobs()`. Before 3.3 they deleted them regardless, which could
+delete a blob a concurrent write was about to reference.
+
+## Step 1 — upgrade every process that writes before collecting blobs
+
+`collectOrphanBlobs()` relies on every write transaction holding that lock.
+A process still on 3.2 or earlier does not take it, so a collector running
+while such a process writes can delete a blob that process is about to
+reference. Roll out 3.3 to every process that writes to the database before
+the first `collectOrphanBlobs()` call. Nothing else needs ordering:
+`writeFileWithBase` works beside 3.2 writers (they lock the version row the
+same way).
+
+## Step 2 — optional: adopt the new APIs
+
+Ask the user before changing behaviour. Neither is needed to upgrade.
+
+- **Concurrent writers on one file** (an editor and an agent saving the same
+  document): replace read-modify-`writeFile` with
+  `writeFileWithBase(path, content, { base, resolve })`. Keep the text or
+  `contentHash(text)` of what the writer loaded as `base`; pass
+  `textMergeResolver` (or your own `MergeResolver`) to merge, or catch
+  `FsWriteConflictError` to surface the conflict. Name the base by text when
+  you have it: a base by hash can be collected (`FsBaseUnavailableError`).
+  The resolver runs with the version row locked: no slow work, no writes
+  through another handle.
+- **Storage growth from overwrites and deletions**: schedule
+  `collectOrphanBlobs({ minAgeMs })` per workspace (after Step 1), outside
+  any transaction (it refuses to run inside one). `minAgeMs` counts from
+  `created_at`, when the content was first stored, not from when it stopped
+  being referenced: it protects recently created content only. A
+  `writeFileWithBase` base named by hash can be collected whatever
+  `minAgeMs` is, so name bases by text, or retry with the text on
+  `FsBaseUnavailableError`. Re-run when it returns `complete: false` (open
+  write transactions kept the lock past `lockTimeoutMs`).
+- The collector's guarantee (no committed entry references a deleted blob)
+  assumes write transactions run at READ COMMITTED, the PostgreSQL default.
+  A caller transaction at REPEATABLE READ or SERIALIZABLE that reads before
+  bash-gres's first statement in it, then copies an entry (`cp`, `mv`,
+  `merge`) after a collection, can reference a blob the collector removed.
+  Keep such transactions at READ COMMITTED, or do not run the collector
+  while they are open.
+
+---
+
 # 3.1 → 3.2
 
 3.2 is additive: no API or default changes, no data backfill. It adds a

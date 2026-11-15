@@ -4,7 +4,11 @@ import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
 import { setup as coreSetup } from "../../core/setup.js";
 import type postgres from "postgres";
 
-export { FsQuotaError } from "../../core/types.js";
+export {
+  FsQuotaError,
+  FsWriteConflictError,
+  FsBaseUnavailableError,
+} from "../../core/types.js";
 export type {
   VersionDiffCountOptions,
   VersionDiffOptions,
