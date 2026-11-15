@@ -29,6 +29,11 @@ export function bytesKey(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("hex");
 }
 
+/** The inverse of `bytesKey`: hex digits to bytes. */
+export function hexToBytes(hex: string): Uint8Array {
+  return new Uint8Array(Buffer.from(hex, "hex"));
+}
+
 export function blobHashEqual(
   a: Uint8Array | null,
   b: Uint8Array | null,
@@ -41,3 +46,18 @@ export function blobHashEqual(
   }
   return true;
 }
+
+/**
+ * Hex sha256 of `content` as bash-gres stores it: a string's UTF-8 bytes, or
+ * the bytes as given. Equal to `EntryShape.blobHash` for that content, so a
+ * caller holding a file's text can name it as a `writeFileWithBase` base
+ * without reading the file.
+ */
+export function contentHash(content: string | Uint8Array): string {
+  const bytes =
+    typeof content === "string" ? new TextEncoder().encode(content) : content;
+  return bytesKey(sha256(bytes));
+}
+
+/** sha256 of no bytes: what a file stored without a blob hashes as. */
+export const EMPTY_CONTENT_HASH: Uint8Array = sha256(new Uint8Array(0));

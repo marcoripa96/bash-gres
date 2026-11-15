@@ -90,13 +90,49 @@ try {
                 <td className="py-2 pr-4 font-mono">EINVAL</td>
                 <td className="py-2">Invalid argument (e.g. copy into own subdirectory)</td>
               </tr>
-              <tr>
+              <tr className="border-b border-border/30">
                 <td className="py-2 pr-4 font-mono">E2BIG</td>
                 <td className="py-2">File too large to read (exceeds maxReadSize)</td>
+              </tr>
+              <tr className="border-b border-border/30">
+                <td className="py-2 pr-4 font-mono">ECONFLICT</td>
+                <td className="py-2">writeFileWithBase: the file changed since the base and was not resolved (FsWriteConflictError)</td>
+              </tr>
+              <tr>
+                <td className="py-2 pr-4 font-mono">ENOBASE</td>
+                <td className="py-2">writeFileWithBase: the base named by hash is no longer stored (FsBaseUnavailableError)</td>
               </tr>
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
+          FsWriteConflictError & FsBaseUnavailableError
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Thrown by <code className="font-mono text-foreground/80">writeFileWithBase</code>. Both extend{" "}
+          <code className="font-mono text-foreground/80">FsError</code>, and both mean nothing was written.
+        </p>
+        <CodeBlock
+          code={`import { FsWriteConflictError, FsBaseUnavailableError } from "bash-gres"
+
+try {
+  await fs.writeFileWithBase(path, edited, { base: { hash: baseHash } })
+} catch (e) {
+  if (e instanceof FsWriteConflictError) {
+    e.code        // "ECONFLICT"
+    e.reason      // "no-resolver" | "declined" | "not-a-file"
+    e.currentHash // hex sha256 of the stored file (null when absent or not a file)
+    e.currentType // "file" | "directory" | "symlink" | null
+  }
+  if (e instanceof FsBaseUnavailableError) {
+    e.code     // "ENOBASE"
+    e.baseHash // retry with { base: { content: baseText } }
+  }
+}`}
+        />
       </section>
 
       <section className="space-y-4">

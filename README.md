@@ -101,6 +101,28 @@ const stat = await fs.stat("/docs/guide.md")
 const tree = await fs.walk("/docs")
 ```
 
+### Writing from a base
+
+Two writers on one file (an editor saving every second or two, and an agent) each read it, change it and save; `writeFile` lets the second save overwrite the first. `writeFileWithBase` states what the writer started from and compares it with what is stored, atomically:
+
+```ts
+import { contentHash, textMergeResolver, FsWriteConflictError } from "bash-gres"
+
+const r = await fs.writeFileWithBase("/report/document.md", edited, {
+  base: { content: original },  // or { hash: contentHash(original) }, or null: "did not exist"
+  resolve: textMergeResolver,   // optional; the MergeResolver type merge() takes
+})
+r.outcome // "written" | "unchanged" | "merged" | "removed"
+r.hash    // hex sha256 of what is stored now (null after a removal)
+r.content // the stored content when "merged"
+```
+
+- Stored == base: written as given. Stored == incoming: `"unchanged"`. Otherwise the resolver gets `base` (what the writer started from), `ours` (stored now) and `theirs` (incoming), `content: null` for non-UTF-8 sides, and returns `{ content }`, `{ remove: true }`, or `undefined`. With no resolver, or one that declines, nothing is written and it throws `FsWriteConflictError` (`code: "ECONFLICT"`, `reason`, `currentHash`, `currentType`).
+- A directory or symlink at the path is a conflict (`reason: "not-a-file"`). A frozen version is `EPERM` "version is frozen".
+- A base given by hash is read from stored blobs only when the resolver needs its text; if the blob is gone it throws `FsBaseUnavailableError` (`code: "ENOBASE"`): retry with the text.
+- The resolver runs inside the transaction with the version row locked: keep it quick and do not write through another handle from it.
+- Parents, size limit, node count and quota behave as `writeFile`'s; an overwrite keeps the file's mode. A matching base on a file the version owns is one statement, like `writeFile`. Works inside `fs.transaction()`, on handles built from a Drizzle transaction, and on `versioned(path)` handles.
+
 ## Workspace Usage
 
 ```ts
@@ -137,6 +159,19 @@ try {
   }
 }
 ```
+
+Overwrites and deletions leave blobs no entry references. `collectOrphanBlobs()` deletes them (and their chunk rows) within the handle's workspace. Nothing runs it unless you call it:
+
+```ts
+const r = await fs.collectOrphanBlobs({ minAgeMs: 60 * 60 * 1000 }) // batchSize?: 1000, lockTimeoutMs?: 5000
+// { blobs, bytes, batches, complete, pending }
+```
+
+- Age is `fs_blobs.created_at`: when that content was first stored. Writing it again does not refresh it, so a blob first stored long ago can go as soon as nothing references it.
+- Safe beside concurrent writes: every write transaction holds a per-workspace advisory lock shared until commit; each batch takes it exclusive with a try-lock (it never queues, so writers never wait on a waiting collector) and deletes in a fresh statement. A writer arriving during a batch's DELETE waits for it.
+- `complete: false` means open write transactions kept the lock past `lockTimeoutMs` (back-off 10 ms doubling to 250 ms); `batches` says whether any batch ran first. Writers on 3.2 or earlier do not take the lock: upgrade every writing process before the first call.
+- Run it outside any transaction (it refuses inside one). The guarantee assumes write transactions at READ COMMITTED, the PostgreSQL default.
+- `rm(path, { deleteVersionRoot: true })`, `deleteVersion()` and `sweepHistory()` free their blobs themselves only when no other write transaction in the workspace is open; otherwise they leave them for `collectOrphanBlobs()`.
 
 ## Versioning
 

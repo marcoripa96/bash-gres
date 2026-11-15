@@ -1,5 +1,6 @@
 import type { SqlClient } from "../../types.js";
 import { pathToLtree } from "../../path-encoding.js";
+import { tryExclusiveBlobGuard } from "../internals/blob-guard.js";
 import { op } from "./context.js";
 
 /**
@@ -107,6 +108,10 @@ export const removeVersionRoot = op(async (
        WHERE workspace_id = $1 AND id = $2`,
       [ctx.workspaceId, versionRootId],
     );
+
+    // Another open write transaction in the workspace may be about to
+    // reference one of these blobs: leave them for collectOrphanBlobs().
+    if (!(await tryExclusiveBlobGuard(tx, ctx.workspaceId))) return true;
 
     await tx.query(
       `DELETE FROM fs_blobs b

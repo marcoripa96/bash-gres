@@ -28,6 +28,7 @@ import {
   DEFAULT_VERSION,
   FROZEN_VERSION_DETAIL,
 } from "../internals/constants.js";
+import { blobGuardFrom } from "../internals/blob-guard.js";
 
 export class FsStateBase {
   protected client: SqlClient;
@@ -204,16 +205,43 @@ export class FsStateBase {
   protected runInWorkspace<T>(
     client: SqlClient,
     fn: (tx: SqlClient) => Promise<T>,
+    opts: { blobGuard?: boolean } = {},
   ): Promise<T> {
+    // A writable handle's transaction holds the blob guard shared from its
+    // first statement to commit (see BLOB_GUARD_LOCK_KEY): taken before the
+    // transaction reads anything, so a blob hash it reads stays stored until
+    // it commits. Same statement as the settings, so no extra round trip.
+    const guard = (opts.blobGuard ?? true) && this.permissions.write;
     return client.transaction(async (tx) => {
       await tx.query(
         `SELECT
            set_config('app.workspace_id', $1, true),
-           set_config('statement_timeout', $2, true)`,
+           set_config('statement_timeout', $2, true)${
+             guard ? `\n         FROM ${blobGuardFrom("$1")}` : ""
+           }`,
         [this.workspaceId, String(this.statementTimeoutMs)],
       );
       return fn(tx);
     });
+  }
+
+  /**
+   * A workspace transaction without the shared blob guard, for
+   * `collectOrphanBlobs`, which takes the guard exclusive itself (holding it
+   * shared too would make two concurrent collectors exclude each other
+   * forever). Maps SQLSTATE 25006 like `withWorkspace`.
+   */
+  protected async withWorkspaceUnguarded<T>(
+    fn: (tx: SqlClient) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.runInWorkspace(this.client, fn, { blobGuard: false });
+    } catch (e) {
+      if (e instanceof SqlError && e.code === "25006") {
+        throw readOnlyError(e);
+      }
+      throw e;
+    }
   }
 
   /**
@@ -476,8 +504,13 @@ export class FsStateBase {
  * (the `fs_versions_frozen_guard` trigger raises the same SQLSTATE and
  * marks its DETAIL).
  */
-function readOnlyError(e: SqlError): FsError {
+export function readOnlyError(e: SqlError): FsError {
   return e.detail === FROZEN_VERSION_DETAIL
-    ? new FsError("EPERM", "version is frozen", "/")
+    ? frozenVersionError()
     : new FsError("EPERM", "read-only file system", "/");
+}
+
+/** The EPERM every write to a frozen version gets. */
+export function frozenVersionError(): FsError {
+  return new FsError("EPERM", "version is frozen", "/");
 }

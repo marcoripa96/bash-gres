@@ -132,6 +132,22 @@ describe.each(TEST_ADAPTERS)("lock order [%s]", (_name, factory) => {
     expect(await chat.readFile("/same.txt")).toBe("merged\n");
   });
 
+  it("writeFileWithBase of a path the merge writes waits, then sees the merge", async () => {
+    let ours: string | null = null;
+    const chat = await writeDuringMerge(async (w) => {
+      await w.readFile("/dir/doc.md"); // the writer's version id is cached: fast path first
+      return w.writeFileWithBase("/dir/doc.md", "from writer\n", {
+        base: { content: "# Chat title\n\nbody\n" },
+        resolve: (c) => {
+          ours = c.ours!.content;
+          return { content: `${c.ours!.content}${c.theirs!.content}` };
+        },
+      });
+    });
+    expect(ours).toBe("merged\n");
+    expect(await chat.readFile("/dir/doc.md")).toBe("merged\nfrom writer\n");
+  });
+
   it("setup() run from several connections at once does not deadlock", async () => {
     for (let round = 0; round < 3; round++) {
       await Promise.all(Array.from({ length: 6 }, () => setup(client)));

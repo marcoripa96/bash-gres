@@ -103,6 +103,16 @@ export class PgFileSystem extends FsWriteOpsBase {
         return self.historyRetention;
       },
       guardRead: (userPath) => self.guardRead(userPath),
+      guardWrite: (userPath) => {
+        const internal = self.guardWrite(userPath);
+        self.guardExcludedWrite(internal, "open", userPath);
+        return internal;
+      },
+      validateWrite: (internalPath, content) => {
+        self.validateFileSize(content);
+        self.validatePathDepth(internalPath);
+      },
+      fastWriteTarget: () => self.fastWriteTarget(),
       toInternalPath: (userPath) => self.toInternalPath(userPath),
       toUserPath: (internalPath) => self.toUserPath(internalPath),
       buildExcludeClause: (pathExpr, nextParamIdx) =>
@@ -110,6 +120,10 @@ export class PgFileSystem extends FsWriteOpsBase {
       buildMountClause: (pathExpr, nextParamIdx) =>
         self.buildMountClause(pathExpr, nextParamIdx),
       withWorkspace: (fn) => self.withWorkspace(fn),
+      withWorkspaceUnguarded: (fn) => self.withWorkspaceUnguarded(fn),
+      get inTransaction() {
+        return self.txClient !== null;
+      },
       withReadOnlyWorkspace: (fn) => self.withReadOnlyWorkspace(fn),
       transaction: (fn) => self.transaction(fn),
       getVersionRootId: (tx) => self.getVersionRootId(tx),
@@ -128,6 +142,10 @@ export class PgFileSystem extends FsWriteOpsBase {
         self.writeEntryShapes(tx, versionId, writes),
       storeBlob: (tx, internalPath, blob) =>
         self.storeBlob(tx, internalPath, blob),
+      overwriteFile: (tx, versionId, internalPath, blob, mode) =>
+        self.overwriteFile(tx, versionId, internalPath, blob, mode),
+      writeNewFile: (tx, versionId, internalPath, content) =>
+        self.internalWriteFile(tx, versionId, internalPath, content),
       createVersionedFilesystem: (internalPath, version, versionRootId, versionId) => {
         const Ctor = self.constructor as new (
           opts: PgFileSystemOptions,

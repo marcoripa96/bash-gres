@@ -61,6 +61,52 @@ export class FsQuotaError extends FsError {
   }
 }
 
+/**
+ * `writeFileWithBase` refused to write: the file changed since the caller's
+ * base and no resolver settled it, or the path is not a regular file.
+ * Nothing was written.
+ */
+export class FsWriteConflictError extends FsError {
+  constructor(
+    path: string,
+    /**
+     * `"no-resolver"`: no `resolve` option. `"declined"`: the resolver
+     * returned `null`/`undefined`. `"not-a-file"`: the path is a directory or
+     * a symlink.
+     */
+    public readonly reason: "no-resolver" | "declined" | "not-a-file",
+    /** Hex sha256 of the stored file; `null` when absent or not a file. */
+    public readonly currentHash: string | null,
+    /** What is stored at the path; `null` when nothing is. */
+    public readonly currentType: NodeType | null,
+  ) {
+    super(
+      "ECONFLICT",
+      reason === "not-a-file"
+        ? "not a regular file, write"
+        : "file changed since base, write",
+      path,
+    );
+    this.name = "FsWriteConflictError";
+  }
+}
+
+/**
+ * `writeFileWithBase` needed the text of a base named by hash (to call the
+ * resolver) and that blob is no longer stored. Retry with the base's text:
+ * `{ base: { content } }`. Nothing was written.
+ */
+export class FsBaseUnavailableError extends FsError {
+  constructor(
+    path: string,
+    /** The hex sha256 the caller named as its base. */
+    public readonly baseHash: string,
+  ) {
+    super("ENOBASE", "base content no longer stored, write", path);
+    this.name = "FsBaseUnavailableError";
+  }
+}
+
 export interface FsStat {
   isFile: boolean;
   isDirectory: boolean;
@@ -345,6 +391,79 @@ export type MergeResolver = (
   | null
   | undefined
   | Promise<MergeResolution | null | undefined>;
+
+/**
+ * What a `writeFileWithBase` caller started from: the content's hex sha256
+ * (as `EntryShape.blobHash` and `contentHash()` report it), the content
+ * itself, or `null` for "the file did not exist".
+ */
+export type WriteBase =
+  | { hash: string }
+  | { content: string | Uint8Array }
+  | null;
+
+export interface WriteFileWithBaseOptions {
+  base: WriteBase;
+  /**
+   * Settles a change made since `base`. Called with `base` (what the caller
+   * started from), `ours` (what is stored now) and `theirs` (the incoming
+   * content), inside the write's transaction with the version row locked:
+   * keep it quick, and do not write through another handle (it would wait on
+   * the lock this call holds). `textMergeResolver` works here.
+   */
+  resolve?: MergeResolver;
+}
+
+export interface WriteFileWithBaseResult {
+  /**
+   * `"written"`: the stored file was `base`, the content is stored as given.
+   * `"unchanged"`: the stored file already holds the content; nothing written.
+   * `"merged"`: the resolver's content is stored (or was already stored).
+   * `"removed"`: the resolver returned `{ remove: true }`.
+   */
+  outcome: "written" | "unchanged" | "merged" | "removed";
+  /** Hex sha256 of what is stored afterwards; `null` after a removal. */
+  hash: string | null;
+  /** The stored content, only when `outcome` is `"merged"`. */
+  content?: string | Uint8Array;
+}
+
+export interface CollectOrphanBlobsOptions {
+  /**
+   * Only blobs whose `created_at` is older than this many milliseconds go.
+   * `created_at` is when that exact content was first stored in the
+   * workspace; writing the same content again does not refresh it. So this
+   * protects recently created content, not content that stopped being
+   * referenced recently.
+   */
+  minAgeMs: number;
+  /** Candidates deleted per locked batch. Default 1000, at most 10000. */
+  batchSize?: number;
+  /**
+   * How long one batch keeps retrying the exclusive lock while write
+   * transactions in the workspace are open, before the call gives up with
+   * `complete: false`. Default 5000. Retries back off from 10 ms, doubling
+   * to at most 250 ms.
+   */
+  lockTimeoutMs?: number;
+}
+
+export interface CollectOrphanBlobsResult {
+  /** Blobs deleted (their chunk rows went with them). */
+  blobs: number;
+  /** Sum of the deleted blobs' `size_bytes`. */
+  bytes: number;
+  /**
+   * `true`: every candidate was examined. `false`: a batch could not take
+   * the lock within `lockTimeoutMs` because write transactions kept it held;
+   * `blobs`/`bytes` count what earlier batches removed. Run it again later.
+   */
+  complete: boolean;
+  /** Locked batches that ran (each one DELETE). */
+  batches: number;
+  /** Unreferenced, old-enough blobs left behind when `complete` is false. */
+  pending: number;
+}
 
 export interface MergeOptions {
   strategy?: MergeStrategy;

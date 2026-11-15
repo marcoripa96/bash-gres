@@ -3,7 +3,11 @@ import { SqlError } from "../../core/types.js";
 import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
 import { setup as coreSetup } from "../../core/setup.js";
 
-export { FsQuotaError } from "../../core/types.js";
+export {
+  FsQuotaError,
+  FsWriteConflictError,
+  FsBaseUnavailableError,
+} from "../../core/types.js";
 export type {
   VersionDiffCountOptions,
   VersionDiffOptions,

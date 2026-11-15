@@ -9,10 +9,12 @@ import {
 import { validateEmbedding } from "../../search.js";
 import { chunkMarkdown, type MarkdownChunk } from "../../chunking.js";
 import { TOMBSTONE } from "../internals/constants.js";
+import { blobGuardFrom } from "../internals/blob-guard.js";
 import { VERSION_LOCKED_CTE } from "../internals/bump-version.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
 import { prepareBlob, sha256, type PreparedBlob } from "../internals/hashes.js";
 import { FsVisibilityBase } from "./visibility.js";
+import type { FastWriteTarget } from "../ops/context.js";
 
 export class FsWriteOpsBase extends FsVisibilityBase {
   // -- Validation -------------------------------------------------------------
@@ -637,6 +639,82 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     );
   }
 
+  /**
+   * Client and version for a one-statement write (`writeFileWithBase`), or
+   * `null` when the write must take the transactional path. On a transaction
+   * facade the client is its transaction.
+   */
+  protected fastWriteTarget(): FastWriteTarget | null {
+    if (
+      !this.permissions.write ||
+      this.cachedVersionId === null ||
+      this.maxWorkspaceBytes !== undefined ||
+      this.chunking
+    ) {
+      return null;
+    }
+    return {
+      client: this.txClient ?? this.client,
+      versionId: this.cachedVersionId,
+      statementTimeoutMs: this.statementTimeoutMs,
+    };
+  }
+
+  /**
+   * Store `blob` and point the file at `path` to it, keeping `mode`: the
+   * blob insert and the entry upsert in one statement behind the version
+   * lock (VERSION_LOCKED_CTE). The caller knows a regular file is visible at
+   * `path` (own or inherited), so there is no parent or node-count work.
+   */
+  protected async overwriteFile(
+    tx: SqlClient,
+    versionId: number,
+    path: string,
+    blob: PreparedBlob,
+    mode: number,
+  ): Promise<void> {
+    const content = blob.text ?? blob.binary!;
+    this.validateFileSize(content);
+    await this.validateWorkspaceBytes(tx, blob.hash, blob.sizeBytes, path);
+    await tx.query(
+      `WITH version_bump AS (
+         UPDATE fs_versions SET last_write_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING 1
+       ),
+       ${VERSION_LOCKED_CTE},
+       blob_upsert AS (
+         INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
+         SELECT $1, $4, $5, $6, $7 FROM version_locked
+         ON CONFLICT (workspace_id, hash) DO NOTHING
+         RETURNING 1
+       )
+       INSERT INTO fs_entries
+         (workspace_id, version_id, path, blob_hash, node_type,
+          symlink_target, mode, size_bytes, mtime)
+       SELECT $1, $2, $3::ltree, $4, 'file', NULL, $8, $7, now()
+       FROM version_locked
+       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+         blob_hash = EXCLUDED.blob_hash,
+         node_type = EXCLUDED.node_type,
+         symlink_target = NULL,
+         mode = EXCLUDED.mode,
+         size_bytes = EXCLUDED.size_bytes,
+         mtime = now()`,
+      [
+        this.workspaceId,
+        versionId,
+        pathToLtree(path, this.workspaceId),
+        blob.hash,
+        blob.text,
+        blob.binary,
+        blob.sizeBytes,
+        mode,
+      ],
+    );
+    await this.maybeChunk(tx, blob.hash, content);
+  }
+
   protected async tryFastWriteFile(
     path: string,
     content: string | Uint8Array,
@@ -683,6 +761,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            SELECT
              set_config('app.workspace_id', $10, true) AS ws,
              set_config('statement_timeout', $11, true) AS st
+           FROM ${blobGuardFrom("$10")}
          ),
          lookups AS MATERIALIZED (
            SELECT DISTINCT ON (e.path)

@@ -1,4 +1,5 @@
 import type { SweepHistoryResult } from "../../types.js";
+import { tryExclusiveBlobGuard } from "../internals/blob-guard.js";
 import { op } from "./context.js";
 import { copyInheritedEntries } from "./inherited-entries.js";
 
@@ -121,7 +122,12 @@ export const sweepHistory = op(async (
       );
     }
 
-    const deletedBlobs = await tx.query<CountRow>(
+    // Another open write transaction in the workspace may be about to
+    // reference an unreferenced blob: leave them for collectOrphanBlobs().
+    const mayDeleteBlobs = await tryExclusiveBlobGuard(tx, ctx.workspaceId);
+    const deletedBlobs = !mayDeleteBlobs
+      ? { rows: [{ count: 0 }] }
+      : await tx.query<CountRow>(
       `WITH deleted AS (
          DELETE FROM fs_blobs b
          WHERE b.workspace_id = $1

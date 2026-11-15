@@ -26,6 +26,8 @@ import { sweepHistory } from "./sweep-history.js";
 import { versioned } from "./versioned.js";
 import { versionDiff } from "./version-diff.js";
 import { versionDiffStream } from "./version-diff-stream.js";
+import { writeFileWithBase } from "./write-file-with-base.js";
+import { collectOrphanBlobs } from "./collect-orphan-blobs.js";
 
 type DropContext<TOp> = TOp extends (
   ctx: infer _Ctx,
@@ -58,6 +60,8 @@ export interface FilesystemOpsApi<TFs> {
   sweepHistory: DropContext<typeof sweepHistory<TFs>>;
   versionDiff: DropContext<typeof versionDiff<TFs>>;
   versionDiffStream: DropContext<typeof versionDiffStream<TFs>>;
+  writeFileWithBase: DropContext<typeof writeFileWithBase<TFs>>;
+  collectOrphanBlobs: DropContext<typeof collectOrphanBlobs<TFs>>;
 }
 
 type FilesystemOperation<
@@ -120,4 +124,6 @@ export function installFilesystemOps<
   installOp(prototype, "sweepHistory", sweepHistory<TFs>);
   installOp(prototype, "versionDiff", versionDiff<TFs>);
   installOp(prototype, "versionDiffStream", versionDiffStream<TFs>);
+  installOp(prototype, "writeFileWithBase", writeFileWithBase<TFs>);
+  installOp(prototype, "collectOrphanBlobs", collectOrphanBlobs<TFs>);
 }
