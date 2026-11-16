@@ -425,6 +425,64 @@ r.pending  // unreferenced, old-enough blobs left when complete is false`}
 
       <section className="space-y-4">
         <h2 className="text-xl font-semibold tracking-tight">
+          Dropping a Workspace
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          <code className="font-mono text-foreground/80">dropWorkspace(db, workspaceId)</code> deletes everything
+          stored for one workspace: every version root (<code className="font-mono text-foreground/80">/</code> included),
+          every version (frozen, materialized and deleted-but-retained ones
+          too), the ancestor closure, merge records, entries, blobs, chunks
+          and cached chunk embeddings. Retention settings keep nothing. It is a
+          function beside <code className="font-mono text-foreground/80">setup()</code>; each adapter exports a
+          native form.
+        </p>
+        <CodeBlock
+          code={`import { dropWorkspace } from "bash-gres/drizzle"
+
+await db.transaction(async (tx) => {
+  const removed = await dropWorkspace(tx, tenant.workspaceId, {
+    statementTimeoutMs: 60_000, // default
+  })
+  // { versionRoots, versions, versionAncestors, versionMerges,
+  //   entries, blobs, bytes, chunks, chunkEmbeddings }
+  await tx.delete(tenants).where(eq(tenants.id, tenant.id))
+})`}
+        />
+        <ul className="list-disc pl-5 space-y-1 text-sm text-muted-foreground leading-relaxed">
+          <li>
+            Runs in a transaction on <code className="font-mono text-foreground/80">db</code>: a savepoint when{" "}
+            <code className="font-mono text-foreground/80">db</code> is already in one, so it commits or rolls back
+            with the caller&apos;s work. A workspace that does not exist, or was
+            already dropped, returns zero counts.
+          </li>
+          <li>
+            Safe beside concurrent writes: before reading anything it takes the
+            per-workspace lock writers hold shared, exclusive and blocking, and
+            keeps it until the transaction ends. It waits for open write
+            transactions; later ones wait behind it, then fail. Inside a
+            caller&apos;s transaction, call it before writing to the workspace
+            there.
+          </li>
+          <li>
+            RLS: it sets <code className="font-mono text-foreground/80">app.workspace_id</code> and{" "}
+            <code className="font-mono text-foreground/80">statement_timeout</code> for its own statements and
+            restores the caller&apos;s values; a role under the policy needs only
+            SELECT and DELETE on the fs tables. A transaction already scoped
+            to another workspace is refused. It needs READ COMMITTED and
+            throws under REPEATABLE READ or SERIALIZABLE.
+          </li>
+          <li>
+            Handles open on the workspace afterwards read nothing (
+            <code className="font-mono text-foreground/80">ENOENT</code>); their writes,{" "}
+            <code className="font-mono text-foreground/80">fork()</code> and{" "}
+            <code className="font-mono text-foreground/80">freeze()</code> write nothing and fail like a workspace
+            never created, and the handle forgets its cached version. <code className="font-mono text-foreground/80">init()</code> recreates the workspace empty.
+          </li>
+        </ul>
+      </section>
+
+      <section className="space-y-4">
+        <h2 className="text-xl font-semibold tracking-tight">
           Symlinks & Links
         </h2>
         <CodeBlock

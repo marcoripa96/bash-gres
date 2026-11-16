@@ -4,6 +4,20 @@ import { pathToLtree } from "../../path-encoding.js";
 import { DEFAULT_VERSION, TOMBSTONE } from "../internals/constants.js";
 import type { VersionRootRow } from "../internals/rows.js";
 import { FsStateBase } from "./state.js";
+import type { BumpedRow } from "../internals/bump-version.js";
+
+/**
+ * What `getVersionRootId` returns on a writable handle when the `/` root
+ * record does not exist yet: an id no row has (identity ids start at 1).
+ */
+const MISSING_VERSION_ROOT_ID = 0;
+
+/** A call on a version that does not exist (never created, or dropped). */
+function missingVersionError(label: string, workspaceId: string): Error {
+  return new Error(
+    `Version '${label}' does not exist in workspace '${workspaceId}'. Call init() or fork() first.`,
+  );
+}
 
 export class FsVersionBase extends FsStateBase {
   protected async getVersionRootId(tx: SqlClient): Promise<number> {
@@ -28,8 +42,51 @@ export class FsVersionBase extends FsStateBase {
       );
     }
 
+    // A writable handle's reads run outside a transaction, so creating the
+    // `/` root here would commit a root row for a workspace that has no
+    // version (a never-created or dropped one). Only `ensureVersion` (init)
+    // creates it; until then lookups run against an id no row has, and find
+    // nothing. A read-only handle tries the insert as before, which its READ
+    // ONLY transaction refuses (EPERM).
+    if (this.permissions.write) return MISSING_VERSION_ROOT_ID;
     this.cachedVersionRootId = await this.createVersionRootRecord(tx, "/");
     return this.cachedVersionRootId;
+  }
+
+  /** `getVersionRootId`, creating the `/` root record when it is missing. */
+  private async ensureVersionRootId(tx: SqlClient): Promise<number> {
+    const id = await this.getVersionRootId(tx);
+    if (id !== MISSING_VERSION_ROOT_ID) return id;
+    this.cachedVersionRootId = await this.createVersionRootRecord(tx, "/");
+    return this.cachedVersionRootId;
+  }
+
+  /**
+   * The error for a write whose version row is gone, after forgetting the
+   * cached ids: the workspace was
+   * dropped (`dropWorkspace`) or the version root removed after this handle
+   * resolved its version. Forgets the cached ids (on the facade's origin
+   * too), so from here on the handle behaves as on a workspace never
+   * created: calls fail with the same error, and `init()` recreates it.
+   */
+  protected forgetVersionError(): Error {
+    for (const fs of [this, this.originInstance]) {
+      if (!fs) continue;
+      fs.forgetCachedVersion();
+      fs.cachedNodeCount = null;
+    }
+    return missingVersionError(this.versionLabel, this.workspaceId);
+  }
+
+  /** Drop the cached version and root ids; the next call resolves them again. */
+  protected forgetCachedVersion(): void {
+    this.cachedVersionId = null;
+    this.cachedVersionRootId = null;
+  }
+
+  /** Throw `forgetVersionError()` when a write statement's bump hit no row. */
+  protected assertBumped(rows: BumpedRow[]): void {
+    if (Number(rows[0]?.bumped ?? 0) === 0) throw this.forgetVersionError();
   }
 
   protected async createVersionRootRecord(
@@ -174,9 +231,7 @@ export class FsVersionBase extends FsStateBase {
     }
     const id = await this.lookupLabeledVersionId(tx);
     if (id === null) {
-      throw new Error(
-        `Version '${this.versionLabel}' does not exist in workspace '${this.workspaceId}'. Call init() or fork() first.`,
-      );
+      throw missingVersionError(this.versionLabel, this.workspaceId);
     }
     this.cachedVersionId = id;
     return this.cachedVersionId;
@@ -234,7 +289,7 @@ export class FsVersionBase extends FsStateBase {
       this.cachedVersionId = existing;
       return this.cachedVersionId;
     }
-    const versionRootId = await this.getVersionRootId(tx);
+    const versionRootId = await this.ensureVersionRootId(tx);
     const created = await tx.query<{ id: number }>(
       `INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
        VALUES ($1, $2, $3, NULL)

@@ -199,6 +199,31 @@ export interface SetupOptions {
   skipExtensions?: boolean;
 }
 
+export interface DropWorkspaceOptions {
+  /**
+   * `statement_timeout` for each statement of the drop, the wait for open
+   * write transactions included. Default 60000: the deletes cover the whole
+   * workspace.
+   */
+  statementTimeoutMs?: number;
+}
+
+/** Rows `dropWorkspace()` deleted, per table. All zero for a missing workspace. */
+export interface DropWorkspaceResult {
+  versionRoots: number;
+  /** `fs_versions` rows: live, deleted-but-retained, frozen, materialized. */
+  versions: number;
+  versionAncestors: number;
+  versionMerges: number;
+  entries: number;
+  blobs: number;
+  /** Sum of the deleted blobs' `size_bytes`. */
+  bytes: number;
+  chunks: number;
+  /** 0 when vector search was never set up (no `fs_chunk_embeddings` table). */
+  chunkEmbeddings: number;
+}
+
 export interface FsPermissions {
   read?: boolean;
   write?: boolean;

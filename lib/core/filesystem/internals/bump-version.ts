@@ -72,3 +72,28 @@ export function bumpLastWriteAtCte(opts: {
 export const VERSION_LOCKED_CTE = `version_locked AS MATERIALIZED (
     SELECT count(*) AS bumped FROM version_bump
   )`;
+
+/**
+ * A write statement's result row: `bumped` from VERSION_LOCKED_CTE. An
+ * ungated bump that hit no row means the version row is gone (the workspace
+ * was dropped, or the version root removed); the statement's inserts, gated
+ * on `bumped > 0`, wrote nothing. See `assertBumped`.
+ */
+export interface BumpedRow {
+  bumped: number | string;
+}
+
+/**
+ * Result column for a write whose bump is gated on a validation `status`:
+ * whether the version row exists, read only when the status refused the
+ * write (a lazy CASE branch), so a refusal caused by a dropped version can
+ * report that instead of the path error.
+ */
+export function versionExistsColumn(wsParam: string, versionParam: string): string {
+  return `CASE WHEN validation.status = 'ok' THEN true
+                     ELSE EXISTS (
+                       SELECT 1 FROM fs_versions
+                       WHERE workspace_id = ${wsParam} AND id = ${versionParam}
+                     )
+                END AS version_exists`;
+}

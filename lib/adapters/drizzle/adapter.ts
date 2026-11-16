@@ -1,8 +1,17 @@
 import { sql } from "drizzle-orm";
-import type { SqlClient, QueryResult, SqlParam, PgFileSystemOptions, SetupOptions } from "../../core/types.js";
+import type {
+  SqlClient,
+  QueryResult,
+  SqlParam,
+  PgFileSystemOptions,
+  SetupOptions,
+  DropWorkspaceOptions,
+  DropWorkspaceResult,
+} from "../../core/types.js";
 import { SqlError } from "../../core/types.js";
 import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
 import { setup as coreSetup } from "../../core/setup.js";
+import { dropWorkspace as coreDropWorkspace } from "../../core/drop-workspace.js";
 
 /**
  * Structural interface for any Drizzle PG database or transaction.
@@ -210,6 +219,31 @@ export function createDrizzleClient(db: DrizzleDb): SqlClient {
  */
 export function setup(db: DrizzleDb, options?: SetupOptions): Promise<void> {
   return coreSetup(createDrizzleClient(db), options);
+}
+
+// -- dropWorkspace (Drizzle-native) -------------------------------------------
+
+/**
+ * Drizzle-native `dropWorkspace`: delete everything stored for `workspaceId`.
+ * Pass a Drizzle transaction to make the drop part of it (it runs in a
+ * savepoint and commits or rolls back with the transaction).
+ *
+ * @example
+ * ```ts
+ * import { dropWorkspace } from "bash-gres/drizzle";
+ *
+ * await db.transaction(async (tx) => {
+ *   await dropWorkspace(tx, tenant.workspaceId);
+ *   await tx.delete(tenants).where(eq(tenants.id, tenant.id));
+ * });
+ * ```
+ */
+export function dropWorkspace(
+  db: DrizzleDb,
+  workspaceId: string,
+  options?: DropWorkspaceOptions,
+): Promise<DropWorkspaceResult> {
+  return coreDropWorkspace(createDrizzleClient(db), workspaceId, options);
 }
 
 // -- PgFileSystem (Drizzle-native) --------------------------------------------

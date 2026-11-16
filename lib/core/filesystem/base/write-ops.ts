@@ -10,11 +10,23 @@ import { validateEmbedding } from "../../search.js";
 import { chunkMarkdown, type MarkdownChunk } from "../../chunking.js";
 import { TOMBSTONE } from "../internals/constants.js";
 import { blobGuardFrom } from "../internals/blob-guard.js";
-import { VERSION_LOCKED_CTE } from "../internals/bump-version.js";
+import {
+  VERSION_LOCKED_CTE,
+  versionExistsColumn,
+  type BumpedRow,
+} from "../internals/bump-version.js";
 import type { InternalEntryShape } from "../internals/entry-shapes.js";
 import { prepareBlob, sha256, type PreparedBlob } from "../internals/hashes.js";
 import { FsVisibilityBase } from "./visibility.js";
 import type { FastWriteTarget } from "../ops/context.js";
+
+
+/** The result row of the fused validation + blob + entry write. */
+interface FusedWriteRow extends BumpedRow {
+  status: string;
+  inserted: boolean | null;
+  version_exists: boolean;
+}
 
 export class FsWriteOpsBase extends FsVisibilityBase {
   // -- Validation -------------------------------------------------------------
@@ -132,25 +144,28 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     // unconditionally; we only call upsertEntry as part of an actual write,
     // so it's safe to bump regardless of whether the INSERT is a fresh row
     // or an overwrite.
-    await tx.query(
+    const r = await tx.query<BumpedRow>(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
        ),
-       ${VERSION_LOCKED_CTE}
-       INSERT INTO fs_entries
-         (workspace_id, version_id, path, blob_hash, node_type,
-          symlink_target, mode, size_bytes, mtime)
-       SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, now()
-       FROM version_locked
-       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-         blob_hash = EXCLUDED.blob_hash,
-         node_type = EXCLUDED.node_type,
-         symlink_target = EXCLUDED.symlink_target,
-         mode = EXCLUDED.mode,
-         size_bytes = EXCLUDED.size_bytes,
-         mtime = now()`,
+       ${VERSION_LOCKED_CTE},
+       written AS (
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, now()
+         FROM version_locked WHERE bumped > 0
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = EXCLUDED.blob_hash,
+           node_type = EXCLUDED.node_type,
+           symlink_target = EXCLUDED.symlink_target,
+           mode = EXCLUDED.mode,
+           size_bytes = EXCLUDED.size_bytes,
+           mtime = now()
+       )
+       SELECT bumped FROM version_locked`,
       [
         this.workspaceId,
         versionId,
@@ -162,6 +177,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
         sizeBytes,
       ],
     );
+    this.assertBumped(r.rows);
   }
 
   protected async writeTombstone(
@@ -170,26 +186,30 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     posixPath: string,
   ): Promise<void> {
     const lt = pathToLtree(posixPath, this.workspaceId);
-    await tx.query(
+    const r = await tx.query<BumpedRow>(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
        ),
-       ${VERSION_LOCKED_CTE}
-       INSERT INTO fs_entries
-         (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
-       SELECT $1, $2, $3::ltree, NULL, $4, 0, 0, now()
-       FROM version_locked
-       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-         blob_hash = NULL,
-         node_type = $4,
-         symlink_target = NULL,
-         mode = 0,
-         size_bytes = 0,
-         mtime = now()`,
+       ${VERSION_LOCKED_CTE},
+       written AS (
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
+         SELECT $1, $2, $3::ltree, NULL, $4, 0, 0, now()
+         FROM version_locked WHERE bumped > 0
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = NULL,
+           node_type = $4,
+           symlink_target = NULL,
+           mode = 0,
+           size_bytes = 0,
+           mtime = now()
+       )
+       SELECT bumped FROM version_locked`,
       [this.workspaceId, versionId, lt, TOMBSTONE],
     );
+    this.assertBumped(r.rows);
   }
 
   protected async writeTombstonesForVisibleSubtree(
@@ -211,13 +231,14 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       "e.path",
       baseParams.length + 1 + exc.params.length,
     );
-    await tx.query(
+    const r = await tx.query<BumpedRow>(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
        ),
-       ${VERSION_LOCKED_CTE}
+       ${VERSION_LOCKED_CTE},
+       written AS (
        INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type, mode, size_bytes, mtime)
        SELECT $1, $2, visible.path, NULL, $4, 0, 0, now()
@@ -237,16 +258,19 @@ export class FsWriteOpsBase extends FsVisibilityBase {
           ORDER BY e.path, a.depth ASC
         ) visible
        CROSS JOIN version_locked
-       WHERE visible.node_type != $4
+       WHERE visible.node_type != $4 AND version_locked.bumped > 0
        ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
          blob_hash = NULL,
          node_type = $4,
          symlink_target = NULL,
          mode = 0,
           size_bytes = 0,
-          mtime = now()`,
+          mtime = now()
+       )
+       SELECT bumped FROM version_locked`,
       [...baseParams, ...exc.params, ...mnt.params],
     );
+    this.assertBumped(r.rows);
   }
 
   protected async copyVisibleSubtreeEntries(
@@ -271,13 +295,14 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       "e.path",
       baseParams.length + 1 + exc.params.length,
     );
-    await tx.query(
+    const r = await tx.query<BumpedRow>(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
          RETURNING 1
        ),
-       ${VERSION_LOCKED_CTE}
+       ${VERSION_LOCKED_CTE},
+       written AS (
        INSERT INTO fs_entries
          (workspace_id, version_id, path, blob_hash, node_type,
           symlink_target, mode, size_bytes, mtime)
@@ -313,7 +338,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            ORDER BY e.path, a.depth ASC
          ) visible
         CROSS JOIN version_locked
-        WHERE visible.node_type != $5
+        WHERE visible.node_type != $5 AND version_locked.bumped > 0
           ${rootFilter}
         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
           blob_hash = EXCLUDED.blob_hash,
@@ -321,9 +346,12 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          symlink_target = EXCLUDED.symlink_target,
          mode = EXCLUDED.mode,
           size_bytes = EXCLUDED.size_bytes,
-          mtime = now()`,
+          mtime = now()
+       )
+       SELECT bumped FROM version_locked`,
       [...baseParams, ...exc.params, ...mnt.params],
     );
+    this.assertBumped(r.rows);
   }
 
   protected async countVisibleSubtreeNodes(
@@ -427,7 +455,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
         );
       }
 
-      await tx.query(
+      const r = await tx.query<BumpedRow>(
         `WITH input(path, blob_hash, node_type, symlink_target, mode, size_bytes) AS (
            VALUES ${values.join(", ")}
          ),
@@ -436,21 +464,26 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            WHERE workspace_id = $1 AND id = $2
            RETURNING 1
          ),
-         ${VERSION_LOCKED_CTE}
-         INSERT INTO fs_entries
-           (workspace_id, version_id, path, blob_hash, node_type,
-            symlink_target, mode, size_bytes, mtime)
-         SELECT $1, $2, path, blob_hash, node_type, symlink_target, mode, size_bytes, now()
-         FROM input CROSS JOIN version_locked
-         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-           blob_hash = EXCLUDED.blob_hash,
-           node_type = EXCLUDED.node_type,
-           symlink_target = EXCLUDED.symlink_target,
-           mode = EXCLUDED.mode,
-           size_bytes = EXCLUDED.size_bytes,
-           mtime = now()`,
+         ${VERSION_LOCKED_CTE},
+         written AS (
+           INSERT INTO fs_entries
+             (workspace_id, version_id, path, blob_hash, node_type,
+              symlink_target, mode, size_bytes, mtime)
+           SELECT $1, $2, path, blob_hash, node_type, symlink_target, mode, size_bytes, now()
+           FROM input CROSS JOIN version_locked
+           WHERE version_locked.bumped > 0
+           ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+             blob_hash = EXCLUDED.blob_hash,
+             node_type = EXCLUDED.node_type,
+             symlink_target = EXCLUDED.symlink_target,
+             mode = EXCLUDED.mode,
+             size_bytes = EXCLUDED.size_bytes,
+             mtime = now()
+         )
+         SELECT bumped FROM version_locked`,
         params,
       );
+      this.assertBumped(r.rows);
     }
   }
 
@@ -676,7 +709,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     const content = blob.text ?? blob.binary!;
     this.validateFileSize(content);
     await this.validateWorkspaceBytes(tx, blob.hash, blob.sizeBytes, path);
-    await tx.query(
+    const r = await tx.query<BumpedRow>(
       `WITH version_bump AS (
          UPDATE fs_versions SET last_write_at = now()
          WHERE workspace_id = $1 AND id = $2
@@ -685,22 +718,25 @@ export class FsWriteOpsBase extends FsVisibilityBase {
        ${VERSION_LOCKED_CTE},
        blob_upsert AS (
          INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
-         SELECT $1, $4, $5, $6, $7 FROM version_locked
+         SELECT $1, $4, $5, $6, $7 FROM version_locked WHERE bumped > 0
          ON CONFLICT (workspace_id, hash) DO NOTHING
          RETURNING 1
+       ),
+       written AS (
+         INSERT INTO fs_entries
+           (workspace_id, version_id, path, blob_hash, node_type,
+            symlink_target, mode, size_bytes, mtime)
+         SELECT $1, $2, $3::ltree, $4, 'file', NULL, $8, $7, now()
+         FROM version_locked WHERE bumped > 0
+         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+           blob_hash = EXCLUDED.blob_hash,
+           node_type = EXCLUDED.node_type,
+           symlink_target = NULL,
+           mode = EXCLUDED.mode,
+           size_bytes = EXCLUDED.size_bytes,
+           mtime = now()
        )
-       INSERT INTO fs_entries
-         (workspace_id, version_id, path, blob_hash, node_type,
-          symlink_target, mode, size_bytes, mtime)
-       SELECT $1, $2, $3::ltree, $4, 'file', NULL, $8, $7, now()
-       FROM version_locked
-       ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-         blob_hash = EXCLUDED.blob_hash,
-         node_type = EXCLUDED.node_type,
-         symlink_target = NULL,
-         mode = EXCLUDED.mode,
-         size_bytes = EXCLUDED.size_bytes,
-         mtime = now()`,
+       SELECT bumped FROM version_locked`,
       [
         this.workspaceId,
         versionId,
@@ -712,6 +748,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
         mode,
       ],
     );
+    this.assertBumped(r.rows);
     await this.maybeChunk(tx, blob.hash, content);
   }
 
@@ -753,10 +790,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     const binaryData = isText ? null : (content as Uint8Array);
 
     try {
-      const result = await this.client.query<{
-        status: string;
-        inserted: boolean | null;
-      }>(
+      const result = await this.client.query<FusedWriteRow>(
         `WITH _ws AS MATERIALIZED (
            SELECT
              set_config('app.workspace_id', $10, true) AS ws,
@@ -805,7 +839,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          blob_upsert AS (
            INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
            SELECT $1, $2, $3, $4, $5
-           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked
+           WHERE status = 'ok' AND bumped > 0
            ON CONFLICT (workspace_id, hash) DO NOTHING
            RETURNING 1
          ),
@@ -814,7 +849,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              (workspace_id, version_id, path, blob_hash, node_type,
               symlink_target, mode, size_bytes, mtime)
            SELECT $1, $6, $8::ltree, $2, 'file', NULL, $9, $5, now()
-           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked
+           WHERE status = 'ok' AND bumped > 0
            ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
              blob_hash = EXCLUDED.blob_hash,
              node_type = EXCLUDED.node_type,
@@ -825,8 +861,10 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            RETURNING (xmax = 0) AS inserted
          )
          SELECT validation.status,
-                (SELECT inserted FROM entry_upsert) AS inserted
-         FROM validation`,
+                (SELECT inserted FROM entry_upsert) AS inserted,
+                version_locked.bumped,
+                ${versionExistsColumn("$1", "$6")}
+         FROM validation CROSS JOIN version_locked`,
         [
           this.workspaceId,
           hash,
@@ -846,7 +884,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       if (row.status !== "ok" || row.inserted === false) {
         this.decrementCachedNodeCount();
       }
-      return row;
+      this.assertFusedWriteVersion(row);
+      return { status: row.status, inserted: row.inserted };
     } catch (e) {
       this.decrementCachedNodeCount();
       if (e instanceof SqlError && e.code === "25006") {
@@ -882,9 +921,9 @@ export class FsWriteOpsBase extends FsVisibilityBase {
     // throws we never run the fused query.
     await this.validateNodeCount(tx);
 
-    let result: { rows: Array<{ status: string; inserted: boolean | null }> };
+    let result: { rows: FusedWriteRow[] };
     try {
-      result = await tx.query<{ status: string; inserted: boolean | null }>(
+      result = await tx.query<FusedWriteRow>(
         `WITH lookups AS MATERIALIZED (
            SELECT DISTINCT ON (e.path)
              e.path AS path,
@@ -925,7 +964,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          blob_upsert AS (
            INSERT INTO fs_blobs (workspace_id, hash, content, binary_data, size_bytes)
            SELECT $1, $2, $3, $4, $5
-           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked
+           WHERE status = 'ok' AND bumped > 0
            ON CONFLICT (workspace_id, hash) DO NOTHING
            RETURNING 1
          ),
@@ -934,7 +974,8 @@ export class FsWriteOpsBase extends FsVisibilityBase {
              (workspace_id, version_id, path, blob_hash, node_type,
               symlink_target, mode, size_bytes, mtime)
            SELECT $1, $6, $8::ltree, $2, 'file', NULL, $9, $5, now()
-           FROM validation CROSS JOIN version_locked WHERE status = 'ok'
+           FROM validation CROSS JOIN version_locked
+           WHERE status = 'ok' AND bumped > 0
            ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
              blob_hash = EXCLUDED.blob_hash,
              node_type = EXCLUDED.node_type,
@@ -945,8 +986,10 @@ export class FsWriteOpsBase extends FsVisibilityBase {
            RETURNING (xmax = 0) AS inserted
          )
          SELECT validation.status,
-                (SELECT inserted FROM entry_upsert) AS inserted
-         FROM validation`,
+                (SELECT inserted FROM entry_upsert) AS inserted,
+                version_locked.bumped,
+                ${versionExistsColumn("$1", "$6")}
+         FROM validation CROSS JOIN version_locked`,
         [
           this.workspaceId,
           hash,
@@ -971,7 +1014,18 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       // increment so the cached count stays accurate.
       this.decrementCachedNodeCount();
     }
-    return row;
+    this.assertFusedWriteVersion(row);
+    return { status: row.status, inserted: row.inserted };
+  }
+
+  /**
+   * After a fused write: throw when the version row is gone. A validated
+   * write's gated inserts then wrote nothing (`bumped` 0), and a refusal
+   * (no parent) comes from the missing version, not the path.
+   */
+  private assertFusedWriteVersion(row: FusedWriteRow): void {
+    if (row.status === "ok") this.assertBumped([row]);
+    else if (row.version_exists === false) throw this.forgetVersionError();
   }
 
   private async internalMkdirForWriteParent(
@@ -997,7 +1051,9 @@ export class FsWriteOpsBase extends FsVisibilityBase {
       return `($${pathParam}::ltree, $${ordParam}::int)`;
     });
 
-    const r = await tx.query<{ status: string; bad_path: string | null }>(
+    const r = await tx.query<
+      BumpedRow & { status: string; bad_path: string | null }
+    >(
       `WITH wanted(path, ord) AS (
          VALUES ${values.join(", ")}
        ),
@@ -1037,6 +1093,7 @@ export class FsWriteOpsBase extends FsVisibilityBase {
          CROSS JOIN version_locked
          LEFT JOIN visible v ON v.path = w.path
          WHERE NOT EXISTS (SELECT 1 FROM invalid)
+           AND version_locked.bumped > 0
            AND COALESCE(v.node_type, 'missing') != 'directory'
          ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
            blob_hash = NULL,
@@ -1049,11 +1106,13 @@ export class FsWriteOpsBase extends FsVisibilityBase {
        )
        SELECT
          CASE WHEN EXISTS (SELECT 1 FROM invalid) THEN 'enotdir' ELSE 'ok' END AS status,
-         (SELECT path::text FROM invalid) AS bad_path`,
+         (SELECT path::text FROM invalid) AS bad_path,
+         (SELECT bumped FROM version_locked) AS bumped`,
       [...params, 0o755],
     );
 
     const row = r.rows[0]!;
+    if (row.status === "ok") this.assertBumped(r.rows);
     if (row.status === "enotdir") {
       throw new FsError(
         "ENOTDIR",

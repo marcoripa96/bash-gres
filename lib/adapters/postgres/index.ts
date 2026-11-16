@@ -1,7 +1,16 @@
-import type { SqlClient, QueryResult, SqlParam, SetupOptions, PgFileSystemOptions } from "../../core/types.js";
+import type {
+  SqlClient,
+  QueryResult,
+  SqlParam,
+  SetupOptions,
+  PgFileSystemOptions,
+  DropWorkspaceOptions,
+  DropWorkspaceResult,
+} from "../../core/types.js";
 import { SqlError } from "../../core/types.js";
 import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
 import { setup as coreSetup } from "../../core/setup.js";
+import { dropWorkspace as coreDropWorkspace } from "../../core/drop-workspace.js";
 import type postgres from "postgres";
 
 export {
@@ -10,6 +19,8 @@ export {
   FsBaseUnavailableError,
 } from "../../core/types.js";
 export type {
+  DropWorkspaceOptions,
+  DropWorkspaceResult,
   VersionDiffCountOptions,
   VersionDiffOptions,
   VersionDiffStreamOptions,
@@ -159,6 +170,18 @@ export function setup<TTypes extends Record<string, unknown> = Record<string, un
   options?: SetupOptions,
 ): Promise<void> {
   return coreSetup(createPostgresClient(sql), options);
+}
+
+/**
+ * postgres.js-native `dropWorkspace`: delete everything stored for
+ * `workspaceId`, in its own transaction on `sql`.
+ */
+export function dropWorkspace<TTypes extends Record<string, unknown> = Record<string, unknown>>(
+  sql: postgres.Sql<TTypes>,
+  workspaceId: string,
+  options?: DropWorkspaceOptions,
+): Promise<DropWorkspaceResult> {
+  return coreDropWorkspace(createPostgresClient(sql), workspaceId, options);
 }
 
 // -- PgFileSystem (postgres.js-native) ----------------------------------------
