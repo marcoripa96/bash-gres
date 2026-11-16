@@ -26,9 +26,12 @@ export async function freezeVersion<TFs>(
 ): Promise<void> {
   // The row lock waits for in-flight writes to this version (each holds it
   // through its last_write_at bump); writes queued behind it see frozen_at.
-  await tx.query(
+  const r = await tx.query(
     `UPDATE fs_versions SET frozen_at = COALESCE(frozen_at, now())
-     WHERE workspace_id = $1 AND id = $2`,
+     WHERE workspace_id = $1 AND id = $2
+     RETURNING 1`,
     [ctx.workspaceId, versionId],
   );
+  // No row: the version is gone (its workspace was dropped).
+  if (r.rows.length === 0) throw ctx.forgetVersionError();
 }

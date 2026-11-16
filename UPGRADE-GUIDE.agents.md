@@ -5,6 +5,61 @@ version and the target, oldest first.
 
 ---
 
+# 3.3 → next (unreleased)
+
+Additive: no schema change, no migration, no change to any option default.
+It adds `dropWorkspace(db, workspaceId, { statementTimeoutMs? })` beside
+`setup()` (also exported from `bash-gres/drizzle`, `bash-gres/postgres` and
+`bash-gres/node-postgres`), which deletes every row stored for one
+workspace inside the caller's transaction.
+
+Two behaviours change, both for handles whose cached version no longer
+exists (workspace dropped, or version root removed by another handle):
+
+- Writes, `fork()` and `freeze()` through such a handle used to insert rows
+  under the deleted version id (invisible, never collected), fail with a
+  foreign-key error (`fork`), or do nothing (`freeze`). They now write
+  nothing and throw `Version '<label>' does not exist in workspace '<id>'. Call init() or fork()
+  first.`, the error a never-created workspace gives, and the handle forgets
+  its cached ids. `init()` re-resolves instead of reusing cached ids, so on a
+  dropped workspace it recreates it empty.
+- A read through a writable handle on a workspace with no `/` root (never
+  initialized, or dropped) used to commit an empty `fs_version_roots` row
+  before failing. It now fails the same way without writing.
+
+## Step 1 — nothing required
+
+No code change is needed to upgrade. If code catches errors from writes on a
+handle whose workspace may have been removed, expect the "does not exist"
+error above where it used to succeed silently.
+
+## Step 2 — optional: remove a tenant with `dropWorkspace`
+
+Ask the user before adopting it. Replace SQL that deletes fs tables by
+`workspace_id` (or a loop of `rm(..., { deleteVersionRoot: true })` that
+leaves the `/` root behind) with one call in the tenant-delete transaction:
+
+```ts
+import { dropWorkspace } from "bash-gres/drizzle"
+await db.transaction(async (tx) => {
+  const removed = await dropWorkspace(tx, workspaceId)
+  await tx.delete(tenants).where(eq(tenants.id, tenantId))
+})
+```
+
+- Call it before the same transaction writes to that workspace through a
+  handle (row locks taken earlier can deadlock with a writer it waits for).
+- The transaction must be READ COMMITTED (it throws otherwise).
+- Under RLS the role needs SELECT and DELETE on the fs tables, nothing set
+  beforehand: it sets `app.workspace_id` itself and restores the caller's
+  value afterwards. It refuses a transaction whose `app.workspace_id` is
+  already set to a different workspace.
+- Every process that writes to the workspace should run this version, so a
+  writer that was queued behind the drop fails instead of re-inserting rows
+  under the dropped version id.
+
+---
+
 # 3.2 → 3.3
 
 3.3 is additive: no schema change, no migration, no breaking API or default

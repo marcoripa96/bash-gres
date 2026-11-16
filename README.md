@@ -173,6 +173,27 @@ const r = await fs.collectOrphanBlobs({ minAgeMs: 60 * 60 * 1000 }) // batchSize
 - Run it outside any transaction (it refuses inside one). The guarantee assumes write transactions at READ COMMITTED, the PostgreSQL default.
 - `rm(path, { deleteVersionRoot: true })`, `deleteVersion()` and `sweepHistory()` free their blobs themselves only when no other write transaction in the workspace is open; otherwise they leave them for `collectOrphanBlobs()`.
 
+### Dropping a workspace
+
+`dropWorkspace(db, workspaceId)` deletes everything stored for one workspace: every version root (`/` included), every version (frozen, materialized and deleted-but-retained ones too), the ancestor closure, merge records, entries, blobs, chunks and cached chunk embeddings. Retention settings keep nothing. It is a function beside `setup()`, not a handle method, and each adapter exports a native form:
+
+```ts
+import { dropWorkspace } from "bash-gres/drizzle"
+
+await db.transaction(async (tx) => {
+  const removed = await dropWorkspace(tx, tenant.workspaceId) // { statementTimeoutMs?: 60000 }
+  // { versionRoots, versions, versionAncestors, versionMerges, entries, blobs, bytes, chunks, chunkEmbeddings }
+  await tx.delete(tenants).where(eq(tenants.id, tenant.id))
+})
+```
+
+- Runs in a transaction on `db`: a savepoint when `db` is already in one, so it commits or rolls back with the caller's work.
+- Idempotent: a workspace that does not exist, or was already dropped, returns zero counts.
+- Safe beside concurrent writes: it takes the per-workspace lock writers hold shared, exclusive and blocking, before it reads anything, and keeps it until the transaction ends. It waits for open write transactions; later ones wait behind it. Inside a caller's transaction, call it before writing to the workspace there.
+- RLS: it sets `app.workspace_id` (and `statement_timeout`) for its own statements and restores the caller's values. A role under the `workspace_isolation` policy needs only SELECT and DELETE on the fs tables. A transaction whose `app.workspace_id` is already set to another workspace is refused, so a connection scoped to one tenant cannot drop another.
+- Needs READ COMMITTED (it throws under REPEATABLE READ or SERIALIZABLE).
+- Handles open on the workspace afterwards: reads find nothing (`ENOENT`, where a never-created workspace throws); writes, `fork()` and `freeze()` write nothing and fail like a workspace never created (`Version 'main' does not exist in workspace ...`), and the handle forgets its cached version, after which it behaves exactly as on a never-created workspace; `init()` recreates the workspace empty.
+
 ## Versioning
 
 Each `PgFileSystem` instance is bound to a `version` (default `"main"`) inside an active **version root**. By default the version root is `/`, preserving workspace-wide versioning. You can also make any non-nested directory versionable and work through a scoped facade rooted at that directory.

@@ -69,6 +69,11 @@ export interface FilesystemOpsContext<TFs> {
   ): Promise<T>;
 
   getVersionRootId(tx: SqlClient): Promise<number>;
+  /**
+   * The error for an op whose version row is gone (workspace dropped or
+   * version root removed after the handle resolved it); resets the cache.
+   */
+  forgetVersionError(): Error;
   getCurrentVersionId(tx: SqlClient): Promise<number>;
   requireVersionIdByLabel(tx: SqlClient, label: string): Promise<number>;
   lockVersions(tx: SqlClient, versionIds: number[]): Promise<void>;

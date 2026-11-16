@@ -22,18 +22,31 @@ export const fork = op(async (
       // executes exactly once even if unreferenced, so the two ancestor
       // INSERTs always run; they each cross-join `new_version`, so when
       // `existing` already has a row `new_version` returns zero rows and
-      // both ancestor INSERTs become no-ops.
-      const r = await tx.query<{ new_id: number | null; existing_id: number | null }>(
+      // both ancestor INSERTs become no-ops. `parent` takes the lock the
+      // parent_version_id FK check would; a parent row that is gone (the
+      // workspace was dropped after this handle cached its id) yields no row
+      // and no insert, instead of an FK violation.
+      const r = await tx.query<{
+        new_id: number | null;
+        existing_id: number | null;
+        parent_found: boolean;
+      }>(
         `WITH existing AS (
             SELECT id FROM fs_versions
             WHERE workspace_id = $1 AND version_root_id = $2 AND label = $3
               AND deleted_at IS NULL
             LIMIT 1
           ),
+         parent AS MATERIALIZED (
+           SELECT id FROM fs_versions
+           WHERE workspace_id = $1 AND id = $4
+           FOR KEY SHARE
+         ),
          new_version AS (
            INSERT INTO fs_versions (workspace_id, version_root_id, label, parent_version_id)
            SELECT $1, $2, $3, $4
            WHERE NOT EXISTS (SELECT 1 FROM existing)
+             AND EXISTS (SELECT 1 FROM parent)
            RETURNING id
          ),
          parent_ancestors AS (
@@ -51,10 +64,12 @@ export const fork = op(async (
          )
          SELECT
            (SELECT id FROM new_version)::bigint AS new_id,
-           (SELECT id FROM existing)::bigint AS existing_id`,
+           (SELECT id FROM existing)::bigint AS existing_id,
+           EXISTS (SELECT 1 FROM parent) AS parent_found`,
         [ctx.workspaceId, versionRootId, newVersion, parentId],
       );
       const row = r.rows[0]!;
+      if (!row.parent_found) throw ctx.forgetVersionError();
       if (row.existing_id !== null) {
         throw new Error(`fork: version '${newVersion}' already exists`);
       }

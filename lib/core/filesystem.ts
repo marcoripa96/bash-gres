@@ -36,7 +36,10 @@ import {
   type ChunkSearchOpts,
 } from "./search.js";
 import { FsWriteOpsBase } from "./filesystem/base/write-ops.js";
-import { VERSION_LOCKED_CTE } from "./filesystem/internals/bump-version.js";
+import {
+  VERSION_LOCKED_CTE,
+  type BumpedRow,
+} from "./filesystem/internals/bump-version.js";
 import { Coalescer } from "./filesystem/internals/coalescer.js";
 import type {
   ChunkRow,
@@ -127,6 +130,7 @@ export class PgFileSystem extends FsWriteOpsBase {
       withReadOnlyWorkspace: (fn) => self.withReadOnlyWorkspace(fn),
       transaction: (fn) => self.transaction(fn),
       getVersionRootId: (tx) => self.getVersionRootId(tx),
+      forgetVersionError: () => self.forgetVersionError(),
       getCurrentVersionId: (tx) => self.getCurrentVersionId(tx),
       requireVersionIdByLabel: (tx, label) =>
         self.requireVersionIdByLabel(tx, label),
@@ -207,6 +211,9 @@ export class PgFileSystem extends FsWriteOpsBase {
 
   async init(): Promise<void> {
     if (await this.isAlreadyInitialized()) return;
+    // Resolve again rather than trust ids cached before the workspace may
+    // have been dropped: init() on a dropped workspace recreates it.
+    this.forgetCachedVersion();
     await this.withWorkspace(async (tx) => {
       const versionId = await this.ensureVersion(tx);
       const rootLtree = pathToLtree(this.versionRootPath, this.workspaceId);
@@ -1580,25 +1587,28 @@ export class PgFileSystem extends FsWriteOpsBase {
       const node = await this.resolveEntryFollowSymlink(tx, internal);
       const lt = pathToLtree(ltreeToPath(node.path), this.workspaceId);
       // Insert/update entry at current version preserving everything but mtime.
-      await tx.query(
+      const r = await tx.query<BumpedRow>(
         `WITH version_bump AS (
            UPDATE fs_versions SET last_write_at = now()
            WHERE workspace_id = $1 AND id = $2
            RETURNING 1
          ),
-         ${VERSION_LOCKED_CTE}
-         INSERT INTO fs_entries
-           (workspace_id, version_id, path, blob_hash, node_type,
-            symlink_target, mode, size_bytes, mtime)
-         SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, $9
-         FROM version_locked
-         ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
-           blob_hash = EXCLUDED.blob_hash,
-           node_type = EXCLUDED.node_type,
-           symlink_target = EXCLUDED.symlink_target,
-           mode = EXCLUDED.mode,
-           size_bytes = EXCLUDED.size_bytes,
-           mtime = EXCLUDED.mtime`,
+         ${VERSION_LOCKED_CTE},
+         written AS (
+           INSERT INTO fs_entries
+             (workspace_id, version_id, path, blob_hash, node_type,
+              symlink_target, mode, size_bytes, mtime)
+           SELECT $1, $2, $3::ltree, $4, $5, $6, $7, $8, $9
+           FROM version_locked WHERE bumped > 0
+           ON CONFLICT (workspace_id, version_id, path) DO UPDATE SET
+             blob_hash = EXCLUDED.blob_hash,
+             node_type = EXCLUDED.node_type,
+             symlink_target = EXCLUDED.symlink_target,
+             mode = EXCLUDED.mode,
+             size_bytes = EXCLUDED.size_bytes,
+             mtime = EXCLUDED.mtime
+         )
+         SELECT bumped FROM version_locked`,
         [
           this.workspaceId,
           versionId,
@@ -1611,6 +1621,7 @@ export class PgFileSystem extends FsWriteOpsBase {
           mtime,
         ],
       );
+      this.assertBumped(r.rows);
     });
   }
 

@@ -102,7 +102,9 @@ export const writeFileWithBase = op(async function writeFileWithBase<TFs>(
 
   return ctx.withWorkspace(async (tx) => {
     const versionId = await ctx.getCurrentVersionId(tx);
-    await lockVersionAndAncestors(tx, ctx.workspaceId, versionId);
+    if (!(await lockVersionAndAncestors(tx, ctx.workspaceId, versionId))) {
+      throw ctx.forgetVersionError();
+    }
 
     // With the version row locked, the one-statement write settles a base
     // that matches a file this version owns (its xmin check passes: the row
@@ -256,12 +258,13 @@ async function store<TFs>(
  * SHARE (a write to a fork's parent can change the inherited file too). One
  * statement; the per-row LATERAL keeps the id order while mixing lock
  * strengths. A frozen version is refused here, before any comparison.
+ * `false` when the version row is gone (its workspace was dropped).
  */
 async function lockVersionAndAncestors(
   tx: SqlClient,
   workspaceId: string,
   versionId: number,
-): Promise<void> {
+): Promise<boolean> {
   const r = await tx.query<{ frozen: boolean | null }>(
     `SELECT own.frozen
      FROM (
@@ -286,6 +289,8 @@ async function lockVersionAndAncestors(
   if (r.rows.some((row) => row.frozen === true)) {
     throw frozenVersionError();
   }
+  // `own` is non-null only on the version's own (locked) row.
+  return r.rows.some((row) => row.frozen !== null);
 }
 
 interface CurrentState {

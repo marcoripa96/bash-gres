@@ -1,5 +1,6 @@
 export { PgFileSystem } from "./filesystem.js";
 export { setup } from "./setup.js";
+export { dropWorkspace } from "./drop-workspace.js";
 export {
   FsError,
   FsQuotaError,
@@ -22,6 +23,8 @@ export {
   type ReadFileLinesOptions,
   type ReadFileLinesResult,
   type SetupOptions,
+  type DropWorkspaceOptions,
+  type DropWorkspaceResult,
   type FsPermissions,
   type MountSpec,
   type PgFileSystemOptions,

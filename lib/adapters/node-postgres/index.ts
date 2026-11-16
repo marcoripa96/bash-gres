@@ -1,7 +1,16 @@
-import type { SqlClient, QueryResult, SqlParam, SetupOptions, PgFileSystemOptions } from "../../core/types.js";
+import type {
+  SqlClient,
+  QueryResult,
+  SqlParam,
+  SetupOptions,
+  PgFileSystemOptions,
+  DropWorkspaceOptions,
+  DropWorkspaceResult,
+} from "../../core/types.js";
 import { SqlError } from "../../core/types.js";
 import { PgFileSystem as CorePgFileSystem } from "../../core/filesystem.js";
 import { setup as coreSetup } from "../../core/setup.js";
+import { dropWorkspace as coreDropWorkspace } from "../../core/drop-workspace.js";
 
 export {
   FsQuotaError,
@@ -9,6 +18,8 @@ export {
   FsBaseUnavailableError,
 } from "../../core/types.js";
 export type {
+  DropWorkspaceOptions,
+  DropWorkspaceResult,
   VersionDiffCountOptions,
   VersionDiffOptions,
   VersionDiffStreamOptions,
@@ -149,6 +160,18 @@ export function createNodePgClient(pool: NodePgPool): SqlClient {
  */
 export function setup(pool: NodePgPool, options?: SetupOptions): Promise<void> {
   return coreSetup(createNodePgClient(pool), options);
+}
+
+/**
+ * node-postgres-native `dropWorkspace`: delete everything stored for
+ * `workspaceId`, in its own transaction on a client from `pool`.
+ */
+export function dropWorkspace(
+  pool: NodePgPool,
+  workspaceId: string,
+  options?: DropWorkspaceOptions,
+): Promise<DropWorkspaceResult> {
+  return coreDropWorkspace(createNodePgClient(pool), workspaceId, options);
 }
 
 // -- PgFileSystem (node-postgres-native) --------------------------------------
