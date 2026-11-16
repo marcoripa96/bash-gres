@@ -5,7 +5,7 @@ version and the target, oldest first.
 
 ---
 
-# 3.3 → next (unreleased)
+# 3.3 → 3.4
 
 Additive: no schema change, no migration, no change to any option default.
 It adds `dropWorkspace(db, workspaceId, { statementTimeoutMs? })` beside
